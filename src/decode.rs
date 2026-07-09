@@ -1,0 +1,230 @@
+use std::io::Read;
+
+use bzip2::read::BzDecoder;
+use flate2::read::ZlibDecoder;
+
+use crate::{EwfError, Result};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChunkEncoding {
+    Raw,
+    Zlib,
+    Bzip2,
+    PatternFill(u64),
+}
+
+pub(crate) fn decode_chunk(
+    encoded: &[u8],
+    encoding: ChunkEncoding,
+    logical_size: usize,
+) -> Result<Vec<u8>> {
+    match encoding {
+        ChunkEncoding::Raw => {
+            if encoded.len() < logical_size {
+                return Err(EwfError::Malformed(format!(
+                    "raw chunk has {} bytes, expected at least {logical_size}",
+                    encoded.len()
+                )));
+            }
+            Ok(encoded[..logical_size].to_vec())
+        }
+        ChunkEncoding::Zlib => decode_compressed(ZlibDecoder::new(encoded), logical_size),
+        ChunkEncoding::Bzip2 => decode_compressed(BzDecoder::new(encoded), logical_size),
+        ChunkEncoding::PatternFill(pattern) => Ok(pattern_fill(pattern, logical_size)),
+    }
+}
+
+pub(crate) fn validate_encoded_size(
+    encoded_size: u64,
+    chunk_size: u64,
+    encoding: ChunkEncoding,
+) -> Result<()> {
+    if matches!(encoding, ChunkEncoding::PatternFill(_)) {
+        return Ok(());
+    }
+    if encoded_size == 0 {
+        return Err(EwfError::Malformed("chunk data size is zero".into()));
+    }
+
+    let cap = match encoding {
+        ChunkEncoding::Raw => raw_chunk_size_cap(chunk_size)?,
+        ChunkEncoding::Zlib => zlib_compressed_chunk_size_cap(chunk_size)?,
+        ChunkEncoding::Bzip2 => bzip2_compressed_chunk_size_cap(chunk_size)?,
+        ChunkEncoding::PatternFill(_) => unreachable!("handled above"),
+    };
+    if encoded_size > cap {
+        return Err(EwfError::Malformed(format!(
+            "encoded chunk size {encoded_size} exceeds maximum {cap}"
+        )));
+    }
+    Ok(())
+}
+
+fn decode_compressed(mut reader: impl Read, logical_size: usize) -> Result<Vec<u8>> {
+    let limit = logical_size
+        .checked_add(1)
+        .ok_or_else(|| EwfError::Malformed("logical chunk size overflow".into()))?;
+    let mut decoded = Vec::with_capacity(logical_size);
+    reader
+        .by_ref()
+        .take(limit as u64)
+        .read_to_end(&mut decoded)
+        .map_err(|err| EwfError::Malformed(format!("chunk decompression failed: {err}")))?;
+
+    if decoded.len() != logical_size {
+        return Err(EwfError::Malformed(format!(
+            "decoded chunk has {} bytes, expected {logical_size}",
+            decoded.len()
+        )));
+    }
+    Ok(decoded)
+}
+
+fn pattern_fill(pattern: u64, logical_size: usize) -> Vec<u8> {
+    let pattern = pattern.to_le_bytes();
+    let mut out = vec![0; logical_size];
+    let mut chunks = out.chunks_exact_mut(pattern.len());
+    for chunk in &mut chunks {
+        chunk.copy_from_slice(&pattern);
+    }
+    let remainder = chunks.into_remainder();
+    remainder.copy_from_slice(&pattern[..remainder.len()]);
+    out
+}
+
+pub(crate) fn zlib_compressed_chunk_size_cap(chunk_size: u64) -> Result<u64> {
+    let compress_bound = chunk_size
+        .checked_add(chunk_size >> 12)
+        .and_then(|value| value.checked_add(chunk_size >> 14))
+        .and_then(|value| value.checked_add(chunk_size >> 25))
+        .and_then(|value| value.checked_add(13))
+        .ok_or_else(|| EwfError::Malformed("zlib compressed chunk size cap overflow".into()))?;
+    let stored_blocks = chunk_size
+        .checked_add(511)
+        .and_then(|value| value.checked_div(512))
+        .ok_or_else(|| EwfError::Malformed("zlib stored block count overflow".into()))?;
+    let stored_bound = chunk_size
+        .checked_add(
+            stored_blocks
+                .checked_mul(5)
+                .ok_or_else(|| EwfError::Malformed("zlib stored block cap overflow".into()))?,
+        )
+        .and_then(|value| value.checked_add(6))
+        .ok_or_else(|| EwfError::Malformed("zlib stored block cap overflow".into()))?;
+    Ok(compress_bound.max(stored_bound))
+}
+
+fn bzip2_compressed_chunk_size_cap(chunk_size: u64) -> Result<u64> {
+    chunk_size
+        .checked_add(chunk_size / 100)
+        .and_then(|value| value.checked_add(4096))
+        .ok_or_else(|| EwfError::Malformed("BZip2 compressed chunk size cap overflow".into()))
+}
+
+pub(crate) fn raw_chunk_size_cap(chunk_size: u64) -> Result<u64> {
+    chunk_size
+        .checked_add(4)
+        .ok_or_else(|| EwfError::Malformed("raw chunk size cap overflow".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use bzip2::write::BzEncoder;
+    use flate2::write::ZlibEncoder;
+
+    use super::*;
+
+    fn zlib(data: &[u8]) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn bzip2(data: &[u8]) -> Vec<u8> {
+        let mut encoder = BzEncoder::new(Vec::new(), bzip2::Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn raw_decode_returns_logical_prefix_and_ignores_checksum_trailer() {
+        let decoded = decode_chunk(b"hello\xaa\xbb\xcc\xdd", ChunkEncoding::Raw, 5).unwrap();
+
+        assert_eq!(decoded, b"hello");
+    }
+
+    #[test]
+    fn zlib_decode_returns_exact_logical_size() {
+        let encoded = zlib(b"compressed data");
+
+        let decoded = decode_chunk(&encoded, ChunkEncoding::Zlib, "compressed data".len()).unwrap();
+
+        assert_eq!(decoded, b"compressed data");
+    }
+
+    #[test]
+    fn bzip2_decode_returns_exact_logical_size() {
+        let encoded = bzip2(b"bzip2 data");
+
+        let decoded = decode_chunk(&encoded, ChunkEncoding::Bzip2, "bzip2 data".len()).unwrap();
+
+        assert_eq!(decoded, b"bzip2 data");
+    }
+
+    #[test]
+    fn pattern_fill_repeats_little_endian_pattern() {
+        let decoded =
+            decode_chunk(&[], ChunkEncoding::PatternFill(0x1122_3344_5566_7788), 10).unwrap();
+
+        assert_eq!(
+            decoded,
+            vec![0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x88, 0x77]
+        );
+    }
+
+    #[test]
+    fn raw_decode_rejects_short_input() {
+        let err = decode_chunk(b"abc", ChunkEncoding::Raw, 4).unwrap_err();
+
+        assert!(matches!(err, EwfError::Malformed(_)));
+    }
+
+    #[test]
+    fn compressed_decode_rejects_truncated_output() {
+        let encoded = zlib(b"abc");
+        let err = decode_chunk(&encoded, ChunkEncoding::Zlib, 4).unwrap_err();
+
+        assert!(matches!(err, EwfError::Malformed(_)));
+    }
+
+    #[test]
+    fn validate_encoded_size_allows_pattern_fill_without_bytes() {
+        validate_encoded_size(0, 32_768, ChunkEncoding::PatternFill(0)).unwrap();
+    }
+
+    #[test]
+    fn validate_encoded_size_rejects_zero_non_pattern_chunks() {
+        let err = validate_encoded_size(0, 32_768, ChunkEncoding::Zlib).unwrap_err();
+
+        assert!(matches!(err, EwfError::Malformed(_)));
+    }
+
+    #[test]
+    fn validate_encoded_size_rejects_zlib_above_cap() {
+        let err = validate_encoded_size(40_000, 32_768, ChunkEncoding::Zlib).unwrap_err();
+
+        assert!(matches!(err, EwfError::Malformed(_)));
+    }
+
+    #[test]
+    fn validate_encoded_size_allows_stored_deflate_blocks() {
+        validate_encoded_size(33_036, 32_768, ChunkEncoding::Zlib).unwrap();
+    }
+
+    #[test]
+    fn validate_encoded_size_allows_larger_bzip2_cap() {
+        validate_encoded_size(35_000, 32_768, ChunkEncoding::Bzip2).unwrap();
+    }
+}

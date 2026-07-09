@@ -1,0 +1,99 @@
+[package]
+name = "ewf-image"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "Pure-Rust library for reading and writing EWF/E01 forensic disk images."
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/ebrig/ewf-image"
+homepage = "https://github.com/ebrig/ewf-image"
+documentation = "https://docs.rs/ewf-image"
+keywords = ["ewf", "e01", "disk", "image"]
+categories = ["parser-implementations", "filesystem"]
+include = [
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/LICENSE",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/SECURITY.md",
+    "/CONTRIBUTING.md",
+    "/examples/**",
+    "/src/**",
+    "/tests/api.rs",
+    "/tests/corpus.rs",
+    "/tests/reader.rs",
+    "/tests/signature.rs",
+    "/tests/writer.rs",
+    "/docs/**",
+]
+
+[lib]
+name = "ewf_image"
+
+[features]
+default = ["verify"]
+verify = []
+external-fixtures = []
+
+[dependencies]
+bzip2 = "0.6"
+encoding_rs = "0.8"
+flate2 = "1"
+lru = "0.18"
+md-5 = "0.11"
+sha1 = "0.11"
+tempfile = "3"
+thiserror = "2"
+
+[dev-dependencies]
+sha2 = "0.11"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints.rust]
+unsafe_code = { level = "forbid", priority = 1 }
+warnings = "deny"
+missing_docs = "deny"
+future_incompatible = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "deny", priority = -1 }
+rust_2024_compatibility = { level = "deny", priority = -1 }
+unused = { level = "deny", priority = -1 }
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+bare_urls = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+style = { level = "deny", priority = -1 }
+module_name_repetitions = { level = "allow", priority = 1 }
+must_use_candidate = { level = "allow", priority = 1 }
+missing_errors_doc = { level = "allow", priority = 1 }
+missing_panics_doc = { level = "allow", priority = 1 }
+cargo_common_metadata = { level = "allow", priority = 1 }
+multiple_crate_versions = { level = "allow", priority = 1 }
+missing_const_for_fn = { level = "allow", priority = 1 }
+option_if_let_else = { level = "allow", priority = 1 }
+redundant_pub_crate = { level = "allow", priority = 1 }
+significant_drop_tightening = { level = "allow", priority = 1 }
+use_self = { level = "allow", priority = 1 }
+cast_possible_truncation = { level = "allow", priority = 1 }
+cast_possible_wrap = { level = "allow", priority = 1 }
+cast_sign_loss = { level = "allow", priority = 1 }
+cast_precision_loss = { level = "allow", priority = 1 }
+format_push_string = { level = "allow", priority = 1 }
+format_collect = { level = "allow", priority = 1 }
+too_many_lines = { level = "allow", priority = 1 }
+items_after_statements = { level = "allow", priority = 1 }
+similar_names = { level = "allow", priority = 1 }
+manual_let_else = { level = "allow", priority = 1 }
