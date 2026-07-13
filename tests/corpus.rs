@@ -16,6 +16,21 @@ const BUFFER_SIZE: usize = 1024 * 1024;
 const DEFAULT_CORPUS_DIR: &str =
     "/mnt/c/Users/user/Documents/Repos/ewf-upstream-prs/ewf/tests/data";
 
+#[derive(Debug, thiserror::Error)]
+#[error("failed to open external EWF fixture {}: {source}", path.display())]
+struct ExternalFixtureOpenError {
+    path: PathBuf,
+    #[source]
+    source: ewf_image::EwfError,
+}
+
+fn open_external_fixture(path: &Path) -> Result<ewf_image::Image, ExternalFixtureOpenError> {
+    ewf_image::Image::open(path).map_err(|source| ExternalFixtureOpenError {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 #[test]
 #[ignore = "requires local external corpus"]
 fn external_corpus_opens_and_reads() -> Result<(), Box<dyn Error>> {
@@ -27,9 +42,9 @@ fn external_corpus_opens_and_reads() -> Result<(), Box<dyn Error>> {
         FixtureCoverage::from_paths(&paths)
     );
     for path in paths {
-        let image = match ewf_image::Image::open(&path) {
+        let image = match open_external_fixture(&path) {
             Ok(image) => image,
-            Err(err) if is_unsupported_encrypted_image(&err) => {
+            Err(err) if is_unsupported_encrypted_image(&err.source) => {
                 skipped += 1;
                 eprintln!("skipping unsupported encrypted image {}", path.display());
                 continue;
@@ -88,9 +103,9 @@ fn external_corpus_matches_ewfverify() -> Result<(), Box<dyn Error>> {
         FixtureCoverage::from_paths(&paths)
     );
     for path in paths {
-        let image = match ewf_image::Image::open(&path) {
+        let image = match open_external_fixture(&path) {
             Ok(image) => image,
-            Err(err) if is_unsupported_encrypted_image(&err) => {
+            Err(err) if is_unsupported_encrypted_image(&err.source) => {
                 eprintln!("skipping unsupported encrypted image {}", path.display());
                 continue;
             }
@@ -1160,9 +1175,9 @@ fn verify_with_ewfverify(ewfverify: &OsString, path: &Path) -> Result<(), Box<dy
 }
 
 fn compare_with_ewfinfo(ewfinfo: &OsString, path: &Path) -> Result<(), Box<dyn Error>> {
-    let image = match ewf_image::Image::open(path) {
+    let image = match open_external_fixture(path) {
         Ok(image) => image,
-        Err(err) if is_unsupported_encrypted_image(&err) => {
+        Err(err) if is_unsupported_encrypted_image(&err.source) => {
             eprintln!("skipping unsupported encrypted image {}", path.display());
             return Ok(());
         }
@@ -1527,9 +1542,9 @@ fn ewfinfo_bodyfile_entries(output: &str) -> BTreeMap<String, u64> {
 }
 
 fn compare_with_ewfexport(ewfexport: &OsString, path: &Path) -> Result<(), Box<dyn Error>> {
-    let image = match ewf_image::Image::open(path) {
+    let image = match open_external_fixture(path) {
         Ok(image) => image,
-        Err(err) if is_unsupported_encrypted_image(&err) => {
+        Err(err) if is_unsupported_encrypted_image(&err.source) => {
             eprintln!("skipping unsupported encrypted image {}", path.display());
             return Ok(());
         }
@@ -1805,9 +1820,9 @@ impl ExternalFeatureCoverage {
         };
 
         for path in paths {
-            let image = match ewf_image::Image::open(path) {
+            let image = match open_external_fixture(path) {
                 Ok(image) => image,
-                Err(err) if is_unsupported_encrypted_image(&err) => continue,
+                Err(err) if is_unsupported_encrypted_image(&err.source) => continue,
                 Err(err) => return Err(Box::new(err)),
             };
             let info = image.info();
@@ -2315,6 +2330,31 @@ fn hex_lower(bytes: &[u8]) -> String {
 fn sha256_hex(data: &[u8]) -> String {
     let digest = Sha256::digest(data);
     hex_lower(&digest)
+}
+
+#[test]
+fn external_fixture_open_error_includes_path_and_source() -> Result<(), Box<dyn Error>> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("broken.E01");
+    fs::write(&path, b"not an EWF image")?;
+
+    let error = match open_external_fixture(&path) {
+        Ok(_) => panic!("invalid fixture unexpectedly opened"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "failed to open external EWF fixture {}: invalid EWF signature",
+            path.display()
+        )
+    );
+    assert_eq!(
+        error.source().map(ToString::to_string).as_deref(),
+        Some("invalid EWF signature")
+    );
+    Ok(())
 }
 
 #[test]
