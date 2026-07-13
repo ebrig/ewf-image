@@ -4419,7 +4419,7 @@ fn image_read_rejects_ewf1_raw_chunk_bad_checksum() {
 
     assert!(matches!(
         err,
-        ewf_image::EwfError::Malformed(message) if message.contains("raw chunk checksum")
+        ewf_image::EwfError::Malformed(message) if message == "raw chunk checksum mismatch"
     ));
 }
 
@@ -4476,7 +4476,7 @@ fn image_set_read_zero_chunk_on_error_updates_existing_handle() {
 
     assert!(matches!(
         err,
-        ewf_image::EwfError::Malformed(message) if message.contains("raw chunk checksum")
+        ewf_image::EwfError::Malformed(message) if message == "raw chunk checksum mismatch"
     ));
     assert_eq!(image.number_of_checksum_errors().unwrap(), 0);
 
@@ -5737,7 +5737,7 @@ fn image_read_rejects_ewf2_raw_chunk_bad_checksum() {
 
     assert!(matches!(
         err,
-        ewf_image::EwfError::Malformed(message) if message.contains("raw chunk checksum")
+        ewf_image::EwfError::Malformed(message) if message == "raw chunk checksum mismatch"
     ));
 }
 

@@ -3772,7 +3772,7 @@ fn validate_raw_chunk_checksum(encoded: &[u8], logical_size: usize) -> Result<()
             "raw chunk checksum trailer is missing".into(),
         ));
     }
-    validate_adler32_checksum(encoded, checksum_offset, logical_size, "raw chunk checksum")
+    validate_adler32_checksum(encoded, checksum_offset, logical_size, "raw chunk")
 }
 
 fn adler32(data: &[u8]) -> u32 {
