@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## 0.1.1 - 2026-07-16
+
+### Fixed
+
+- Removed the fixed EWF1 section-chain limit so large unsegmented images can be
+  opened, while still rejecting non-advancing and overlapping section chains.
+- Corrected raw-chunk checksum failures to report `raw chunk checksum mismatch`.
+- Preserved complete fixture paths and underlying errors in external-corpus
+  test failures.
+
 ## 0.1.0 - 2026-07-09
 
 Initial release.
