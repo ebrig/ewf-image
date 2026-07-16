@@ -2517,7 +2517,7 @@ fn scan_ewf1_sections(file: &mut dyn SegmentReader) -> Result<Vec<Section>> {
     let file_len = file.segment_len()?;
     let mut sections = Vec::new();
     let mut offset = ewf1::FILE_HEADER_SIZE as u64;
-    for _ in 0..4096 {
+    loop {
         let descriptor_end = offset
             .checked_add(ewf1::SECTION_DESCRIPTOR_SIZE as u64)
             .ok_or_else(|| EwfError::Malformed("EWF1 section descriptor overflow".into()))?;
@@ -2533,10 +2533,10 @@ fn scan_ewf1_sections(file: &mut dyn SegmentReader) -> Result<Vec<Section>> {
         let desc = ewf1::SectionDescriptor::parse(&buf, offset)?;
         let data_size = desc.data_size()?;
         let data_offset = descriptor_end;
-        if data_offset
+        let data_end = data_offset
             .checked_add(data_size)
-            .is_none_or(|end| end > file_len)
-        {
+            .ok_or_else(|| EwfError::Malformed("EWF1 section data exceeds file".into()))?;
+        if data_end > file_len {
             return Err(EwfError::Malformed("EWF1 section data exceeds file".into()));
         }
         let section_type = desc.section_type.clone();
@@ -2554,9 +2554,13 @@ fn scan_ewf1_sections(file: &mut dyn SegmentReader) -> Result<Vec<Section>> {
                 "EWF1 section chain does not advance".into(),
             ));
         }
+        if next < data_end {
+            return Err(EwfError::Malformed(
+                "EWF1 next section offset overlaps current section".into(),
+            ));
+        }
         offset = next;
     }
-    Err(EwfError::Malformed("EWF1 section chain is too long".into()))
 }
 
 fn ewf1_acquisition_complete(sections: &[Section]) -> bool {

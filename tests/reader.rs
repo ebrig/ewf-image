@@ -523,6 +523,76 @@ fn synthetic_e01_separate_table_sector_ranges_with_types(
     write_temp_with_suffix(".E01", &bytes)
 }
 
+fn synthetic_e01_with_filler_sections(data: &[u8], filler_count: usize) -> NamedTempFile {
+    let compressed = compressed_chunk(data, 32_768);
+    let volume_desc_offset = 13_u64;
+    let volume_data_offset = volume_desc_offset + 76;
+    let filler_desc_offset = volume_data_offset + 94;
+    let table_desc_offset = filler_desc_offset + (filler_count as u64 * 76);
+    let table_data_offset = table_desc_offset + 76;
+    let sectors_desc_offset = table_data_offset + 24 + 4;
+    let sectors_data_offset = sectors_desc_offset + 76;
+    let done_desc_offset = sectors_data_offset + compressed.len() as u64;
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&EVF_SIGNATURE);
+    bytes.push(1);
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&section_desc(
+        b"volume",
+        if filler_count == 0 {
+            table_desc_offset
+        } else {
+            filler_desc_offset
+        },
+        76 + 94,
+    ));
+    let mut volume = [0; 94];
+    volume[4..8].copy_from_slice(&1_u32.to_le_bytes());
+    volume[8..12].copy_from_slice(&64_u32.to_le_bytes());
+    volume[12..16].copy_from_slice(&512_u32.to_le_bytes());
+    volume[16..24].copy_from_slice(&64_u64.to_le_bytes());
+    bytes.extend_from_slice(&volume);
+
+    for index in 0..filler_count {
+        let offset = filler_desc_offset + (index as u64 * 76);
+        let next = if index + 1 == filler_count {
+            table_desc_offset
+        } else {
+            offset + 76
+        };
+        bytes.extend_from_slice(&section_desc(b"padding", next, 76));
+    }
+
+    bytes.extend_from_slice(&section_desc(b"table", sectors_desc_offset, 76 + 24 + 4));
+    let mut table_header = [0; 24];
+    table_header[0..4].copy_from_slice(&1_u32.to_le_bytes());
+    table_header[8..16].copy_from_slice(&sectors_data_offset.to_le_bytes());
+    bytes.extend_from_slice(&table_header);
+    bytes.extend_from_slice(&0x8000_0000_u32.to_le_bytes());
+
+    bytes.extend_from_slice(&section_desc(
+        b"sectors",
+        done_desc_offset,
+        76 + compressed.len() as u64,
+    ));
+    bytes.extend_from_slice(&compressed);
+    bytes.extend_from_slice(&section_desc(b"done", 0, 76));
+    write_temp_with_suffix(".E01", &bytes)
+}
+
+fn synthetic_e01_with_volume_next(next: u64) -> NamedTempFile {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&EVF_SIGNATURE);
+    bytes.push(1);
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&section_desc(b"volume", next, 76 + 94));
+    bytes.extend_from_slice(&[0; 94]);
+    write_temp_with_suffix(".E01", &bytes)
+}
+
 fn synthetic_e01_table2_mirror_then_later_table() -> NamedTempFile {
     let first = compressed_chunk(b"first mirrored table", 32_768);
     let second = compressed_chunk(b"second real table", 32_768);
@@ -4359,6 +4429,32 @@ fn image_open_reads_incomplete_ewf1_next_terminated_image() {
 }
 
 #[test]
+fn image_open_rejects_ewf1_section_chain_that_does_not_advance() {
+    let file = synthetic_e01_with_volume_next(13);
+
+    let err = ewf_image::Image::open(file.path()).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ewf_image::EwfError::Malformed(message)
+            if message == "EWF1 section chain does not advance"
+    ));
+}
+
+#[test]
+fn image_open_rejects_ewf1_overlapping_section_chain() {
+    let file = synthetic_e01_with_volume_next(13 + 76);
+
+    let err = ewf_image::Image::open(file.path()).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ewf_image::EwfError::Malformed(message)
+            if message == "EWF1 next section offset overlaps current section"
+    ));
+}
+
+#[test]
 fn image_open_rejects_ewf1_section_next_overflow() {
     let file = synthetic_e01_with_max_section_next();
 
@@ -4653,6 +4749,19 @@ fn image_open_reads_ewf1_multiple_table_sector_pairs() {
 
     assert_eq!(read, 12);
     assert_eq!(&buf, b"second range");
+}
+
+#[test]
+fn image_open_reads_ewf1_section_chain_longer_than_4096() {
+    let file = synthetic_e01_with_filler_sections(b"long section chain", 4096);
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    let mut buf = [0; 18];
+
+    let read = image.read_at(&mut buf, 0).unwrap();
+
+    assert_eq!(image.info().segment_count, 1);
+    assert_eq!(read, 18);
+    assert_eq!(&buf, b"long section chain");
 }
 
 #[test]
