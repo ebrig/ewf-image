@@ -87,13 +87,13 @@ impl LazyChunkIndex {
             )));
         }
 
+        let index = self.ranges.partition_point(|range| {
+            range.first_chunk.saturating_add(range.chunk_count) <= chunk_id
+        });
         self.ranges
-            .iter()
-            .enumerate()
-            .find(|(_, range)| {
-                chunk_id >= range.first_chunk
-                    && chunk_id < range.first_chunk.saturating_add(range.chunk_count)
-            })
+            .get(index)
+            .filter(|range| chunk_id >= range.first_chunk)
+            .map(|range| (index, range))
             .ok_or_else(|| EwfError::Malformed(format!("chunk {chunk_id} is not covered")))
     }
 
@@ -158,6 +158,22 @@ mod tests {
         assert_eq!(index.logical_chunks(), 5);
         assert_eq!(index.range_for(0).unwrap().first_chunk, 0);
         assert_eq!(index.range_for(4).unwrap().first_chunk, 2);
+    }
+
+    #[test]
+    fn lazy_index_selects_the_correct_range_at_boundaries() {
+        let index = LazyChunkIndex::new(
+            vec![range(0, 2), range(2, 3), range(5, 1)],
+            6 * 32_768,
+            32_768,
+        )
+        .unwrap();
+
+        assert_eq!(index.range_index_for(0).unwrap().0, 0);
+        assert_eq!(index.range_index_for(1).unwrap().0, 0);
+        assert_eq!(index.range_index_for(2).unwrap().0, 1);
+        assert_eq!(index.range_index_for(4).unwrap().0, 1);
+        assert_eq!(index.range_index_for(5).unwrap().0, 2);
     }
 
     #[test]

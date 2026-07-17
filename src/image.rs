@@ -44,6 +44,7 @@ const EWF1_LTREE_HEADER_SIZE: usize = 48;
 const EWF2_HASH_SECTION_SIZE: u64 = 32;
 const EWF2_TABLE_HEADER_V2_SIZE: u64 = 32;
 const EWF2_TABLE_FOOTER_SIZE: u64 = 16;
+const TABLE_CHECKSUM_BUFFER_SIZE: usize = 64 * 1024;
 
 /// Reader type accepted by [`Image::open_readers`].
 ///
@@ -3315,7 +3316,7 @@ fn should_use_full_width_ewf1_offset(
     next_raw: Option<u32>,
     is_final: bool,
 ) -> Result<bool> {
-    if range.base_offset == 0 || raw & 0x8000_0000 == 0 {
+    if raw & 0x8000_0000 == 0 {
         return Ok(false);
     }
     let Some(data_end) = range.data_end else {
@@ -3745,8 +3746,26 @@ fn validate_present_table_entries_checksum(
     if stored == 0 {
         return Ok(());
     }
-    let entries = read_exact_at(file, entries_offset, entry_bytes)?;
-    validate_adler32_checksum_value(stored, &entries, label)
+    let calculated = stream_adler32(file, entries_offset, entry_bytes)?;
+    if stored != calculated {
+        return Err(EwfError::Malformed(format!("{label} checksum mismatch")));
+    }
+    Ok(())
+}
+
+fn stream_adler32(file: &mut dyn SegmentReader, offset: u64, size: u64) -> Result<u32> {
+    file.seek(SeekFrom::Start(offset))?;
+    let mut remaining = size;
+    let mut checksum = 1_u32;
+    let mut buffer = vec![0_u8; TABLE_CHECKSUM_BUFFER_SIZE];
+    while remaining > 0 {
+        let take = usize::try_from(remaining.min(TABLE_CHECKSUM_BUFFER_SIZE as u64))
+            .expect("table checksum read is bounded by the buffer");
+        file.read_exact(&mut buffer[..take])?;
+        checksum = adler32_update(checksum, &buffer[..take]);
+        remaining -= u64::try_from(take).expect("usize fits u64");
+    }
+    Ok(checksum)
 }
 
 fn validate_present_ewf1_media_checksum(data: &[u8], section_type: &str) -> Result<()> {
@@ -3780,9 +3799,13 @@ fn validate_raw_chunk_checksum(encoded: &[u8], logical_size: usize) -> Result<()
 }
 
 fn adler32(data: &[u8]) -> u32 {
+    adler32_update(1, data)
+}
+
+fn adler32_update(checksum: u32, data: &[u8]) -> u32 {
     const MOD_ADLER: u32 = 65_521;
-    let mut a = 1_u32;
-    let mut b = 0_u32;
+    let mut a = checksum & 0xffff;
+    let mut b = checksum >> 16;
     for byte in data {
         a = (a + u32::from(*byte)) % MOD_ADLER;
         b = (b + a) % MOD_ADLER;
@@ -3923,11 +3946,77 @@ fn decompress_ewf2_metadata(reader: impl Read) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
     use flate2::write::ZlibEncoder;
 
     use super::*;
+
+    struct ObservedReader {
+        cursor: Cursor<Vec<u8>>,
+        maximum_read: usize,
+    }
+
+    impl Read for ObservedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.maximum_read = self.maximum_read.max(buffer.len());
+            self.cursor.read(buffer)
+        }
+    }
+
+    impl Seek for ObservedReader {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            self.cursor.seek(position)
+        }
+    }
+
+    #[test]
+    fn table_checksum_validation_uses_bounded_reads() {
+        const MAXIMUM_CHECKSUM_READ: usize = 64 * 1024;
+        let entries = vec![0x5a; MAXIMUM_CHECKSUM_READ * 3 + 17];
+        let mut bytes = entries.clone();
+        bytes.extend_from_slice(&adler32(&entries).to_le_bytes());
+        let mut reader = ObservedReader {
+            cursor: Cursor::new(bytes),
+            maximum_read: 0,
+        };
+
+        validate_present_table_entries_checksum(
+            &mut reader,
+            0,
+            entries.len() as u64,
+            entries.len() as u64,
+            "test table",
+        )
+        .unwrap();
+
+        assert!(reader.maximum_read <= MAXIMUM_CHECKSUM_READ);
+    }
+
+    #[test]
+    fn table_checksum_validation_rejects_mismatch_across_multiple_reads() {
+        const CHECKSUM_READ_SIZE: usize = 64 * 1024;
+        let entries = vec![0x3c; CHECKSUM_READ_SIZE * 2 + 7];
+        let mut bytes = entries.clone();
+        bytes.extend_from_slice(&adler32(b"different").to_le_bytes());
+        let mut reader = Cursor::new(bytes);
+
+        let error = validate_present_table_entries_checksum(
+            &mut reader,
+            0,
+            entries.len() as u64,
+            entries.len() as u64,
+            "test table",
+        )
+        .unwrap_err();
+
+        match error {
+            EwfError::Malformed(message) => {
+                assert_eq!(message, "test table checksum mismatch");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
 
     #[test]
     fn ewf1_metadata_payload_decompresses_zlib_data() {

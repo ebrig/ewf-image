@@ -2,6 +2,36 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Fixed
+
+- Recovered EWF1 chunk offsets that overflow 31 bits in large unsegmented
+  images with a zero table base offset, matching FTK-style single-file `.E01`
+  output larger than 2 GiB.
+- Replaced the per-read linear table-range scan with a binary search so chunk
+  lookups stay fast on multi-terabyte images with thousands of chunk tables.
+- Table-entry checksums are now validated with a fixed 64 KiB streaming buffer
+  instead of allocating the complete table-entry region in memory.
+- The EWF1 writer now emits multiple `sectors`/`table`/`table2` groups per
+  segment, each with its own 64-bit table base offset, so non-segmented images
+  larger than 2 GiB can be written and read back. Groups use the conservative
+  16,375-entry compatibility limit documented for FTK Imager and legacy EnCase
+  formats; later EnCase versions permit more entries per table. Previously such
+  writes failed with a 31-bit offset error.
+- EWF1 maximum-segment-size estimation now follows the actual ordered table
+  group boundaries, preventing interacting payload and entry limits from
+  producing segments slightly larger than the configured maximum.
+- Writer segment planning now retains index ranges into the original chunk
+  descriptor vector instead of building per-segment descriptor vectors,
+  reducing peak memory without writing an additional descriptor index to disk.
+
+### Known Limitations
+
+- Large writes still require temporary space for the raw and encoded media and
+  retain one in-memory descriptor per logical chunk, so descriptor memory grows
+  with the image's chunk count.
+
 ## 0.1.1 - 2026-07-16
 
 ### Fixed

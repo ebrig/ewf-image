@@ -4714,6 +4714,54 @@ fn writer_splits_e01_output_by_maximum_segment_size() {
 }
 
 #[test]
+fn writer_emits_multiple_table_groups_in_one_e01_segment() {
+    // FTK-style non-segmented images store many sectors/table groups in one
+    // segment file. Force multiple groups by exceeding the per-table entry cap
+    // (16375) with small chunks instead of writing multi-gigabyte payloads.
+    let dir = tempdir().unwrap();
+    let first = dir.path().join("groups.E01");
+    let chunk_count = 16_380_usize;
+    let data: Vec<u8> = (0..chunk_count * 512)
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let options = WriteOptions {
+        sectors_per_chunk: 1,
+        bytes_per_sector: 512,
+        ..WriteOptions::default()
+    };
+
+    let mut writer = EwfWriter::create(&first, options).unwrap();
+    writer.write_all(&data).unwrap();
+    let result = writer.finish().unwrap();
+
+    assert_eq!(result.segment_paths, vec![first.clone()]);
+    assert_eq!(result.chunk_count, chunk_count as u64);
+
+    let bytes = fs::read(&first).unwrap();
+    let section_types = ewf1_section_types(&bytes);
+    let table_count = section_types
+        .iter()
+        .filter(|section| section.as_str() == "table")
+        .count();
+    let sectors_count = section_types
+        .iter()
+        .filter(|section| section.as_str() == "sectors")
+        .count();
+    assert_eq!(table_count, 2);
+    assert_eq!(sectors_count, 2);
+
+    let image = ewf_image::Image::open(&first).unwrap();
+    assert_eq!(image.info().segment_count, 1);
+    assert_eq!(image.info().logical_size, data.len() as u64);
+
+    let mut decoded = vec![0; data.len()];
+    let read = image.read_at(&mut decoded, 0).unwrap();
+
+    assert_eq!(read, data.len());
+    assert_eq!(decoded, data);
+}
+
+#[test]
 fn writer_finishes_split_e01_to_supplied_segment_writers() {
     let first = std::path::PathBuf::from("streamed-split.E01");
     let second = std::path::PathBuf::from("streamed-split.E02");

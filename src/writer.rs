@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -53,6 +54,12 @@ const EWF2_SINGLE_FILES_MD5_HASH_TABLE_SECTION: u32 = 0x22;
 const EWF2_SINGLE_FILES_UNKNOWN_TABLE_SECTION: u32 = 0x23;
 const EWF2_TABLE_HEADER_V2_SIZE: usize = 32;
 const EWF2_TABLE_FOOTER_SIZE: usize = 16;
+// EWF1 table entries hold 31-bit offsets relative to the table base offset, so
+// each sectors/table group can address at most 2 GiB of chunk payload. Large
+// non-segmented images are written as multiple groups per segment, matching
+// EnCase 6 and FTK Imager output.
+const EWF1_TABLE_GROUP_MAX_PAYLOAD: u64 = 0x7fff_ffff;
+const EWF1_TABLE_GROUP_MAX_ENTRIES: usize = 16_375;
 const SIGNED_SECTOR_RANGE_MAX: u64 = i64::MAX as u64;
 const EWF2_EXTENDED_ATTRIBUTES_HEADER: &[u8; 37] = &[
     0x00, 0x00, 0x00, 0x00, 0x01, 0x0b, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x41, 0x00, 0x74,
@@ -1321,7 +1328,7 @@ impl EwfWriter {
 
         if is_ewf2_format(options.format) {
             let groups = segment_groups(
-                chunks,
+                &chunks,
                 options.maximum_segment_size,
                 &options,
                 sector_count,
@@ -1331,6 +1338,7 @@ impl EwfWriter {
             let mut segment_paths = Vec::with_capacity(group_count);
             let mut first_chunk = 0_u64;
             for (index, group) in groups.into_iter().enumerate() {
+                let group_chunks = &chunks[group];
                 let segment_number = u32::try_from(index + 1).map_err(|_| {
                     EwfError::Unsupported("EWF2 writer segment count exceeds u32".into())
                 })?;
@@ -1344,7 +1352,7 @@ impl EwfWriter {
                 write_ewf2_segment(
                     &mut file,
                     &mut spool,
-                    &group,
+                    group_chunks,
                     &options,
                     Ewf2SegmentWriteContext {
                         segment_number,
@@ -1356,7 +1364,7 @@ impl EwfWriter {
                 )?;
                 file.flush()?;
                 first_chunk = first_chunk
-                    .checked_add(u64::try_from(group.len()).expect("usize fits u64"))
+                    .checked_add(u64::try_from(group_chunks.len()).expect("usize fits u64"))
                     .ok_or_else(|| {
                         EwfError::Malformed("writer EWF2 first chunk overflow".into())
                     })?;
@@ -1381,7 +1389,7 @@ impl EwfWriter {
         }
 
         let groups = segment_groups(
-            chunks,
+            &chunks,
             options.maximum_segment_size,
             &options,
             sector_count,
@@ -1390,6 +1398,7 @@ impl EwfWriter {
         let group_count = groups.len();
         let mut segment_paths = Vec::with_capacity(group_count);
         for (index, group) in groups.into_iter().enumerate() {
+            let group_chunks = &chunks[group];
             let segment_number = u16::try_from(index + 1).map_err(|_| {
                 EwfError::Unsupported("EWF1 writer segment count exceeds u16".into())
             })?;
@@ -1408,7 +1417,7 @@ impl EwfWriter {
             write_ewf1_segment(
                 &mut file,
                 &mut spool,
-                &group,
+                group_chunks,
                 &options,
                 Ewf1SegmentWriteContext {
                     segment_number,
@@ -1497,7 +1506,7 @@ impl EwfWriter {
             .map(|(path, writer)| (path.into(), writer))
             .collect();
         let groups = segment_groups(
-            chunks,
+            &chunks,
             options.maximum_segment_size,
             &options,
             sector_count,
@@ -1516,6 +1525,7 @@ impl EwfWriter {
             for (index, ((segment_path, mut writer), group)) in
                 segment_writers.into_iter().zip(groups).enumerate()
             {
+                let group_chunks = &chunks[group];
                 let segment_number = u32::try_from(index + 1).map_err(|_| {
                     EwfError::Unsupported("EWF2 writer segment count exceeds u32".into())
                 })?;
@@ -1527,7 +1537,7 @@ impl EwfWriter {
                 write_ewf2_segment(
                     &mut writer,
                     &mut spool,
-                    &group,
+                    group_chunks,
                     &options,
                     Ewf2SegmentWriteContext {
                         segment_number,
@@ -1539,7 +1549,7 @@ impl EwfWriter {
                 )?;
                 writer.flush()?;
                 first_chunk = first_chunk
-                    .checked_add(u64::try_from(group.len()).expect("usize fits u64"))
+                    .checked_add(u64::try_from(group_chunks.len()).expect("usize fits u64"))
                     .ok_or_else(|| {
                         EwfError::Malformed("writer EWF2 first chunk overflow".into())
                     })?;
@@ -1549,6 +1559,7 @@ impl EwfWriter {
             for (index, ((segment_path, mut writer), group)) in
                 segment_writers.into_iter().zip(groups).enumerate()
             {
+                let group_chunks = &chunks[group];
                 let segment_number = u16::try_from(index + 1).map_err(|_| {
                     EwfError::Unsupported("EWF1 writer segment count exceeds u16".into())
                 })?;
@@ -1557,7 +1568,7 @@ impl EwfWriter {
                 write_ewf1_segment(
                     &mut writer,
                     &mut spool,
-                    &group,
+                    group_chunks,
                     &options,
                     Ewf1SegmentWriteContext {
                         segment_number,
@@ -2202,7 +2213,7 @@ fn write_ewf1_segment<W: Write>(
     options: &WriteOptions,
     context: Ewf1SegmentWriteContext,
 ) -> Result<()> {
-    let local_chunk_count = u32::try_from(chunks.len())
+    u32::try_from(chunks.len())
         .map_err(|_| EwfError::Unsupported("EWF1 writer segment chunk count exceeds u32".into()))?;
     let header = if context.sections.contains(Ewf1SegmentSections::HEADER) {
         header_payload(
@@ -2254,12 +2265,6 @@ fn write_ewf1_segment<W: Write>(
     } else {
         None
     };
-    let chunk_payload_size = chunks.iter().try_fold(0_u64, |total, chunk| {
-        total
-            .checked_add(chunk.data_size)
-            .ok_or_else(|| EwfError::Malformed("writer chunk payload size overflow".into()))
-    })?;
-
     let header_desc_offset = ewf1::FILE_HEADER_SIZE as u64;
     let volume_data_size = volume_data_size(options.format);
     let header2_desc_offset = if let Some(header) = &header {
@@ -2298,38 +2303,24 @@ fn write_ewf1_segment<W: Write>(
     } else {
         session_desc_offset
     };
-    let sectors_data_offset = sectors_desc_offset + ewf1::SECTION_DESCRIPTOR_SIZE as u64;
-    let table_desc_offset = sectors_data_offset
-        .checked_add(chunk_payload_size)
-        .ok_or_else(|| EwfError::Malformed("writer table descriptor offset overflow".into()))?;
-    let table_data_offset = table_desc_offset + ewf1::SECTION_DESCRIPTOR_SIZE as u64;
-    let table_entry_bytes = u64::from(local_chunk_count)
-        .checked_mul(4)
-        .ok_or_else(|| EwfError::Malformed("writer table entry size overflow".into()))?;
     let table_footer_bytes = if matches!(options.format, WriteFormat::Ewf1Smart) {
         0
     } else {
         4
     };
-    let table_data_size = 24_u64
-        .checked_add(table_entry_bytes)
-        .and_then(|value| value.checked_add(table_footer_bytes))
-        .ok_or_else(|| EwfError::Malformed("writer table data size overflow".into()))?;
-    let table2_desc_offset = table_data_offset
-        .checked_add(table_data_size)
-        .ok_or_else(|| EwfError::Malformed("writer table2 descriptor offset overflow".into()))?;
     let writes_table2 = matches!(
         options.format,
         WriteFormat::Ewf1Physical | WriteFormat::Ewf1Logical
     );
-    let post_table_desc_offset = if writes_table2 {
-        table2_desc_offset
-            .checked_add(ewf1::SECTION_DESCRIPTOR_SIZE as u64)
-            .and_then(|value| value.checked_add(table_data_size))
-    } else {
-        table_data_offset.checked_add(table_data_size)
-    }
-    .ok_or_else(|| EwfError::Malformed("writer post-table descriptor offset overflow".into()))?;
+    let group_layouts = ewf1_table_group_layouts(
+        chunks,
+        sectors_desc_offset,
+        table_footer_bytes,
+        writes_table2,
+    )?;
+    let post_table_desc_offset = group_layouts
+        .last()
+        .map_or(sectors_desc_offset, |layout| layout.end_offset);
     let ltree_desc_offset = post_table_desc_offset;
     let error2_desc_offset = if let Some(ltree) = &ltree {
         ltree_desc_offset
@@ -2395,7 +2386,6 @@ fn write_ewf1_segment<W: Write>(
     } else {
         done_desc_offset
     };
-    let post_sectors_desc_offset = table_desc_offset;
 
     writer.write_all(ewf1_signature(options.format))?;
     writer.write_all(&[1])?;
@@ -2467,51 +2457,57 @@ fn write_ewf1_segment<W: Write>(
         writer.write_all(&session)?;
     }
 
-    writer.write_all(&section_desc(
-        b"sectors",
-        post_sectors_desc_offset,
-        ewf1::SECTION_DESCRIPTOR_SIZE as u64 + chunk_payload_size,
-    ))?;
-    for chunk in chunks {
-        spool.copy_chunk_to(chunk, writer)?;
-    }
+    for (group_index, layout) in group_layouts.iter().enumerate() {
+        let group_chunks = &chunks[layout.first_chunk..layout.end_chunk];
+        let group_chunk_count = u32::try_from(group_chunks.len()).map_err(|_| {
+            EwfError::Unsupported("EWF1 writer table group chunk count exceeds u32".into())
+        })?;
+        let next_group_desc_offset = group_layouts
+            .get(group_index + 1)
+            .map_or(after_tables_desc_offset, |next| next.sectors_desc_offset);
 
-    writer.write_all(&section_desc(
-        b"table",
-        if writes_table2 {
-            table2_desc_offset
-        } else {
-            after_tables_desc_offset
-        },
-        ewf1::SECTION_DESCRIPTOR_SIZE as u64 + table_data_size,
-    ))?;
-    let table_capacity = usize::try_from(table_data_size)
-        .map_err(|_| EwfError::Malformed("writer table data size does not fit usize".into()))?;
-    let mut table_data = Vec::with_capacity(table_capacity);
-    append_ewf1_table_data(
-        &mut table_data,
-        local_chunk_count,
-        sectors_data_offset,
-        chunks,
-        table_footer_bytes != 0,
-    )?;
-    writer.write_all(&table_data)?;
-
-    if writes_table2 {
         writer.write_all(&section_desc(
-            b"table2",
-            after_tables_desc_offset,
-            ewf1::SECTION_DESCRIPTOR_SIZE as u64 + table_data_size,
+            b"sectors",
+            layout.table_desc_offset,
+            ewf1::SECTION_DESCRIPTOR_SIZE as u64 + layout.payload_size,
         ))?;
-        let mut table2_data = Vec::with_capacity(table_capacity);
+        for chunk in group_chunks {
+            spool.copy_chunk_to(chunk, writer)?;
+        }
+
+        writer.write_all(&section_desc(
+            b"table",
+            layout.table2_desc_offset.unwrap_or(next_group_desc_offset),
+            ewf1::SECTION_DESCRIPTOR_SIZE as u64 + layout.table_data_size,
+        ))?;
+        let table_capacity = usize::try_from(layout.table_data_size)
+            .map_err(|_| EwfError::Malformed("writer table data size does not fit usize".into()))?;
+        let mut table_data = Vec::with_capacity(table_capacity);
         append_ewf1_table_data(
-            &mut table2_data,
-            local_chunk_count,
-            sectors_data_offset,
-            chunks,
-            true,
+            &mut table_data,
+            group_chunk_count,
+            layout.sectors_data_offset,
+            group_chunks,
+            table_footer_bytes != 0,
         )?;
-        writer.write_all(&table2_data)?;
+        writer.write_all(&table_data)?;
+
+        if layout.table2_desc_offset.is_some() {
+            writer.write_all(&section_desc(
+                b"table2",
+                next_group_desc_offset,
+                ewf1::SECTION_DESCRIPTOR_SIZE as u64 + layout.table_data_size,
+            ))?;
+            let mut table2_data = Vec::with_capacity(table_capacity);
+            append_ewf1_table_data(
+                &mut table2_data,
+                group_chunk_count,
+                layout.sectors_data_offset,
+                group_chunks,
+                true,
+            )?;
+            writer.write_all(&table2_data)?;
+        }
     }
 
     if let Some(ltree) = &ltree {
@@ -4405,55 +4401,73 @@ fn repeated_ewf2_pattern(chunk: &[u8]) -> Option<u64> {
 }
 
 fn segment_groups(
-    chunks: Vec<ChunkDescriptor>,
+    chunks: &[ChunkDescriptor],
     maximum_segment_size: Option<u64>,
     options: &WriteOptions,
     sector_count: u64,
     total_chunk_count: u64,
-) -> Result<Vec<Vec<ChunkDescriptor>>> {
-    if chunks.is_empty() {
-        return Ok(vec![chunks]);
-    }
+) -> Result<Vec<Range<usize>>> {
     let Some(maximum_segment_size) = maximum_segment_size else {
-        return Ok(vec![chunks]);
+        return Ok(std::iter::once(0..chunks.len()).collect());
     };
 
     let mut groups = Vec::new();
-    let mut current = Vec::new();
+    let mut current_start = 0_usize;
     let mut payload_size = 0_u64;
-    for chunk in chunks {
+    let is_ewf2 = is_ewf2_format(options.format);
+    let mut ewf1_table_group_state = Ewf1TableGroupState::default();
+    for (chunk_index, chunk) in chunks.iter().enumerate() {
         let chunk_size = chunk.data_size;
         let proposed_payload_size = payload_size
             .checked_add(chunk_size)
             .ok_or_else(|| EwfError::Malformed("writer segment payload size overflow".into()))?;
+        let proposed_ewf1_table_group_state = if is_ewf2 {
+            ewf1_table_group_state
+        } else {
+            ewf1_table_group_state.add_chunk(
+                chunk_size,
+                EWF1_TABLE_GROUP_MAX_ENTRIES,
+                EWF1_TABLE_GROUP_MAX_PAYLOAD,
+            )?
+        };
         let proposed_size = estimated_segment_size(
-            current.len() + 1,
+            chunk_index - current_start + 1,
             proposed_payload_size,
+            proposed_ewf1_table_group_state.group_count.max(1),
             options,
             sector_count,
             total_chunk_count,
         )?;
-        if !current.is_empty() && proposed_size > maximum_segment_size {
-            groups.push(current);
-            current = Vec::new();
+        if chunk_index > current_start && proposed_size > maximum_segment_size {
+            groups.push(current_start..chunk_index);
+            current_start = chunk_index;
             payload_size = 0;
+            ewf1_table_group_state = if is_ewf2 {
+                Ewf1TableGroupState::default()
+            } else {
+                Ewf1TableGroupState::default().add_chunk(
+                    chunk_size,
+                    EWF1_TABLE_GROUP_MAX_ENTRIES,
+                    EWF1_TABLE_GROUP_MAX_PAYLOAD,
+                )?
+            };
+        } else {
+            ewf1_table_group_state = proposed_ewf1_table_group_state;
         }
 
         payload_size = payload_size
             .checked_add(chunk_size)
             .ok_or_else(|| EwfError::Malformed("writer segment payload size overflow".into()))?;
-        current.push(chunk);
     }
 
-    if !current.is_empty() {
-        groups.push(current);
-    }
+    groups.push(current_start..chunks.len());
     Ok(groups)
 }
 
 fn estimated_segment_size(
     chunk_count: usize,
     chunk_payload_size: u64,
+    ewf1_table_group_count: u64,
     options: &WriteOptions,
     sector_count: u64,
     total_chunk_count: u64,
@@ -4467,12 +4481,18 @@ fn estimated_segment_size(
             total_chunk_count,
         );
     }
-    estimated_ewf1_segment_size(chunk_count, chunk_payload_size, options)
+    estimated_ewf1_segment_size(
+        chunk_count,
+        chunk_payload_size,
+        ewf1_table_group_count,
+        options,
+    )
 }
 
 fn estimated_ewf1_segment_size(
     chunk_count: usize,
     chunk_payload_size: u64,
+    table_group_count: u64,
     options: &WriteOptions,
 ) -> Result<u64> {
     let table_entry_bytes = u64::try_from(chunk_count)
@@ -4484,10 +4504,18 @@ fn estimated_ewf1_segment_size(
     } else {
         4
     };
-    let table_data_size = 24_u64
-        .checked_add(table_entry_bytes)
+    let table_group_overhead = (ewf1::SECTION_DESCRIPTOR_SIZE as u64)
+        .checked_add(24)
         .and_then(|value| value.checked_add(table_footer_bytes))
-        .ok_or_else(|| EwfError::Malformed("writer table data size overflow".into()))?;
+        .ok_or_else(|| EwfError::Malformed("writer table group overhead overflow".into()))?;
+    let table_sections_size = table_group_count
+        .checked_mul(table_group_overhead)
+        .and_then(|value| value.checked_add(table_entry_bytes))
+        .ok_or_else(|| EwfError::Malformed("writer table sections size overflow".into()))?;
+    let sectors_sections_size = table_group_count
+        .checked_mul(ewf1::SECTION_DESCRIPTOR_SIZE as u64)
+        .and_then(|value| value.checked_add(chunk_payload_size))
+        .ok_or_else(|| EwfError::Malformed("writer sectors sections size overflow".into()))?;
     let writes_table2 = matches!(
         options.format,
         WriteFormat::Ewf1Physical | WriteFormat::Ewf1Logical
@@ -4547,14 +4575,14 @@ fn estimated_ewf1_segment_size(
             xheader_size,
             estimated_ewf1_section_size(volume_data_size(options.format))?,
             session_size,
-            estimated_ewf1_section_size(table_data_size)?,
+            table_sections_size,
             if writes_table2 {
-                estimated_ewf1_section_size(table_data_size)?
+                table_sections_size
             } else {
                 0
             },
             ltree_size,
-            estimated_ewf1_section_size(chunk_payload_size)?,
+            sectors_sections_size,
             error2_size,
             digest_size,
             xhash_size,
@@ -5026,6 +5054,149 @@ fn table_header(chunk_count: u32, sectors_data_offset: u64) -> [u8; 24] {
     table
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ewf1TableGroup {
+    first_chunk: usize,
+    end_chunk: usize,
+    payload_size: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Ewf1TableGroupState {
+    group_count: u64,
+    current_entry_count: usize,
+    current_payload_size: u64,
+}
+
+impl Ewf1TableGroupState {
+    fn add_chunk(self, data_size: u64, max_entries: usize, max_payload: u64) -> Result<Self> {
+        let proposed_payload_size = self
+            .current_payload_size
+            .checked_add(data_size)
+            .ok_or_else(|| EwfError::Malformed("writer table group payload overflow".into()))?;
+        if self.current_entry_count != 0
+            && (self.current_entry_count >= max_entries || proposed_payload_size > max_payload)
+        {
+            return Ok(Self {
+                group_count: self.group_count.checked_add(1).ok_or_else(|| {
+                    EwfError::Malformed("writer table group count overflow".into())
+                })?,
+                current_entry_count: 1,
+                current_payload_size: data_size,
+            });
+        }
+
+        Ok(Self {
+            group_count: self.group_count.max(1),
+            current_entry_count: self.current_entry_count.checked_add(1).ok_or_else(|| {
+                EwfError::Malformed("writer table group entry count overflow".into())
+            })?,
+            current_payload_size: proposed_payload_size,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ewf1TableGroupLayout {
+    first_chunk: usize,
+    end_chunk: usize,
+    payload_size: u64,
+    sectors_desc_offset: u64,
+    sectors_data_offset: u64,
+    table_desc_offset: u64,
+    table_data_size: u64,
+    table2_desc_offset: Option<u64>,
+    end_offset: u64,
+}
+
+fn ewf1_table_groups(
+    chunks: &[ChunkDescriptor],
+    max_entries: usize,
+    max_payload: u64,
+) -> Result<Vec<Ewf1TableGroup>> {
+    let mut groups = Vec::new();
+    let mut first_chunk = 0_usize;
+    let mut state = Ewf1TableGroupState::default();
+    for (index, chunk) in chunks.iter().enumerate() {
+        let next_state = state.add_chunk(chunk.data_size, max_entries, max_payload)?;
+        if next_state.group_count > state.group_count && state.current_entry_count != 0 {
+            groups.push(Ewf1TableGroup {
+                first_chunk,
+                end_chunk: index,
+                payload_size: state.current_payload_size,
+            });
+            first_chunk = index;
+        }
+        state = next_state;
+    }
+    groups.push(Ewf1TableGroup {
+        first_chunk,
+        end_chunk: chunks.len(),
+        payload_size: state.current_payload_size,
+    });
+    Ok(groups)
+}
+
+fn ewf1_table_group_layouts(
+    chunks: &[ChunkDescriptor],
+    first_sectors_desc_offset: u64,
+    table_footer_bytes: u64,
+    writes_table2: bool,
+) -> Result<Vec<Ewf1TableGroupLayout>> {
+    let groups = ewf1_table_groups(
+        chunks,
+        EWF1_TABLE_GROUP_MAX_ENTRIES,
+        EWF1_TABLE_GROUP_MAX_PAYLOAD,
+    )?;
+    let mut layouts = Vec::with_capacity(groups.len());
+    let mut cursor = first_sectors_desc_offset;
+    for group in groups {
+        let table_entry_bytes = u64::try_from(group.end_chunk - group.first_chunk)
+            .map_err(|_| EwfError::Malformed("writer table entry count does not fit u64".into()))?
+            .checked_mul(4)
+            .ok_or_else(|| EwfError::Malformed("writer table entry size overflow".into()))?;
+        let table_data_size = 24_u64
+            .checked_add(table_entry_bytes)
+            .and_then(|value| value.checked_add(table_footer_bytes))
+            .ok_or_else(|| EwfError::Malformed("writer table data size overflow".into()))?;
+        let sectors_desc_offset = cursor;
+        let sectors_data_offset = sectors_desc_offset
+            .checked_add(ewf1::SECTION_DESCRIPTOR_SIZE as u64)
+            .ok_or_else(|| EwfError::Malformed("writer sectors data offset overflow".into()))?;
+        let table_desc_offset = sectors_data_offset
+            .checked_add(group.payload_size)
+            .ok_or_else(|| EwfError::Malformed("writer table descriptor offset overflow".into()))?;
+        let table_end_offset = table_desc_offset
+            .checked_add(ewf1::SECTION_DESCRIPTOR_SIZE as u64)
+            .and_then(|value| value.checked_add(table_data_size))
+            .ok_or_else(|| EwfError::Malformed("writer table section range overflow".into()))?;
+        let (table2_desc_offset, end_offset) = if writes_table2 {
+            let end_offset = table_end_offset
+                .checked_add(ewf1::SECTION_DESCRIPTOR_SIZE as u64)
+                .and_then(|value| value.checked_add(table_data_size))
+                .ok_or_else(|| {
+                    EwfError::Malformed("writer table2 section range overflow".into())
+                })?;
+            (Some(table_end_offset), end_offset)
+        } else {
+            (None, table_end_offset)
+        };
+        layouts.push(Ewf1TableGroupLayout {
+            first_chunk: group.first_chunk,
+            end_chunk: group.end_chunk,
+            payload_size: group.payload_size,
+            sectors_desc_offset,
+            sectors_data_offset,
+            table_desc_offset,
+            table_data_size,
+            table2_desc_offset,
+            end_offset,
+        });
+        cursor = end_offset;
+    }
+    Ok(layouts)
+}
+
 fn append_ewf1_table_data(
     bytes: &mut Vec<u8>,
     chunk_count: u32,
@@ -5349,4 +5520,209 @@ fn hex_string(bytes: &[u8]) -> String {
         out.push(char::from(HEX[(byte & 0x0f) as usize]));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chunk(data_size: u64) -> ChunkDescriptor {
+        ChunkDescriptor {
+            data_offset: 0,
+            data_size,
+            compressed: false,
+            has_checksum: false,
+            pattern_fill: None,
+        }
+    }
+
+    #[test]
+    fn table_groups_split_at_31_bit_payload_cap() {
+        let one_gib = 0x4000_0000_u64;
+        let chunks = vec![chunk(one_gib), chunk(one_gib), chunk(one_gib)];
+
+        let groups = ewf1_table_groups(
+            &chunks,
+            EWF1_TABLE_GROUP_MAX_ENTRIES,
+            EWF1_TABLE_GROUP_MAX_PAYLOAD,
+        )
+        .unwrap();
+
+        assert_eq!(groups.len(), 3);
+        for group in &groups {
+            assert!(group.payload_size <= EWF1_TABLE_GROUP_MAX_PAYLOAD);
+        }
+    }
+
+    #[test]
+    fn table_groups_split_at_entry_cap() {
+        let chunks = vec![chunk(512); 5];
+
+        let groups = ewf1_table_groups(&chunks, 2, EWF1_TABLE_GROUP_MAX_PAYLOAD).unwrap();
+
+        assert_eq!(
+            groups,
+            [
+                Ewf1TableGroup {
+                    first_chunk: 0,
+                    end_chunk: 2,
+                    payload_size: 1024
+                },
+                Ewf1TableGroup {
+                    first_chunk: 2,
+                    end_chunk: 4,
+                    payload_size: 1024
+                },
+                Ewf1TableGroup {
+                    first_chunk: 4,
+                    end_chunk: 5,
+                    payload_size: 512
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn table_group_count_estimate_accounts_for_interacting_limits() {
+        let large_chunk_size =
+            EWF1_TABLE_GROUP_MAX_PAYLOAD / EWF1_TABLE_GROUP_MAX_ENTRIES as u64 + 1;
+        let mut chunks = vec![chunk(1); EWF1_TABLE_GROUP_MAX_ENTRIES];
+        chunks.extend(std::iter::repeat_n(
+            chunk(large_chunk_size),
+            EWF1_TABLE_GROUP_MAX_ENTRIES,
+        ));
+        let actual_groups = ewf1_table_groups(
+            &chunks,
+            EWF1_TABLE_GROUP_MAX_ENTRIES,
+            EWF1_TABLE_GROUP_MAX_PAYLOAD,
+        )
+        .unwrap();
+        let estimated_state = chunks
+            .iter()
+            .try_fold(Ewf1TableGroupState::default(), |state, chunk| {
+                state.add_chunk(
+                    chunk.data_size,
+                    EWF1_TABLE_GROUP_MAX_ENTRIES,
+                    EWF1_TABLE_GROUP_MAX_PAYLOAD,
+                )
+            })
+            .unwrap();
+
+        assert_eq!(actual_groups.len(), 3);
+        assert_eq!(estimated_state.group_count, actual_groups.len() as u64);
+    }
+
+    #[test]
+    fn segment_groups_respect_maximum_size_when_table_limits_interact() {
+        let large_chunk_size =
+            EWF1_TABLE_GROUP_MAX_PAYLOAD / EWF1_TABLE_GROUP_MAX_ENTRIES as u64 + 1;
+        let mut chunks = vec![chunk(1); EWF1_TABLE_GROUP_MAX_ENTRIES];
+        chunks.extend(std::iter::repeat_n(
+            chunk(large_chunk_size),
+            EWF1_TABLE_GROUP_MAX_ENTRIES,
+        ));
+        let options = WriteOptions::default();
+        let payload_size = chunks.iter().map(|chunk| chunk.data_size).sum();
+        let old_aggregate_estimate =
+            estimated_ewf1_segment_size(chunks.len(), payload_size, 2, &options).unwrap();
+
+        let segments =
+            segment_groups(&chunks, Some(old_aggregate_estimate), &options, 0, 0).unwrap();
+
+        assert!(segments.len() > 1);
+        for segment_range in segments {
+            let segment = &chunks[segment_range];
+            let payload_size = segment.iter().map(|chunk| chunk.data_size).sum();
+            let table_group_state = segment
+                .iter()
+                .try_fold(Ewf1TableGroupState::default(), |state, chunk| {
+                    state.add_chunk(
+                        chunk.data_size,
+                        EWF1_TABLE_GROUP_MAX_ENTRIES,
+                        EWF1_TABLE_GROUP_MAX_PAYLOAD,
+                    )
+                })
+                .unwrap();
+            let estimated_size = estimated_ewf1_segment_size(
+                segment.len(),
+                payload_size,
+                table_group_state.group_count,
+                &options,
+            )
+            .unwrap();
+            assert!(estimated_size <= old_aggregate_estimate);
+        }
+    }
+
+    #[test]
+    fn segment_groups_return_ranges_into_descriptor_slice() {
+        let chunks = vec![chunk(512); 3];
+        let options = WriteOptions::default();
+        let one_chunk_segment_size = estimated_ewf1_segment_size(1, 512, 1, &options).unwrap();
+
+        let groups: Vec<std::ops::Range<usize>> =
+            segment_groups(&chunks, Some(one_chunk_segment_size), &options, 0, 0).unwrap();
+
+        assert_eq!(groups, [0..1, 1..2, 2..3]);
+    }
+
+    #[test]
+    fn table_groups_keep_small_payload_in_one_group() {
+        let chunks = vec![chunk(32_768), chunk(32_768)];
+
+        let groups = ewf1_table_groups(
+            &chunks,
+            EWF1_TABLE_GROUP_MAX_ENTRIES,
+            EWF1_TABLE_GROUP_MAX_PAYLOAD,
+        )
+        .unwrap();
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].payload_size, 65_536);
+    }
+
+    #[test]
+    fn table_groups_cover_empty_chunk_list_with_one_empty_group() {
+        let groups = ewf1_table_groups(
+            &[],
+            EWF1_TABLE_GROUP_MAX_ENTRIES,
+            EWF1_TABLE_GROUP_MAX_PAYLOAD,
+        )
+        .unwrap();
+
+        assert_eq!(
+            groups,
+            [Ewf1TableGroup {
+                first_chunk: 0,
+                end_chunk: 0,
+                payload_size: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn table_group_layouts_chain_sequential_section_offsets() {
+        let chunks = vec![chunk(0x4000_0000), chunk(0x4000_0000), chunk(0x4000_0000)];
+
+        let layouts = ewf1_table_group_layouts(&chunks, 1000, 4, true).unwrap();
+
+        assert_eq!(layouts.len(), 3);
+        let mut expected_offset = 1000;
+        for (index, layout) in layouts.iter().enumerate() {
+            assert_eq!(layout.sectors_desc_offset, expected_offset);
+            assert_eq!(layout.sectors_data_offset, expected_offset + 76);
+            assert_eq!(
+                layout.table_desc_offset,
+                layout.sectors_data_offset + 0x4000_0000
+            );
+            assert_eq!(layout.table_data_size, 24 + 4 + 4);
+            assert_eq!(
+                layout.table2_desc_offset,
+                Some(layout.table_desc_offset + 76 + layout.table_data_size)
+            );
+            assert_eq!(layout.first_chunk, index);
+            assert_eq!(layout.end_chunk, index + 1);
+            expected_offset = layout.end_offset;
+        }
+    }
 }

@@ -955,6 +955,56 @@ fn synthetic_e01_full_width_offset(data: &[u8]) -> NamedTempFile {
     file
 }
 
+fn synthetic_e01_full_width_offset_with_zero_base(data: &[u8]) -> NamedTempFile {
+    let chunk_size = 32_768_usize;
+
+    let volume_desc_offset = 13_u64;
+    let volume_data_offset = volume_desc_offset + 76;
+    let table_desc_offset = volume_data_offset + 94;
+    let table_data_offset = table_desc_offset + 76;
+    let table_entries_offset = table_data_offset + 24;
+    let sectors_desc_offset = table_entries_offset + 4;
+    let sectors_data_offset = sectors_desc_offset + 76;
+    let chunk_offset = sectors_data_offset + 0x8000_1000;
+    let done_desc_offset = chunk_offset + chunk_size as u64;
+
+    let mut file = tempfile::Builder::new().suffix(".E01").tempfile().unwrap();
+    file.write_all(&EVF_SIGNATURE).unwrap();
+    file.write_all(&[1]).unwrap();
+    file.write_all(&1_u16.to_le_bytes()).unwrap();
+    file.write_all(&0_u16.to_le_bytes()).unwrap();
+    file.write_all(&section_desc(b"volume", table_desc_offset, 76 + 94))
+        .unwrap();
+    let mut volume = [0; 94];
+    volume[4..8].copy_from_slice(&1_u32.to_le_bytes());
+    volume[8..12].copy_from_slice(&64_u32.to_le_bytes());
+    volume[12..16].copy_from_slice(&512_u32.to_le_bytes());
+    volume[16..24].copy_from_slice(&64_u64.to_le_bytes());
+    file.write_all(&volume).unwrap();
+    file.write_all(&section_desc(b"table", sectors_desc_offset, 76 + 24 + 4))
+        .unwrap();
+    let mut table_header = [0; 24];
+    table_header[0..4].copy_from_slice(&1_u32.to_le_bytes());
+    file.write_all(&table_header).unwrap();
+    let full_width_entry = u32::try_from(chunk_offset).unwrap();
+    assert!(full_width_entry & 0x8000_0000 != 0);
+    file.write_all(&full_width_entry.to_le_bytes()).unwrap();
+    file.write_all(&section_desc(
+        b"sectors",
+        done_desc_offset,
+        76 + (chunk_offset - sectors_data_offset) + chunk_size as u64,
+    ))
+    .unwrap();
+
+    let mut chunk = vec![0; chunk_size];
+    chunk[..data.len()].copy_from_slice(data);
+    file.seek(SeekFrom::Start(chunk_offset)).unwrap();
+    file.write_all(&chunk).unwrap();
+    file.write_all(&section_desc(b"done", 0, 76)).unwrap();
+    file.flush().unwrap();
+    file
+}
+
 #[cfg(feature = "verify")]
 fn synthetic_e01_with_stored_digest(data: &[u8]) -> NamedTempFile {
     let chunk_size = 32_768_usize;
@@ -4837,6 +4887,18 @@ fn image_open_reads_synthetic_ewf1_full_width_table_offset() {
 
     assert_eq!(read, 10);
     assert_eq!(&buf, b"full width");
+}
+
+#[test]
+fn image_open_reads_synthetic_ewf1_full_width_table_offset_with_zero_base() {
+    let file = synthetic_e01_full_width_offset_with_zero_base(b"overflowed");
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    let mut buf = [0; 10];
+
+    let read = image.read_at(&mut buf, 0).unwrap();
+
+    assert_eq!(read, 10);
+    assert_eq!(&buf, b"overflowed");
 }
 
 #[test]
