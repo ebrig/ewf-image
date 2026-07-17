@@ -7,6 +7,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Instant;
 
 use lru::LruCache;
 use md5::Digest as _;
@@ -25,6 +26,7 @@ use crate::metadata::{
     parse_xhash_data, parse_xheader_data,
 };
 use crate::reader_cache::{TABLE_PAGE_SIZE, TablePageCache, TablePageKey};
+use crate::reader_statistics::{ReaderCacheInfo, ReaderStatistics, ReaderStatisticsCollector};
 use crate::segment::discover_segments;
 use crate::signature::{check_segment_files_corruption, check_segment_files_encryption};
 use crate::single_files::parse_ewf2_single_files_data;
@@ -79,7 +81,9 @@ struct ImageInner {
     segments: Mutex<SegmentFilePool>,
     index: LazyChunkIndex,
     chunk_cache: Mutex<LruCache<u64, Arc<Vec<u8>>>>,
+    chunk_cache_capacity_bytes: u64,
     table_page_cache: Mutex<TablePageCache>,
+    statistics: Arc<ReaderStatisticsCollector>,
     checksum_errors: Mutex<Vec<SectorRange>>,
     read_zero_chunk_on_error: AtomicBool,
     abort_signaled: AtomicBool,
@@ -88,9 +92,11 @@ struct ImageInner {
 struct SegmentFilePool {
     files: Vec<Option<SegmentReaderHandle>>,
     lengths: Vec<Option<u64>>,
+    ever_opened: Vec<bool>,
     open_order: VecDeque<usize>,
     maximum_open_handles: Option<usize>,
     mode: SegmentFilePoolMode,
+    statistics: Arc<ReaderStatisticsCollector>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,10 +117,15 @@ impl std::fmt::Debug for SegmentFilePool {
                     .filter(|length| length.is_some())
                     .count(),
             )
+            .field(
+                "ever_opened_count",
+                &self.ever_opened.iter().filter(|opened| **opened).count(),
+            )
             .field("open_count", &self.open_count())
             .field("open_order", &self.open_order)
             .field("maximum_open_handles", &self.maximum_open_handles)
             .field("mode", &self.mode)
+            .field("statistics_enabled", &self.statistics.enabled())
             .finish()
     }
 }
@@ -250,7 +261,11 @@ impl Image {
             return Err(EwfError::NoSegments("empty segment list".into()));
         }
 
-        let segments = SegmentFilePool::new_path(paths.len(), options.maximum_open_handles())?;
+        let statistics = Arc::new(ReaderStatisticsCollector::new(
+            options.reader_statistics_enabled(),
+        ));
+        let segments =
+            SegmentFilePool::new_path(paths.len(), options.maximum_open_handles(), statistics)?;
         Self::open_segment_sources(paths, segments, options)
     }
 
@@ -268,7 +283,11 @@ impl Image {
             ));
         }
 
-        let segments = SegmentFilePool::new_readers(readers, options.maximum_open_handles())?;
+        let statistics = Arc::new(ReaderStatisticsCollector::new(
+            options.reader_statistics_enabled(),
+        ));
+        let segments =
+            SegmentFilePool::new_readers(readers, options.maximum_open_handles(), statistics)?;
         Self::open_segment_sources(paths, segments, options)
     }
 
@@ -277,6 +296,7 @@ impl Image {
         mut segments: SegmentFilePool,
         options: OpenOptions,
     ) -> Result<Self> {
+        let statistics = Arc::clone(&segments.statistics);
         let mut ranges = Vec::new();
         let mut metadata = EwfMetadata::default();
         let mut acquisition_errors = Vec::new();
@@ -305,6 +325,7 @@ impl Image {
         let mut expected_ewf2_case_data = None;
 
         for (segment_index, path) in paths.iter().enumerate() {
+            statistics.record_segment_parse();
             let parsed = {
                 let file = segments.file_mut(segment_index, path)?;
                 parse_segment(
@@ -314,6 +335,7 @@ impl Image {
                     next_ewf1_chunk,
                     options.strictness(),
                     options.header_codepage(),
+                    &statistics,
                 )?
             };
             let expected_segment_number = u64::try_from(segment_index + 1)
@@ -468,6 +490,9 @@ impl Image {
         };
         let cache_size =
             NonZeroUsize::new(cache_entries).expect("chunk cache size is at least one");
+        let chunk_cache_capacity_bytes = u64::try_from(cache_entries)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(info.chunk_size);
 
         Ok(Self {
             inner: Arc::new(ImageInner {
@@ -475,9 +500,11 @@ impl Image {
                 segments: Mutex::new(segments),
                 index,
                 chunk_cache: Mutex::new(LruCache::new(cache_size)),
+                chunk_cache_capacity_bytes,
                 table_page_cache: Mutex::new(TablePageCache::new(
                     options.table_entry_cache_size_bytes(),
                 )),
+                statistics,
                 checksum_errors: Mutex::new(Vec::new()),
                 read_zero_chunk_on_error: AtomicBool::new(options.read_zero_chunk_on_error()),
                 abort_signaled: AtomicBool::new(false),
@@ -488,6 +515,28 @@ impl Image {
     /// Returns parsed image metadata and geometry.
     pub fn info(&self) -> &ImageInfo {
         &self.inner.info
+    }
+
+    /// Returns cumulative reader counters when statistics were enabled at open time.
+    ///
+    /// Snapshots are shared across clones and cursors created from this image.
+    pub fn reader_statistics(&self) -> Option<ReaderStatistics> {
+        self.inner.statistics.snapshot()
+    }
+
+    /// Returns configured and observed reader cache memory usage.
+    pub fn reader_cache_info(&self) -> ReaderCacheInfo {
+        let cache = self
+            .inner
+            .table_page_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ReaderCacheInfo::new(
+            self.inner.chunk_cache_capacity_bytes,
+            cache.capacity_bytes(),
+            cache.cached_bytes(),
+            cache.peak_bytes(),
+        )
     }
 
     /// Returns the first segment filename or supplied-reader label.
@@ -817,6 +866,7 @@ impl Image {
 
     /// Returns a seekable cursor over the logical media stream.
     pub fn cursor(&self) -> ImageCursor {
+        self.inner.statistics.record_cursor_created();
         ImageCursor {
             image: self.clone(),
             position: 0,
@@ -1193,6 +1243,7 @@ impl Image {
 
     /// Returns a seekable cursor over a logical single-file entry.
     pub fn single_file_cursor(&self, entry: &SingleFileEntry) -> SingleFileCursor {
+        self.inner.statistics.record_cursor_created();
         SingleFileCursor {
             image: self.clone(),
             entry: entry.clone(),
@@ -1270,6 +1321,9 @@ impl Image {
             .map_err(|_| EwfError::Malformed("chunk cache lock poisoned".into()))?
             .get(&chunk_id)
             .cloned();
+        self.inner
+            .statistics
+            .record_chunk_cache_access(cached.is_some());
         if let Some(cached) = cached {
             return Ok(cached);
         }
@@ -1435,6 +1489,7 @@ impl Image {
             .map_err(|_| EwfError::Malformed("table page cache lock poisoned".into()))?
             .is_disabled();
         if cache_disabled {
+            self.inner.statistics.record_table_page_cache_access(false);
             let path = self
                 .inner
                 .info
@@ -1464,6 +1519,9 @@ impl Image {
                 .lock()
                 .map_err(|_| EwfError::Malformed("table page cache lock poisoned".into()))?
                 .get(&key);
+            self.inner
+                .statistics
+                .record_table_page_cache_access(cached.is_some());
             let page = if let Some(page) = cached {
                 page
             } else {
@@ -1561,6 +1619,9 @@ impl Image {
         let mut encoded = vec![0; encoded_size];
         file.seek(SeekFrom::Start(chunk.offset))?;
         file.read_exact(&mut encoded)?;
+        self.inner
+            .statistics
+            .record_encoded_bytes_read(chunk.encoded_size);
         Ok(encoded)
     }
 
@@ -1569,7 +1630,17 @@ impl Image {
         if chunk.validate_checksum {
             validate_raw_chunk_checksum(&encoded, chunk.logical_size)?;
         }
-        decode_chunk(&encoded, chunk.encoding, chunk.logical_size)
+        let decompression_started = (self.inner.statistics.enabled()
+            && matches!(chunk.encoding, ChunkEncoding::Zlib | ChunkEncoding::Bzip2))
+        .then(Instant::now);
+        let decoded = decode_chunk(&encoded, chunk.encoding, chunk.logical_size)?;
+        if let Some(started) = decompression_started {
+            self.inner
+                .statistics
+                .record_decompression(started.elapsed());
+        }
+        self.inner.statistics.record_decoded_bytes(decoded.len());
+        Ok(decoded)
     }
 
     fn decode_chunk_with_policy(&self, chunk_id: u64, chunk: Chunk) -> Result<(Vec<u8>, bool)> {
@@ -1598,20 +1669,27 @@ impl Image {
 }
 
 impl SegmentFilePool {
-    fn new_path(segment_count: usize, maximum_open_handles: Option<usize>) -> Result<Self> {
+    fn new_path(
+        segment_count: usize,
+        maximum_open_handles: Option<usize>,
+        statistics: Arc<ReaderStatisticsCollector>,
+    ) -> Result<Self> {
         validate_maximum_open_handles(maximum_open_handles)?;
         Ok(Self {
             files: (0..segment_count).map(|_| None).collect(),
             lengths: vec![None; segment_count],
+            ever_opened: vec![false; segment_count],
             open_order: VecDeque::new(),
             maximum_open_handles,
             mode: SegmentFilePoolMode::ReopenFromPath,
+            statistics,
         })
     }
 
     fn new_readers(
         readers: Vec<SegmentReaderHandle>,
         maximum_open_handles: Option<usize>,
+        statistics: Arc<ReaderStatisticsCollector>,
     ) -> Result<Self> {
         validate_maximum_open_handles(maximum_open_handles)?;
         let segment_count = readers.len();
@@ -1621,12 +1699,15 @@ impl SegmentFilePool {
             ));
         }
 
+        statistics.record_segment_handle_open(segment_count);
         Ok(Self {
             files: readers.into_iter().map(Some).collect(),
             lengths: vec![None; segment_count],
+            ever_opened: vec![true; segment_count],
             open_order: (0..segment_count).collect(),
             maximum_open_handles,
             mode: SegmentFilePoolMode::SuppliedReaders,
+            statistics,
         })
     }
 
@@ -1695,6 +1776,10 @@ impl SegmentFilePool {
             .ok_or_else(|| EwfError::Malformed("segment index out of range".into()))?;
         if slot.is_none() {
             self.reserve_handle()?;
+            let was_opened = *self
+                .ever_opened
+                .get(segment_index)
+                .ok_or_else(|| EwfError::Malformed("segment index out of range".into()))?;
             let file = match self.mode {
                 SegmentFilePoolMode::ReopenFromPath => {
                     Some(Box::new(File::open(path)?) as SegmentReaderHandle)
@@ -1709,6 +1794,12 @@ impl SegmentFilePool {
                 .get_mut(segment_index)
                 .ok_or_else(|| EwfError::Malformed("segment index out of range".into()))?;
             *slot = Some(file);
+            self.ever_opened[segment_index] = true;
+            if was_opened {
+                self.statistics.record_segment_handle_reopen();
+            } else {
+                self.statistics.record_segment_handle_open(1);
+            }
         }
         self.mark_used(segment_index);
         self.files[segment_index]
@@ -2090,6 +2181,7 @@ fn parse_ewf1_segment(
     first_chunk: u64,
     profile_hint: FormatProfile,
     header_codepage: HeaderCodepage,
+    statistics: &ReaderStatisticsCollector,
 ) -> Result<ParsedSegment> {
     let mut header = [0; ewf1::FILE_HEADER_SIZE];
     file.seek(SeekFrom::Start(0))?;
@@ -2259,6 +2351,7 @@ fn parse_ewf1_segment(
         first_chunk,
         logical_size,
         volume.smart,
+        statistics,
     )?;
     let table_chunk_count = ranges.iter().try_fold(0_u64, |count, range| {
         count
@@ -2340,6 +2433,7 @@ fn parse_segment(
     first_ewf1_chunk: u64,
     strictness: OpenStrictness,
     header_codepage: HeaderCodepage,
+    statistics: &ReaderStatisticsCollector,
 ) -> Result<ParsedSegment> {
     let mut signature = [0; 8];
     file.seek(SeekFrom::Start(0))?;
@@ -2351,9 +2445,10 @@ fn parse_segment(
             first_ewf1_chunk,
             ewf1_format_profile_hint_from_path(path),
             header_codepage,
+            statistics,
         )
     } else if signature == ewf2::EX01_SIGNATURE || signature == ewf2::LEF2_SIGNATURE {
-        parse_ewf2_segment(file, segment_index, strictness)
+        parse_ewf2_segment(file, segment_index, strictness, statistics)
     } else {
         Err(EwfError::InvalidSignature)
     }
@@ -2363,6 +2458,7 @@ fn parse_ewf2_segment(
     file: &mut dyn SegmentReader,
     segment_index: usize,
     strictness: OpenStrictness,
+    statistics: &ReaderStatisticsCollector,
 ) -> Result<ParsedSegment> {
     let mut header = [0; ewf2::FILE_HEADER_SIZE];
     file.seek(SeekFrom::Start(0))?;
@@ -2565,6 +2661,7 @@ fn parse_ewf2_segment(
         segment_index,
         logical_size,
         header.compression_method,
+        statistics,
     )?;
     if logical_size == 0 {
         let discovered_chunks = ranges.iter().try_fold(0_u64, |max, range| {
@@ -3075,6 +3172,7 @@ fn parse_ewf1_ranges(
     first_chunk: u64,
     logical_size: u64,
     allow_large_compressed_chunks: bool,
+    statistics: &ReaderStatisticsCollector,
 ) -> Result<Vec<TableRange>> {
     let mut ranges = Vec::new();
     let mut next_chunk = first_chunk;
@@ -3144,6 +3242,7 @@ fn parse_ewf1_ranges(
                 entry_bytes,
                 entries_end,
                 "EWF1 table entries",
+                statistics,
             )?;
         }
 
@@ -3230,6 +3329,7 @@ fn parse_ewf2_ranges(
     segment_index: usize,
     logical_size: u64,
     compression_method: ewf2::CompressionMethod,
+    statistics: &ReaderStatisticsCollector,
 ) -> Result<Vec<TableRange>> {
     let mut ranges = Vec::new();
     for section in sections
@@ -3297,6 +3397,7 @@ fn parse_ewf2_ranges(
                 entries_bytes,
                 entries_end,
                 "EWF2 table entries",
+                statistics,
             )?;
         }
 
@@ -3843,6 +3944,7 @@ fn validate_present_table_entries_checksum(
     entry_bytes: u64,
     checksum_offset: u64,
     label: &str,
+    statistics: &ReaderStatisticsCollector,
 ) -> Result<()> {
     let checksum = read_exact_at(file, checksum_offset, 4)?;
     let stored = u32::from_le_bytes(
@@ -3854,7 +3956,11 @@ fn validate_present_table_entries_checksum(
     if stored == 0 {
         return Ok(());
     }
+    let started = statistics.enabled().then(Instant::now);
     let calculated = stream_adler32(file, entries_offset, entry_bytes)?;
+    if let Some(started) = started {
+        statistics.record_table_checksum(entry_bytes, started.elapsed());
+    }
     if stored != calculated {
         return Err(EwfError::Malformed(format!("{label} checksum mismatch")));
     }
@@ -4110,7 +4216,12 @@ mod tests {
             cursor: Cursor::new(vec![0; 128]),
             seek_from_end_calls: Arc::clone(&seek_from_end_calls),
         };
-        let mut pool = SegmentFilePool::new_readers(vec![Box::new(reader)], None).unwrap();
+        let mut pool = SegmentFilePool::new_readers(
+            vec![Box::new(reader)],
+            None,
+            Arc::new(ReaderStatisticsCollector::new(false)),
+        )
+        .unwrap();
         let path = Path::new("cached-length.E01");
 
         assert_eq!(pool.segment_len(0, path).unwrap(), 128);
@@ -4135,6 +4246,7 @@ mod tests {
             entries.len() as u64,
             entries.len() as u64,
             "test table",
+            &ReaderStatisticsCollector::new(false),
         )
         .unwrap();
 
@@ -4155,6 +4267,7 @@ mod tests {
             entries.len() as u64,
             entries.len() as u64,
             "test table",
+            &ReaderStatisticsCollector::new(false),
         )
         .unwrap_err();
 

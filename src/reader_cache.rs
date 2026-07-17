@@ -15,6 +15,7 @@ pub(crate) struct TablePageCache {
     pages: LruCache<TablePageKey, Arc<Vec<u8>>>,
     capacity_bytes: usize,
     cached_bytes: usize,
+    peak_bytes: usize,
 }
 
 impl TablePageCache {
@@ -23,6 +24,7 @@ impl TablePageCache {
             pages: LruCache::unbounded(),
             capacity_bytes,
             cached_bytes: 0,
+            peak_bytes: 0,
         }
     }
 
@@ -49,13 +51,21 @@ impl TablePageCache {
             self.cached_bytes = self.cached_bytes.saturating_sub(evicted.len());
         }
         self.cached_bytes = self.cached_bytes.saturating_add(bytes.len());
+        self.peak_bytes = self.peak_bytes.max(self.cached_bytes);
         self.pages.put(key, Arc::clone(&bytes));
         bytes
     }
 
-    #[cfg(test)]
+    pub(crate) fn capacity_bytes(&self) -> usize {
+        self.capacity_bytes
+    }
+
     pub(crate) fn cached_bytes(&self) -> usize {
         self.cached_bytes
+    }
+
+    pub(crate) fn peak_bytes(&self) -> usize {
+        self.peak_bytes
     }
 }
 
@@ -89,6 +99,7 @@ mod tests {
         assert!(cache.get(&first).is_some());
         assert!(cache.get(&third).is_some());
         assert_eq!(cache.cached_bytes(), 8);
+        assert_eq!(cache.peak_bytes(), 8);
     }
 
     #[test]
@@ -101,6 +112,7 @@ mod tests {
         assert_eq!(inserted.as_slice(), &[1, 2, 3, 4]);
         assert!(cache.get(&page).is_none());
         assert_eq!(cache.cached_bytes(), 0);
+        assert_eq!(cache.peak_bytes(), 0);
     }
 
     #[test]
@@ -112,6 +124,7 @@ mod tests {
         cache.insert(page, vec![2; 5]);
 
         assert_eq!(cache.cached_bytes(), 5);
+        assert_eq!(cache.peak_bytes(), 5);
         assert_eq!(
             cache.get(&page).as_deref().map(Vec::as_slice),
             Some(&[2; 5][..])

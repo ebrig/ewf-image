@@ -139,3 +139,48 @@ fn disabled_table_page_cache_uses_exact_table_entry_reads() {
 
     assert!(reads.four_byte_calls > 0);
 }
+
+#[test]
+fn reader_statistics_are_optional_and_shared_with_cache_information() {
+    let (bytes, expected) = synthetic_e01();
+    let (disabled, _) = open_counted(bytes.clone(), OpenOptions::default());
+    assert!(disabled.reader_statistics().is_none());
+
+    let options = OpenOptions::default()
+        .with_chunk_cache_size_bytes(2 * CHUNK_SIZE)
+        .with_table_entry_cache_size_bytes(4 * 1024 * 1024)
+        .with_reader_statistics(true);
+    let (image, _) = open_counted(bytes, options);
+    let opened = image.reader_statistics().unwrap();
+    assert_eq!(opened.segment_parses(), 1);
+    assert_eq!(opened.segment_handle_opens(), 1);
+    assert!(opened.table_checksum_bytes() > 0);
+
+    let mut first = [0];
+    image.read_at(&mut first, 0).unwrap();
+    let mut second = [0];
+    image.read_at(&mut second, 0).unwrap();
+    let _cursor = image.cursor();
+
+    let statistics = image
+        .clone()
+        .reader_statistics()
+        .unwrap()
+        .saturating_delta(opened);
+    assert_eq!(first, second);
+    assert_eq!(first[0], expected[0]);
+    assert_eq!(statistics.cursors_created(), 1);
+    assert_eq!(statistics.chunk_cache_misses(), 1);
+    assert_eq!(statistics.chunk_cache_hits(), 1);
+    assert!(statistics.table_page_cache_misses() >= 1);
+    assert!(statistics.table_page_cache_hits() >= 1);
+    assert!(statistics.encoded_bytes_read() > 0);
+    assert!(statistics.decoded_bytes() > 0);
+
+    let cache = image.reader_cache_info();
+    assert_eq!(cache.chunk_cache_capacity_bytes(), (2 * CHUNK_SIZE) as u64);
+    assert_eq!(cache.table_entry_cache_capacity_bytes(), 4 * 1024 * 1024);
+    assert!(cache.table_entry_cache_current_bytes() > 0);
+    assert!(cache.table_entry_cache_peak_bytes() >= cache.table_entry_cache_current_bytes());
+    assert!(cache.table_entry_cache_peak_bytes() <= cache.table_entry_cache_capacity_bytes());
+}

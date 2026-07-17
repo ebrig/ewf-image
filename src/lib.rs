@@ -116,6 +116,7 @@ mod image;
 mod index;
 mod metadata;
 mod reader_cache;
+mod reader_statistics;
 mod segment;
 mod signature;
 mod single_files;
@@ -126,6 +127,7 @@ mod writer;
 
 pub use error::{EwfError, Result};
 pub use image::{Image, ImageCursor, SegmentReader, SingleFileCursor};
+pub use reader_statistics::{ReaderCacheInfo, ReaderStatistics};
 pub use signature::{
     check_file_corruption, check_file_encryption, check_file_signature,
     check_segment_files_corruption, check_segment_files_encryption,

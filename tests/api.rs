@@ -6,8 +6,9 @@ use ewf_image::{
     ChunkCacheCapacity, CompressionFlags, CompressionLevel, CompressionMethod, CompressionValues,
     DataChunk, DataChunkEncoding, EncodedDataChunk, EwfMetadata, EwfWriter, Format, FormatProfile,
     HeaderCodepage, HeaderDateFormat, ImageInfo, MediaFlags, MediaInfo, MediaType, MemoryExtent,
-    OpenOptions, OpenStrictness, SectorRange, SegmentFileVersion, SingleFileEntry,
-    SingleFileEntryType, SingleFileSource, StoredHashes, WriteOptions,
+    OpenOptions, OpenStrictness, ReaderCacheInfo, ReaderStatistics, SectorRange,
+    SegmentFileVersion, SingleFileEntry, SingleFileEntryType, SingleFileSource, StoredHashes,
+    WriteOptions,
 };
 
 fn adler32(data: &[u8]) -> u32 {
@@ -81,6 +82,24 @@ fn open_options_chunk_count_builder_replaces_byte_capacity() {
         options.chunk_cache_capacity(),
         ChunkCacheCapacity::Chunks(12)
     );
+}
+
+#[test]
+fn reader_diagnostic_snapshots_have_future_proof_getters() {
+    let statistics = ReaderStatistics::default();
+    let cache = ReaderCacheInfo::default();
+
+    assert_eq!(statistics.chunk_cache_hits(), 0);
+    assert_eq!(statistics.chunk_cache_misses(), 0);
+    assert_eq!(statistics.table_page_cache_hits(), 0);
+    assert_eq!(statistics.table_page_cache_misses(), 0);
+    assert_eq!(statistics.encoded_bytes_read(), 0);
+    assert_eq!(statistics.decoded_bytes(), 0);
+    assert_eq!(statistics.saturating_delta(statistics), statistics);
+    assert_eq!(cache.chunk_cache_capacity_bytes(), 0);
+    assert_eq!(cache.table_entry_cache_capacity_bytes(), 0);
+    assert_eq!(cache.table_entry_cache_current_bytes(), 0);
+    assert_eq!(cache.table_entry_cache_peak_bytes(), 0);
 }
 
 #[test]
