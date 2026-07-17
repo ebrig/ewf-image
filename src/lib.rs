@@ -131,13 +131,13 @@ pub use signature::{
 };
 pub use single_files::SINGLE_FILE_PATH_SEPARATOR;
 pub use types::{
-    AcquisitionError, CompressionFlags, CompressionLevel, CompressionMethod, CompressionValues,
-    DataChunk, DataChunkEncoding, EncodedDataChunk, EwfMetadata, Format, FormatProfile,
-    HeaderCodepage, HeaderDateFormat, ImageInfo, MediaFlags, MediaInfo, MediaType, MemoryExtent,
-    OpenOptions, OpenStrictness, SectorRange, SegmentFileVersion, SingleFileAttribute,
-    SingleFileEntry, SingleFileEntryType, SingleFileExtent, SingleFilePermission,
-    SingleFilePermissionGroup, SingleFileSource, SingleFileSubject, SingleFilesAuxTables,
-    SingleFilesInfo, StoredHashes,
+    AcquisitionError, ChunkCacheCapacity, CompressionFlags, CompressionLevel, CompressionMethod,
+    CompressionValues, DataChunk, DataChunkEncoding, EncodedDataChunk, EwfMetadata, Format,
+    FormatProfile, HeaderCodepage, HeaderDateFormat, ImageInfo, MediaFlags, MediaInfo, MediaType,
+    MemoryExtent, OpenOptions, OpenStrictness, SectorRange, SegmentFileVersion,
+    SingleFileAttribute, SingleFileEntry, SingleFileEntryType, SingleFileExtent,
+    SingleFilePermission, SingleFilePermissionGroup, SingleFileSource, SingleFileSubject,
+    SingleFilesAuxTables, SingleFilesInfo, StoredHashes,
 };
 pub use writer::{
     EwfWriter, WriteCompression, WriteCompressionLevel, WriteCompressionValues, WriteFormat,

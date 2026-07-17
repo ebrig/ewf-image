@@ -28,11 +28,12 @@ use crate::segment::discover_segments;
 use crate::signature::{check_segment_files_corruption, check_segment_files_encryption};
 use crate::single_files::parse_ewf2_single_files_data;
 use crate::types::{
-    AcquisitionError, CompressionLevel, CompressionMethod, CompressionValues, DataChunk,
-    DataChunkEncoding, EncodedDataChunk, EwfMetadata, Format, FormatProfile, HeaderCodepage,
-    HeaderDateFormat, ImageInfo, MediaFlags, MediaInfo, MediaType, MemoryExtent, OpenOptions,
-    OpenStrictness, SectorRange, SegmentFileVersion, SingleFileEntry, SingleFilePermission,
-    SingleFileSource, SingleFileSubject, SingleFilesAuxTables, SingleFilesInfo, StoredHashes,
+    AcquisitionError, ChunkCacheCapacity, CompressionLevel, CompressionMethod, CompressionValues,
+    DataChunk, DataChunkEncoding, EncodedDataChunk, EwfMetadata, Format, FormatProfile,
+    HeaderCodepage, HeaderDateFormat, ImageInfo, MediaFlags, MediaInfo, MediaType, MemoryExtent,
+    OpenOptions, OpenStrictness, SectorRange, SegmentFileVersion, SingleFileEntry,
+    SingleFilePermission, SingleFileSource, SingleFileSubject, SingleFilesAuxTables,
+    SingleFilesInfo, StoredHashes,
 };
 use crate::{EwfError, Result};
 
@@ -238,7 +239,7 @@ impl Image {
             return Err(EwfError::NoSegments("empty segment list".into()));
         }
 
-        let segments = SegmentFilePool::new_path(paths.len(), options.maximum_open_handles)?;
+        let segments = SegmentFilePool::new_path(paths.len(), options.maximum_open_handles())?;
         Self::open_segment_sources(paths, segments, options)
     }
 
@@ -256,7 +257,7 @@ impl Image {
             ));
         }
 
-        let segments = SegmentFilePool::new_readers(readers, options.maximum_open_handles)?;
+        let segments = SegmentFilePool::new_readers(readers, options.maximum_open_handles())?;
         Self::open_segment_sources(paths, segments, options)
     }
 
@@ -300,8 +301,8 @@ impl Image {
                     path,
                     segment_index,
                     next_ewf1_chunk,
-                    options.strictness,
-                    options.header_codepage,
+                    options.strictness(),
+                    options.header_codepage(),
                 )?
             };
             let expected_segment_number = u64::try_from(segment_index + 1)
@@ -431,8 +432,8 @@ impl Image {
             chunk_size,
             logical_size,
             acquisition_complete,
-            header_codepage: options.header_codepage,
-            header_values_date_format: options.header_values_date_format,
+            header_codepage: options.header_codepage(),
+            header_values_date_format: options.header_values_date_format(),
             media,
             metadata,
             stored_hashes,
@@ -448,8 +449,14 @@ impl Image {
             tracks,
         };
         let index = LazyChunkIndex::new(ranges, info.logical_size, info.chunk_size)?;
-        let cache_size = NonZeroUsize::new(options.chunk_cache_size.max(1))
-            .expect("chunk cache size is at least one");
+        let chunk_size = usize::try_from(info.chunk_size)
+            .map_err(|_| EwfError::Malformed("chunk size does not fit usize".into()))?;
+        let cache_entries = match options.chunk_cache_capacity() {
+            ChunkCacheCapacity::Chunks(entries) => entries.max(1),
+            ChunkCacheCapacity::Bytes(bytes) => bytes.checked_div(chunk_size).unwrap_or(0).max(1),
+        };
+        let cache_size =
+            NonZeroUsize::new(cache_entries).expect("chunk cache size is at least one");
 
         Ok(Self {
             inner: Arc::new(ImageInner {
@@ -458,7 +465,7 @@ impl Image {
                 index,
                 chunk_cache: Mutex::new(LruCache::new(cache_size)),
                 checksum_errors: Mutex::new(Vec::new()),
-                read_zero_chunk_on_error: AtomicBool::new(options.read_zero_chunk_on_error),
+                read_zero_chunk_on_error: AtomicBool::new(options.read_zero_chunk_on_error()),
                 abort_signaled: AtomicBool::new(false),
             }),
         })

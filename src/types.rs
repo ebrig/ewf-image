@@ -238,29 +238,154 @@ pub enum OpenStrictness {
 /// Options that control how an image is opened and read.
 pub struct OpenOptions {
     /// Structural validation policy.
-    pub strictness: OpenStrictness,
-    /// Number of decoded chunks retained in the read cache.
-    pub chunk_cache_size: usize,
+    strictness: OpenStrictness,
+    /// Capacity policy for the decoded-chunk cache.
+    chunk_cache_capacity: ChunkCacheCapacity,
+    /// Maximum bytes retained for cached table-entry pages.
+    table_entry_cache_size_bytes: usize,
+    /// Whether cumulative reader statistics are collected.
+    reader_statistics: bool,
     /// Return zero-filled chunk data when a chunk checksum fails.
-    pub read_zero_chunk_on_error: bool,
+    read_zero_chunk_on_error: bool,
     /// Codepage used to decode EWF1 header values.
-    pub header_codepage: HeaderCodepage,
+    header_codepage: HeaderCodepage,
     /// Date formatting applied when returning header date values.
-    pub header_values_date_format: HeaderDateFormat,
+    header_values_date_format: HeaderDateFormat,
     /// Maximum number of simultaneously open segment handles.
-    pub maximum_open_handles: Option<usize>,
+    maximum_open_handles: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Capacity policy for the decoded-chunk cache.
+pub enum ChunkCacheCapacity {
+    /// Retain at most this many decoded chunks.
+    Chunks(usize),
+    /// Derive the retained chunk count from this byte target.
+    Bytes(usize),
 }
 
 impl Default for OpenOptions {
     fn default() -> Self {
         Self {
             strictness: OpenStrictness::Strict,
-            chunk_cache_size: 64,
+            chunk_cache_capacity: ChunkCacheCapacity::Chunks(64),
+            table_entry_cache_size_bytes: 4 * 1024 * 1024,
+            reader_statistics: false,
             read_zero_chunk_on_error: false,
             header_codepage: HeaderCodepage::Ascii,
             header_values_date_format: HeaderDateFormat::Ctime,
             maximum_open_handles: None,
         }
+    }
+}
+
+impl OpenOptions {
+    /// Returns the structural validation policy.
+    pub fn strictness(&self) -> OpenStrictness {
+        self.strictness
+    }
+
+    /// Sets the structural validation policy.
+    #[must_use]
+    pub fn with_strictness(mut self, strictness: OpenStrictness) -> Self {
+        self.strictness = strictness;
+        self
+    }
+
+    /// Returns the decoded-chunk cache capacity policy.
+    pub fn chunk_cache_capacity(&self) -> ChunkCacheCapacity {
+        self.chunk_cache_capacity
+    }
+
+    /// Configures the decoded-chunk cache by entry count.
+    #[must_use]
+    pub fn with_chunk_cache_size(mut self, chunk_count: usize) -> Self {
+        self.chunk_cache_capacity = ChunkCacheCapacity::Chunks(chunk_count);
+        self
+    }
+
+    /// Configures the decoded-chunk cache by byte target.
+    ///
+    /// At least one decoded chunk is retained even when one chunk exceeds the
+    /// requested byte target.
+    #[must_use]
+    pub fn with_chunk_cache_size_bytes(mut self, bytes: usize) -> Self {
+        self.chunk_cache_capacity = ChunkCacheCapacity::Bytes(bytes);
+        self
+    }
+
+    /// Returns the table-entry page-cache byte limit.
+    pub fn table_entry_cache_size_bytes(&self) -> usize {
+        self.table_entry_cache_size_bytes
+    }
+
+    /// Sets the table-entry page-cache byte limit.
+    ///
+    /// A value of zero disables retention of table-entry pages.
+    #[must_use]
+    pub fn with_table_entry_cache_size_bytes(mut self, bytes: usize) -> Self {
+        self.table_entry_cache_size_bytes = bytes;
+        self
+    }
+
+    /// Returns whether cumulative reader statistics are collected.
+    pub fn reader_statistics_enabled(&self) -> bool {
+        self.reader_statistics
+    }
+
+    /// Enables or disables cumulative reader statistics collection.
+    #[must_use]
+    pub fn with_reader_statistics(mut self, enabled: bool) -> Self {
+        self.reader_statistics = enabled;
+        self
+    }
+
+    /// Returns whether malformed chunks are recovered as zero-filled data.
+    pub fn read_zero_chunk_on_error(&self) -> bool {
+        self.read_zero_chunk_on_error
+    }
+
+    /// Enables or disables malformed-chunk recovery as zero-filled data.
+    #[must_use]
+    pub fn with_read_zero_chunk_on_error(mut self, enabled: bool) -> Self {
+        self.read_zero_chunk_on_error = enabled;
+        self
+    }
+
+    /// Returns the EWF1 header codepage.
+    pub fn header_codepage(&self) -> HeaderCodepage {
+        self.header_codepage
+    }
+
+    /// Sets the EWF1 header codepage.
+    #[must_use]
+    pub fn with_header_codepage(mut self, codepage: HeaderCodepage) -> Self {
+        self.header_codepage = codepage;
+        self
+    }
+
+    /// Returns the header-value date format.
+    pub fn header_values_date_format(&self) -> HeaderDateFormat {
+        self.header_values_date_format
+    }
+
+    /// Sets the header-value date format.
+    #[must_use]
+    pub fn with_header_values_date_format(mut self, format: HeaderDateFormat) -> Self {
+        self.header_values_date_format = format;
+        self
+    }
+
+    /// Returns the maximum number of simultaneously open segment handles.
+    pub fn maximum_open_handles(&self) -> Option<usize> {
+        self.maximum_open_handles
+    }
+
+    /// Sets the maximum number of simultaneously open segment handles.
+    #[must_use]
+    pub fn with_maximum_open_handles(mut self, maximum: Option<usize>) -> Self {
+        self.maximum_open_handles = maximum;
+        self
     }
 }
 

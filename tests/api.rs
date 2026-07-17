@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use ewf_image::{
-    CompressionFlags, CompressionLevel, CompressionMethod, CompressionValues, DataChunk,
-    DataChunkEncoding, EncodedDataChunk, EwfMetadata, EwfWriter, Format, FormatProfile,
+    ChunkCacheCapacity, CompressionFlags, CompressionLevel, CompressionMethod, CompressionValues,
+    DataChunk, DataChunkEncoding, EncodedDataChunk, EwfMetadata, EwfWriter, Format, FormatProfile,
     HeaderCodepage, HeaderDateFormat, ImageInfo, MediaFlags, MediaInfo, MediaType, MemoryExtent,
     OpenOptions, OpenStrictness, SectorRange, SegmentFileVersion, SingleFileEntry,
     SingleFileEntryType, SingleFileSource, StoredHashes, WriteOptions,
@@ -30,12 +30,57 @@ fn public_crate_name_is_ewf_image() {
 fn open_options_default_is_strict_with_bounded_cache() {
     let options = OpenOptions::default();
 
-    assert_eq!(options.strictness, OpenStrictness::Strict);
-    assert_eq!(options.chunk_cache_size, 64);
-    assert!(!options.read_zero_chunk_on_error);
-    assert_eq!(options.header_codepage, HeaderCodepage::Ascii);
-    assert_eq!(options.header_values_date_format, HeaderDateFormat::Ctime);
-    assert_eq!(options.maximum_open_handles, None);
+    assert_eq!(options.strictness(), OpenStrictness::Strict);
+    assert_eq!(
+        options.chunk_cache_capacity(),
+        ChunkCacheCapacity::Chunks(64)
+    );
+    assert_eq!(options.table_entry_cache_size_bytes(), 4 * 1024 * 1024);
+    assert!(!options.reader_statistics_enabled());
+    assert!(!options.read_zero_chunk_on_error());
+    assert_eq!(options.header_codepage(), HeaderCodepage::Ascii);
+    assert_eq!(options.header_values_date_format(), HeaderDateFormat::Ctime);
+    assert_eq!(options.maximum_open_handles(), None);
+}
+
+#[test]
+fn open_options_builders_configure_reader_controls() {
+    let options = OpenOptions::default()
+        .with_strictness(OpenStrictness::Lenient)
+        .with_chunk_cache_size_bytes(8 * 1024 * 1024)
+        .with_table_entry_cache_size_bytes(2 * 1024 * 1024)
+        .with_reader_statistics(true)
+        .with_read_zero_chunk_on_error(true)
+        .with_header_codepage(HeaderCodepage::Windows1252)
+        .with_header_values_date_format(HeaderDateFormat::Iso8601)
+        .with_maximum_open_handles(Some(8));
+
+    assert_eq!(options.strictness(), OpenStrictness::Lenient);
+    assert_eq!(
+        options.chunk_cache_capacity(),
+        ChunkCacheCapacity::Bytes(8 * 1024 * 1024)
+    );
+    assert_eq!(options.table_entry_cache_size_bytes(), 2 * 1024 * 1024);
+    assert!(options.reader_statistics_enabled());
+    assert!(options.read_zero_chunk_on_error());
+    assert_eq!(options.header_codepage(), HeaderCodepage::Windows1252);
+    assert_eq!(
+        options.header_values_date_format(),
+        HeaderDateFormat::Iso8601
+    );
+    assert_eq!(options.maximum_open_handles(), Some(8));
+}
+
+#[test]
+fn open_options_chunk_count_builder_replaces_byte_capacity() {
+    let options = OpenOptions::default()
+        .with_chunk_cache_size_bytes(1024 * 1024)
+        .with_chunk_cache_size(12);
+
+    assert_eq!(
+        options.chunk_cache_capacity(),
+        ChunkCacheCapacity::Chunks(12)
+    );
 }
 
 #[test]

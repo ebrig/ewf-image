@@ -4574,10 +4574,7 @@ fn image_read_zeroes_ewf1_raw_chunk_bad_checksum_when_requested() {
     let file = writer_e01_with_bad_raw_chunk_checksum();
     let image = ewf_image::Image::open_with_options(
         file.path(),
-        ewf_image::OpenOptions {
-            read_zero_chunk_on_error: true,
-            ..ewf_image::OpenOptions::default()
-        },
+        ewf_image::OpenOptions::default().with_read_zero_chunk_on_error(true),
     )
     .unwrap();
     let mut buf = [0x55; 16];
@@ -4999,10 +4996,8 @@ fn image_open_applies_date_format_to_xheader_ctime_dates() {
 
     let image = ewf_image::Image::open_with_options(
         file.path(),
-        ewf_image::OpenOptions {
-            header_values_date_format: ewf_image::HeaderDateFormat::Iso8601,
-            ..ewf_image::OpenOptions::default()
-        },
+        ewf_image::OpenOptions::default()
+            .with_header_values_date_format(ewf_image::HeaderDateFormat::Iso8601),
     )
     .unwrap();
 
@@ -5471,10 +5466,7 @@ fn image_supplied_readers_reject_handle_limits_that_require_eviction() {
             ("reader.E01", Cursor::new(first.clone())),
             ("reader.E02", Cursor::new(second.clone())),
         ],
-        ewf_image::OpenOptions {
-            maximum_open_handles: Some(1),
-            ..ewf_image::OpenOptions::default()
-        },
+        ewf_image::OpenOptions::default().with_maximum_open_handles(Some(1)),
     )
     .unwrap_err();
     assert!(matches!(err, ewf_image::EwfError::Unsupported(_)));
@@ -5512,10 +5504,7 @@ fn image_respects_maximum_open_segment_handles() {
 
     let image = ewf_image::Image::open_with_options(
         &first,
-        ewf_image::OpenOptions {
-            maximum_open_handles: Some(1),
-            ..ewf_image::OpenOptions::default()
-        },
+        ewf_image::OpenOptions::default().with_maximum_open_handles(Some(1)),
     )
     .unwrap();
 
@@ -5917,10 +5906,7 @@ fn image_read_zeroes_ewf2_raw_chunk_bad_checksum_when_requested() {
     let file = writer_ex01_with_bad_raw_chunk_checksum();
     let image = ewf_image::Image::open_with_options(
         file.path(),
-        ewf_image::OpenOptions {
-            read_zero_chunk_on_error: true,
-            ..ewf_image::OpenOptions::default()
-        },
+        ewf_image::OpenOptions::default().with_read_zero_chunk_on_error(true),
     )
     .unwrap();
     let mut buf = [0x55; 16];
@@ -6228,10 +6214,7 @@ fn image_open_lenient_skips_unknown_ewf2_section() {
     let file = synthetic_ex01_leading_unknown_section(b"unknown ok");
     let image = ewf_image::Image::open_with_options(
         file.path(),
-        ewf_image::OpenOptions {
-            strictness: ewf_image::OpenStrictness::Lenient,
-            ..ewf_image::OpenOptions::default()
-        },
+        ewf_image::OpenOptions::default().with_strictness(ewf_image::OpenStrictness::Lenient),
     )
     .unwrap();
     let mut buf = [0; 10];

@@ -3599,11 +3599,9 @@ fn writer_exposes_compatibility_style_header_encoding_controls() {
 
     let image = ewf_image::Image::open_with_options(
         &path,
-        ewf_image::OpenOptions {
-            header_codepage: HeaderCodepage::Windows1252,
-            header_values_date_format: HeaderDateFormat::Iso8601,
-            ..ewf_image::OpenOptions::default()
-        },
+        ewf_image::OpenOptions::default()
+            .with_header_codepage(HeaderCodepage::Windows1252)
+            .with_header_values_date_format(HeaderDateFormat::Iso8601),
     )
     .unwrap();
 
@@ -3635,10 +3633,8 @@ fn reader_applies_configured_header_date_format_to_legacy_dates() {
 
     let image = ewf_image::Image::open_with_options(
         &path,
-        ewf_image::OpenOptions {
-            header_values_date_format: HeaderDateFormat::DayMonth,
-            ..ewf_image::OpenOptions::default()
-        },
+        ewf_image::OpenOptions::default()
+            .with_header_values_date_format(HeaderDateFormat::DayMonth),
     )
     .unwrap();
 
@@ -5357,10 +5353,7 @@ fn writer_uses_configured_windows1252_header_codepage_for_legacy_header() {
 
     let image = ewf_image::Image::open_with_options(
         &path,
-        ewf_image::OpenOptions {
-            header_codepage: HeaderCodepage::Windows1252,
-            ..ewf_image::OpenOptions::default()
-        },
+        ewf_image::OpenOptions::default().with_header_codepage(HeaderCodepage::Windows1252),
     )
     .unwrap();
     assert_eq!(
