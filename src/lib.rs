@@ -115,6 +115,7 @@ mod format;
 mod image;
 mod index;
 mod metadata;
+mod reader_cache;
 mod segment;
 mod signature;
 mod single_files;

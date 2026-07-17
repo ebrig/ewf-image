@@ -1,0 +1,120 @@
+use std::sync::Arc;
+
+use lru::LruCache;
+
+pub(crate) const TABLE_PAGE_SIZE: u64 = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct TablePageKey {
+    pub(crate) segment_index: usize,
+    pub(crate) page_offset: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct TablePageCache {
+    pages: LruCache<TablePageKey, Arc<Vec<u8>>>,
+    capacity_bytes: usize,
+    cached_bytes: usize,
+}
+
+impl TablePageCache {
+    pub(crate) fn new(capacity_bytes: usize) -> Self {
+        Self {
+            pages: LruCache::unbounded(),
+            capacity_bytes,
+            cached_bytes: 0,
+        }
+    }
+
+    pub(crate) fn get(&mut self, key: &TablePageKey) -> Option<Arc<Vec<u8>>> {
+        self.pages.get(key).cloned()
+    }
+
+    pub(crate) fn is_disabled(&self) -> bool {
+        self.capacity_bytes == 0
+    }
+
+    pub(crate) fn insert(&mut self, key: TablePageKey, bytes: Vec<u8>) -> Arc<Vec<u8>> {
+        let bytes = Arc::new(bytes);
+        if self.capacity_bytes == 0 || bytes.len() > self.capacity_bytes {
+            return bytes;
+        }
+        if let Some(previous) = self.pages.pop(&key) {
+            self.cached_bytes = self.cached_bytes.saturating_sub(previous.len());
+        }
+        while self.cached_bytes.saturating_add(bytes.len()) > self.capacity_bytes {
+            let Some((_key, evicted)) = self.pages.pop_lru() else {
+                break;
+            };
+            self.cached_bytes = self.cached_bytes.saturating_sub(evicted.len());
+        }
+        self.cached_bytes = self.cached_bytes.saturating_add(bytes.len());
+        self.pages.put(key, Arc::clone(&bytes));
+        bytes
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_bytes(&self) -> usize {
+        self.cached_bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(page_offset: u64) -> TablePageKey {
+        TablePageKey {
+            segment_index: 0,
+            page_offset,
+        }
+    }
+
+    #[test]
+    fn table_page_cache_evicts_least_recently_used_pages_by_bytes() {
+        let mut cache = TablePageCache::new(8);
+        let first = key(0);
+        let second = key(4);
+        let third = key(8);
+
+        cache.insert(first, vec![1; 4]);
+        cache.insert(second, vec![2; 4]);
+        assert_eq!(
+            cache.get(&first).as_deref().map(Vec::as_slice),
+            Some(&[1; 4][..])
+        );
+        cache.insert(third, vec![3; 4]);
+
+        assert!(cache.get(&second).is_none());
+        assert!(cache.get(&first).is_some());
+        assert!(cache.get(&third).is_some());
+        assert_eq!(cache.cached_bytes(), 8);
+    }
+
+    #[test]
+    fn table_page_cache_zero_capacity_does_not_retain_pages() {
+        let mut cache = TablePageCache::new(0);
+        let page = key(0);
+
+        let inserted = cache.insert(page, vec![1, 2, 3, 4]);
+
+        assert_eq!(inserted.as_slice(), &[1, 2, 3, 4]);
+        assert!(cache.get(&page).is_none());
+        assert_eq!(cache.cached_bytes(), 0);
+    }
+
+    #[test]
+    fn table_page_cache_replacement_updates_retained_bytes() {
+        let mut cache = TablePageCache::new(8);
+        let page = key(0);
+
+        cache.insert(page, vec![1; 3]);
+        cache.insert(page, vec![2; 5]);
+
+        assert_eq!(cache.cached_bytes(), 5);
+        assert_eq!(
+            cache.get(&page).as_deref().map(Vec::as_slice),
+            Some(&[2; 5][..])
+        );
+    }
+}

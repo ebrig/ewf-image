@@ -24,6 +24,7 @@ use crate::metadata::{
     parse_ewf2_error_table_data, parse_header_data, parse_header2_data, parse_session_data,
     parse_xhash_data, parse_xheader_data,
 };
+use crate::reader_cache::{TABLE_PAGE_SIZE, TablePageCache, TablePageKey};
 use crate::segment::discover_segments;
 use crate::signature::{check_segment_files_corruption, check_segment_files_encryption};
 use crate::single_files::parse_ewf2_single_files_data;
@@ -78,6 +79,7 @@ struct ImageInner {
     segments: Mutex<SegmentFilePool>,
     index: LazyChunkIndex,
     chunk_cache: Mutex<LruCache<u64, Arc<Vec<u8>>>>,
+    table_page_cache: Mutex<TablePageCache>,
     checksum_errors: Mutex<Vec<SectorRange>>,
     read_zero_chunk_on_error: AtomicBool,
     abort_signaled: AtomicBool,
@@ -85,6 +87,7 @@ struct ImageInner {
 
 struct SegmentFilePool {
     files: Vec<Option<SegmentReaderHandle>>,
+    lengths: Vec<Option<u64>>,
     open_order: VecDeque<usize>,
     maximum_open_handles: Option<usize>,
     mode: SegmentFilePoolMode,
@@ -100,6 +103,14 @@ impl std::fmt::Debug for SegmentFilePool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SegmentFilePool")
             .field("segment_count", &self.files.len())
+            .field(
+                "known_length_count",
+                &self
+                    .lengths
+                    .iter()
+                    .filter(|length| length.is_some())
+                    .count(),
+            )
             .field("open_count", &self.open_count())
             .field("open_order", &self.open_order)
             .field("maximum_open_handles", &self.maximum_open_handles)
@@ -464,6 +475,9 @@ impl Image {
                 segments: Mutex::new(segments),
                 index,
                 chunk_cache: Mutex::new(LruCache::new(cache_size)),
+                table_page_cache: Mutex::new(TablePageCache::new(
+                    options.table_entry_cache_size_bytes(),
+                )),
                 checksum_errors: Mutex::new(Vec::new()),
                 read_zero_chunk_on_error: AtomicBool::new(options.read_zero_chunk_on_error()),
                 abort_signaled: AtomicBool::new(false),
@@ -1364,7 +1378,7 @@ impl Image {
         logical_size: usize,
     ) -> Result<Chunk> {
         let entry_offset = table_entry_offset(range, local_index, ewf2::TABLE_ENTRY_SIZE as u64)?;
-        let entry_data = self.read_bytes_at(
+        let entry_data = self.read_table_bytes_at(
             range.segment_index,
             entry_offset,
             ewf2::TABLE_ENTRY_SIZE as u64,
@@ -1405,27 +1419,94 @@ impl Image {
     }
 
     fn read_u32_at(&self, segment_index: usize, offset: u64) -> Result<u32> {
-        let data = self.read_bytes_at(segment_index, offset, 4)?;
+        let data = self.read_table_bytes_at(segment_index, offset, 4)?;
         Ok(u32::from_le_bytes(
             data[..4].try_into().expect("slice length checked"),
         ))
     }
 
-    fn read_bytes_at(&self, segment_index: usize, offset: u64, size: u64) -> Result<Vec<u8>> {
-        let path = self
+    fn read_table_bytes_at(&self, segment_index: usize, offset: u64, size: u64) -> Result<Vec<u8>> {
+        let requested = usize::try_from(size)
+            .map_err(|_| EwfError::Malformed("table read size does not fit usize".into()))?;
+        let cache_disabled = self
             .inner
-            .info
-            .segment_paths
-            .get(segment_index)
-            .ok_or_else(|| EwfError::Malformed("table references missing segment".into()))?
-            .clone();
-        let mut segments = self
-            .inner
-            .segments
+            .table_page_cache
             .lock()
-            .map_err(|_| EwfError::Malformed("segment file pool lock poisoned".into()))?;
-        let file = segments.file_mut(segment_index, &path)?;
-        read_exact_at(file.as_mut(), offset, size)
+            .map_err(|_| EwfError::Malformed("table page cache lock poisoned".into()))?
+            .is_disabled();
+        if cache_disabled {
+            let path = self
+                .inner
+                .info
+                .segment_paths
+                .get(segment_index)
+                .ok_or_else(|| EwfError::Malformed("table references missing segment".into()))?
+                .clone();
+            let mut segments = self
+                .inner
+                .segments
+                .lock()
+                .map_err(|_| EwfError::Malformed("segment file pool lock poisoned".into()))?;
+            let file = segments.file_mut(segment_index, &path)?;
+            return read_exact_at(file.as_mut(), offset, size);
+        }
+        let mut output = Vec::with_capacity(requested);
+        let mut current = offset;
+        while output.len() < requested {
+            let page_offset = current - current % TABLE_PAGE_SIZE;
+            let key = TablePageKey {
+                segment_index,
+                page_offset,
+            };
+            let cached = self
+                .inner
+                .table_page_cache
+                .lock()
+                .map_err(|_| EwfError::Malformed("table page cache lock poisoned".into()))?
+                .get(&key);
+            let page = if let Some(page) = cached {
+                page
+            } else {
+                let path = self
+                    .inner
+                    .info
+                    .segment_paths
+                    .get(segment_index)
+                    .ok_or_else(|| EwfError::Malformed("table references missing segment".into()))?
+                    .clone();
+                let bytes = {
+                    let mut segments = self.inner.segments.lock().map_err(|_| {
+                        EwfError::Malformed("segment file pool lock poisoned".into())
+                    })?;
+                    let segment_len = segments.segment_len(segment_index, &path)?;
+                    let page_size = TABLE_PAGE_SIZE.min(segment_len.saturating_sub(page_offset));
+                    if page_size == 0 {
+                        return Err(EwfError::Malformed(
+                            "table page starts beyond segment end".into(),
+                        ));
+                    }
+                    let file = segments.file_mut(segment_index, &path)?;
+                    read_exact_at(file.as_mut(), page_offset, page_size)?
+                };
+                self.inner
+                    .table_page_cache
+                    .lock()
+                    .map_err(|_| EwfError::Malformed("table page cache lock poisoned".into()))?
+                    .insert(key, bytes)
+            };
+            let within_page = usize::try_from(current - page_offset)
+                .map_err(|_| EwfError::Malformed("table page offset does not fit usize".into()))?;
+            let available = page.len().saturating_sub(within_page);
+            if available == 0 {
+                return Err(EwfError::Malformed("table read crosses segment end".into()));
+            }
+            let take = available.min(requested - output.len());
+            output.extend_from_slice(&page[within_page..within_page + take]);
+            current = current
+                .checked_add(u64::try_from(take).expect("usize fits u64"))
+                .ok_or_else(|| EwfError::Malformed("table read offset overflow".into()))?;
+        }
+        Ok(output)
     }
 
     fn ensure_not_aborted(&self) -> Result<()> {
@@ -1464,8 +1545,8 @@ impl Image {
             .segments
             .lock()
             .map_err(|_| EwfError::Malformed("segment file pool lock poisoned".into()))?;
+        let segment_size = segments.segment_len(chunk.segment_index, &path)?;
         let file = segments.file_mut(chunk.segment_index, &path)?;
-        let segment_size = file.segment_len()?;
         let end = chunk
             .offset
             .checked_add(chunk.encoded_size)
@@ -1521,6 +1602,7 @@ impl SegmentFilePool {
         validate_maximum_open_handles(maximum_open_handles)?;
         Ok(Self {
             files: (0..segment_count).map(|_| None).collect(),
+            lengths: vec![None; segment_count],
             open_order: VecDeque::new(),
             maximum_open_handles,
             mode: SegmentFilePoolMode::ReopenFromPath,
@@ -1541,6 +1623,7 @@ impl SegmentFilePool {
 
         Ok(Self {
             files: readers.into_iter().map(Some).collect(),
+            lengths: vec![None; segment_count],
             open_order: (0..segment_count).collect(),
             maximum_open_handles,
             mode: SegmentFilePoolMode::SuppliedReaders,
@@ -1549,6 +1632,24 @@ impl SegmentFilePool {
 
     fn maximum_open_handles(&self) -> Option<usize> {
         self.maximum_open_handles
+    }
+
+    fn segment_len(&mut self, segment_index: usize, path: &Path) -> Result<u64> {
+        if let Some(length) = self
+            .lengths
+            .get(segment_index)
+            .ok_or_else(|| EwfError::Malformed("segment index out of range".into()))?
+        {
+            return Ok(*length);
+        }
+
+        let length = self.file_mut(segment_index, path)?.segment_len()?;
+        let cached = self
+            .lengths
+            .get_mut(segment_index)
+            .ok_or_else(|| EwfError::Malformed("segment index out of range".into()))?;
+        *cached = Some(length);
+        Ok(length)
     }
 
     fn set_maximum_open_handles(&mut self, maximum_open_handles: Option<usize>) -> Result<()> {
@@ -3954,6 +4055,10 @@ fn decompress_ewf2_metadata(reader: impl Read) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    };
 
     use flate2::write::ZlibEncoder;
 
@@ -3975,6 +4080,42 @@ mod tests {
         fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
             self.cursor.seek(position)
         }
+    }
+
+    struct LengthObservedReader {
+        cursor: Cursor<Vec<u8>>,
+        seek_from_end_calls: Arc<AtomicUsize>,
+    }
+
+    impl Read for LengthObservedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.cursor.read(buffer)
+        }
+    }
+
+    impl Seek for LengthObservedReader {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            if matches!(position, SeekFrom::End(_)) {
+                self.seek_from_end_calls
+                    .fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            self.cursor.seek(position)
+        }
+    }
+
+    #[test]
+    fn segment_file_pool_caches_segment_lengths() {
+        let seek_from_end_calls = Arc::new(AtomicUsize::new(0));
+        let reader = LengthObservedReader {
+            cursor: Cursor::new(vec![0; 128]),
+            seek_from_end_calls: Arc::clone(&seek_from_end_calls),
+        };
+        let mut pool = SegmentFilePool::new_readers(vec![Box::new(reader)], None).unwrap();
+        let path = Path::new("cached-length.E01");
+
+        assert_eq!(pool.segment_len(0, path).unwrap(), 128);
+        assert_eq!(pool.segment_len(0, path).unwrap(), 128);
+        assert_eq!(seek_from_end_calls.load(AtomicOrdering::Relaxed), 1);
     }
 
     #[test]

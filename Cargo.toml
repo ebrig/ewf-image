@@ -24,6 +24,7 @@ include = [
     "/tests/api.rs",
     "/tests/corpus.rs",
     "/tests/reader.rs",
+    "/tests/reader_performance.rs",
     "/tests/signature.rs",
     "/tests/writer.rs",
     "/docs/**",
