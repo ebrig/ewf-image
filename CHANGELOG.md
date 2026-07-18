@@ -4,6 +4,23 @@ All notable changes to this project are documented here.
 
 ## Unreleased
 
+### Breaking Changes
+
+- `OpenOptions` fields are now private. Configure reader behavior with the
+  `with_*` builders and inspect it with getters. This prevents future reader
+  controls from breaking struct-literal callers. See
+  [Migrating to 0.2](docs/migrating-to-0.2.md).
+
+### Added
+
+- Added byte-based decoded-chunk cache sizing and a bounded 4 MiB table-entry
+  page cache shared by all clones and cursors from an image. Both limits are
+  configurable through `OpenOptions`.
+- Added opt-in `ReaderStatistics` snapshots for cache, I/O, parsing, handle,
+  checksum, and decompression diagnostics. Collection is disabled by default.
+- Added `ReaderCacheInfo` snapshots for the configured chunk/table cache
+  capacities and current/peak retained table-page payload bytes.
+
 ### Fixed
 
 - Recovered EWF1 chunk offsets that overflow 31 bits in large unsegmented
@@ -11,6 +28,8 @@ All notable changes to this project are documented here.
   output larger than 2 GiB.
 - Replaced the per-read linear table-range scan with a binary search so chunk
   lookups stay fast on multi-terabyte images with thousands of chunk tables.
+- Cached segment lengths after their first lookup so repeated encoded-chunk and
+  table-page reads do not seek to the end of a segment again.
 - Table-entry checksums are now validated with a fixed 64 KiB streaming buffer
   instead of allocating the complete table-entry region in memory.
 - The EWF1 writer now emits multiple `sectors`/`table`/`table2` groups per

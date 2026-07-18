@@ -524,7 +524,7 @@ impl Image {
         self.inner.statistics.snapshot()
     }
 
-    /// Returns configured and observed reader cache memory usage.
+    /// Returns configured capacities and retained table-page payload bytes.
     pub fn reader_cache_info(&self) -> ReaderCacheInfo {
         let cache = self
             .inner

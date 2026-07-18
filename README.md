@@ -82,6 +82,46 @@ let result = image.verify()?;
 println!("MD5 match: {:?}", result.md5_match);
 ```
 
+### Reader tuning and diagnostics
+
+Reader caches are shared by every clone and cursor created from an `Image`.
+The decoded-chunk cache defaults to 64 chunks, and table entries use a bounded
+4 MiB page cache. Configure byte limits and opt into cumulative diagnostics
+with `OpenOptions`:
+
+```rust
+let options = ewf_image::OpenOptions::default()
+    .with_chunk_cache_size_bytes(32 * 1024 * 1024)
+    .with_table_entry_cache_size_bytes(8 * 1024 * 1024)
+    .with_maximum_open_handles(Some(32))
+    .with_reader_statistics(true);
+
+let image = ewf_image::Image::open_with_options("case.E01", options)?;
+let before = image.reader_statistics().expect("statistics enabled");
+
+// Perform the reads being measured.
+let mut sector = [0; 512];
+image.read_at(&mut sector, 0)?;
+
+let delta = image
+    .reader_statistics()
+    .expect("statistics enabled")
+    .saturating_delta(before);
+println!("chunk cache misses: {}", delta.chunk_cache_misses());
+
+let cache = image.reader_cache_info();
+println!(
+    "table cache: {} / {} bytes",
+    cache.table_entry_cache_current_bytes(),
+    cache.table_entry_cache_capacity_bytes()
+);
+```
+
+Statistics collection is disabled by default. `reader_statistics()` returns
+`None` unless it was enabled when the image was opened. See
+[Migrating to 0.2](docs/migrating-to-0.2.md) for the `OpenOptions` builder
+migration.
+
 Write a new compressed EWF2 image from raw bytes:
 
 ```rust
@@ -155,6 +195,7 @@ require local fixtures and installed EWF tools. See
 - [Compatibility](docs/compatibility.md)
 - [Limitations](docs/limitations.md)
 - [Testing](docs/testing.md)
+- [Migrating to 0.2](docs/migrating-to-0.2.md)
 - [API reference (docs.rs)](https://docs.rs/ewf-image)
 
 ## Contributing

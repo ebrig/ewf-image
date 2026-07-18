@@ -25,7 +25,20 @@ record per logical chunk.
 Reads go through `Image::read_at` or a cursor. The reader locates the logical
 chunk, reads the encoded bytes from the owning segment, validates checksums
 where applicable, decodes raw/zlib/BZip2/pattern-fill payloads, and caches the
-decoded chunk in a bounded LRU cache.
+decoded chunk in a bounded LRU cache. Table-range lookup uses binary search,
+and segment lengths are cached after their first lookup.
+
+Table entries are loaded through a byte-bounded page cache shared by every
+clone and cursor from the same `Image`. A zero-byte limit disables page
+retention and preserves exact-size table reads. Table-entry checksums use a
+fixed 64 KiB streaming buffer rather than allocating the complete entry
+region.
+
+`OpenOptions` controls chunk-cache and table-cache capacities. Optional
+`ReaderStatistics` snapshots expose cumulative cache, I/O, parsing, segment
+handle, checksum, and decompression counters. `ReaderCacheInfo` reports cache
+capacity plus current and peak retained table-page payload bytes. Statistics
+collection is disabled by default; cache limits remain enforced regardless.
 
 ## Writer Flow
 

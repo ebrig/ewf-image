@@ -4,6 +4,9 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 /// Cumulative performance counters for one shared EWF image reader.
+///
+/// Collection is opt-in through [`crate::OpenOptions::with_reader_statistics`].
+/// Cloned [`crate::Image`] values and their cursors share the same counters.
 pub struct ReaderStatistics {
     cursors_created: u64,
     segment_parses: u64,
@@ -129,7 +132,7 @@ impl ReaderStatistics {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
-/// Configured and observed memory usage for one shared EWF reader cache set.
+/// Configured and observed payload bytes for one shared EWF reader cache set.
 pub struct ReaderCacheInfo {
     chunk_cache_capacity: u64,
     table_entry_cache_capacity: u64,
@@ -162,12 +165,12 @@ impl ReaderCacheInfo {
         self.table_entry_cache_capacity
     }
 
-    /// Returns the currently retained table-entry cache bytes.
+    /// Returns the currently retained table-entry page payload bytes.
     pub fn table_entry_cache_current_bytes(&self) -> u64 {
         self.table_entry_cache_current
     }
 
-    /// Returns the peak retained table-entry cache bytes.
+    /// Returns the peak retained table-entry page payload bytes.
     pub fn table_entry_cache_peak_bytes(&self) -> u64 {
         self.table_entry_cache_peak
     }

@@ -236,6 +236,8 @@ pub enum OpenStrictness {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Options that control how an image is opened and read.
+///
+/// Configure values with the `with_*` builders and inspect them with getters.
 pub struct OpenOptions {
     /// Structural validation policy.
     strictness: OpenStrictness,
