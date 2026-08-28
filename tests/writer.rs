@@ -188,8 +188,10 @@ fn ewf2_section_data(bytes: &[u8], section_type: u32) -> &[u8] {
 fn utf16le_string(data: &[u8]) -> String {
     assert_eq!(data.len() % 2, 0);
     let mut units = data
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes(chunk.try_into().unwrap()))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| u16::from_le_bytes(*chunk))
         .collect::<Vec<_>>();
     if units.first() == Some(&0xfeff) {
         units.remove(0);
@@ -245,8 +247,10 @@ fn ewf2_u64_aux_table_entries(table: &[u8]) -> Vec<u64> {
         adler32(&table[entries_offset..entries_end])
     );
     table[entries_offset..entries_end]
-        .chunks_exact(8)
-        .map(|entry| u64::from_le_bytes(entry.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|entry| u64::from_le_bytes(*entry))
         .collect()
 }
 
@@ -263,9 +267,9 @@ fn ewf2_md5_aux_table_hashes(table: &[u8]) -> Vec<[u8; 16]> {
         adler32(&table[entries_offset..entries_end])
     );
     table[entries_offset..entries_end]
-        .chunks_exact(16)
-        .map(|entry| entry.try_into().unwrap())
-        .collect()
+        .as_chunks::<16>()
+        .0
+        .to_vec()
 }
 
 fn assert_ewf1_descriptor_checksums(bytes: &[u8]) {
