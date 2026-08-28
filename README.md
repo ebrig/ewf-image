@@ -38,7 +38,7 @@ creation.
 
 ```toml
 [dependencies]
-ewf-image = "0.2"
+ewf-image = "0.3"
 ```
 
 The default `verify` feature enables streamed MD5/SHA1 verification through
@@ -46,7 +46,7 @@ The default `verify` feature enables streamed MD5/SHA1 verification through
 
 ```toml
 [dependencies]
-ewf-image = { version = "0.2", default-features = false }
+ewf-image = { version = "0.3", default-features = false }
 ```
 
 ## Quick Start
