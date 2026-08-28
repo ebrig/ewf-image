@@ -29,6 +29,18 @@ pub enum EwfError {
     #[error("no EWF segments found for {0}")]
     NoSegments(String),
 
+    /// A recognized encrypted EWF image was opened without a password.
+    #[error("password required for encrypted EWF image")]
+    PasswordRequired,
+
+    /// An encrypted EWF password verifier rejected the supplied password.
+    #[error("password rejected for encrypted EWF image")]
+    PasswordRejected,
+
+    /// Decrypted EWF data did not pass the format's structural validation.
+    #[error("decrypted EWF data failed validation")]
+    DecryptionValidationFailed,
+
     /// The image uses a valid EWF feature that this crate does not support.
     #[error("unsupported EWF feature: {0}")]
     Unsupported(String),

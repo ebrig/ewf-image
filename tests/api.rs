@@ -4,11 +4,11 @@ use std::collections::BTreeMap;
 
 use ewf_image::{
     ChunkCacheCapacity, CompressionFlags, CompressionLevel, CompressionMethod, CompressionValues,
-    DataChunk, DataChunkEncoding, EncodedDataChunk, EwfMetadata, EwfWriter, Format, FormatProfile,
-    HeaderCodepage, HeaderDateFormat, ImageInfo, MediaFlags, MediaInfo, MediaType, MemoryExtent,
-    OpenOptions, OpenStrictness, ReaderCacheInfo, ReaderStatistics, SectorRange,
-    SegmentFileVersion, SingleFileEntry, SingleFileEntryType, SingleFileSource, StoredHashes,
-    WriteOptions,
+    DataChunk, DataChunkEncoding, EncodedDataChunk, EncryptionMethod, EwfError, EwfMetadata,
+    EwfPassword, EwfWriter, Format, FormatProfile, HeaderCodepage, HeaderDateFormat, ImageInfo,
+    MediaFlags, MediaInfo, MediaType, MemoryExtent, OpenOptions, OpenStrictness, ReaderCacheInfo,
+    ReaderStatistics, SectorRange, SegmentFileVersion, SingleFileEntry, SingleFileEntryType,
+    SingleFileSource, StoredHashes, WriteOptions,
 };
 
 fn adler32(data: &[u8]) -> u32 {
@@ -25,6 +25,46 @@ fn adler32(data: &[u8]) -> u32 {
 #[test]
 fn public_crate_name_is_ewf_image() {
     let _ = ewf_image::OpenOptions::default();
+}
+
+#[test]
+fn password_debug_is_redacted() {
+    let password = EwfPassword::utf8("ewf-image-secret-sentinel");
+    let rendered = format!("{password:?}");
+
+    assert_eq!(rendered, "EwfPassword([REDACTED])");
+    assert!(!rendered.contains("secret-sentinel"));
+}
+
+#[test]
+fn password_accepts_owned_raw_bytes() {
+    let password = EwfPassword::from_bytes(vec![0xff, 0x00, 0x80]);
+
+    assert_eq!(format!("{password:?}"), "EwfPassword([REDACTED])");
+}
+
+#[test]
+fn encryption_methods_are_stable_public_values() {
+    assert_ne!(
+        EncryptionMethod::XWaysAes128Ctr,
+        EncryptionMethod::XWaysAes256Ctr
+    );
+}
+
+#[test]
+fn password_errors_do_not_require_secret_context() {
+    assert_eq!(
+        EwfError::PasswordRequired.to_string(),
+        "password required for encrypted EWF image"
+    );
+    assert_eq!(
+        EwfError::PasswordRejected.to_string(),
+        "password rejected for encrypted EWF image"
+    );
+    assert_eq!(
+        EwfError::DecryptionValidationFailed.to_string(),
+        "decrypted EWF data failed validation"
+    );
 }
 
 #[test]

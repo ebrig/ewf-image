@@ -110,6 +110,7 @@
 mod codepage;
 mod date_time;
 mod decode;
+mod encryption;
 mod error;
 mod format;
 mod image;
@@ -125,6 +126,7 @@ mod types;
 mod verify;
 mod writer;
 
+pub use encryption::{EncryptionInfo, EncryptionMethod, EwfPassword};
 pub use error::{EwfError, Result};
 pub use image::{Image, ImageCursor, SegmentReader, SingleFileCursor};
 pub use reader_statistics::{ReaderCacheInfo, ReaderStatistics};
