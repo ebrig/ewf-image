@@ -15,6 +15,15 @@ All notable changes to this project are documented here.
 - Added reader support for X-Ways Forensics 20.9+ EWF1 images that use
   Zstandard-compressed metadata, magicless Zstandard media frames, and the
   X-Ways one-byte zero-chunk marker. Decoding uses a pure-Rust implementation.
+- Added password-aware reading for X-Ways EWF1 AES-128 and AES-256 CTR images,
+  including `x_encryption` metadata validation, constant-time password
+  verifier checks, transparent chunk decryption, and non-secret
+  `EncryptionInfo` reporting. Password storage is zeroized on drop.
+- Added `Image::open_with_password` and password-aware variants for explicit
+  options, segment lists, and caller-supplied readers.
+- Verifier-less encrypted images now validate their first mandatory media
+  chunk during open, so an incorrect password cannot produce a successful
+  image handle before structural validation.
 
 ### Fixed
 

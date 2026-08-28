@@ -85,3 +85,25 @@ cargo test --features external-fixtures --test corpus external_writer_metadata_m
 
 External tests are intentionally opt-in because they depend on local corpora,
 tool versions, and environment configuration.
+
+## X-Ways Encrypted Fixtures
+
+The self-contained suite verifies encrypted-marker detection, authentic
+`x_encryption` metadata, password rejection, AES-128/AES-256 key and counter
+behavior, verifier-less structural validation, and complete reads of
+deterministic public-password reference images. Those reads include forward
+and reverse random access at AES-block and EWF-chunk boundaries plus the
+caller-supplied-reader API.
+
+Four X-Ways-created fixtures additionally cover AES-128/AES-256 crossed with
+compatible Deflate and X-Ways Zstandard compression. Their password is not
+stored in the repository. Set it only for the test process to run the complete
+external-oracle readback:
+
+```powershell
+$env:EWF_IMAGE_XWAYS_TEST_PASSWORD = Read-Host "Fixture password"
+cargo test --test encryption authentic_xways_fixtures_read_with_operator_supplied_password
+Remove-Item Env:EWF_IMAGE_XWAYS_TEST_PASSWORD
+```
+
+The test asserts the decoded SHA-256 and does not print the password.

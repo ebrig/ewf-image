@@ -9,6 +9,7 @@ summarize the public support surface.
 | Area | Status | Notes |
 | --- | :---: | --- |
 | EWF1 physical `.E01` / EVF | ✓ | Raw/zlib chunks, split segments, metadata, hashes, acquisition errors, sessions, tracks, and table variants. |
+| X-Ways encrypted EWF1 | ✓ | Password-aware AES-128/AES-256 CTR reading for compatible Deflate and X-Ways Zstandard images. |
 | EWF1 logical `.L01` / LVF | ✓ | Logical single-file catalogs and path lookup. |
 | EWF1 SMART `.S01` | ✓ | SMART media profile handling and table-resident chunks. |
 | EWF2 physical `.Ex01` | ✓ | Raw, zlib, BZip2, pattern-fill chunks, EWF2 metadata, memory extents, and split segments. |
@@ -35,7 +36,7 @@ summarize the public support surface.
 | Acquisition errors, sessions, tracks | ✓ | EWF1 and EWF2 range-style metadata. |
 | Incomplete and resumed EWF1 output | ✓ | `finish_incomplete` writes `next`; `resume` appends and rewrites a complete image. |
 | Secondary/shadow target mirroring | ✓ | `WriteOptions::secondary_segment_filename` writes a byte-identical secondary segment set for file-backed finishes. |
-| Encrypted writing | — | Not yet implemented; EWF2 encrypted section emission is unavailable. |
+| Encrypted writing | — | Not yet implemented for X-Ways EWF1 or EWF2 output. |
 | Base-plus-overlay delta/shadow writing | — | Not yet implemented; a verified reference format/API is needed first. |
 
 ## Oracle Coverage
@@ -49,6 +50,11 @@ Compatibility is tested in layers:
   values, and verification behavior against external EWF tools.
 - Generated fixture tests exercise externally-created EWF1 and extended EWF
   profiles, plus writer-created EWF2 and logical single-file cases.
+- X-Ways encryption coverage crosses AES-128/AES-256 with compatible Deflate
+  and X-Ways Zstandard compression. Native uncompressed and verifier-less
+  X-Ways fixtures are not currently available; verifier-less fallback behavior
+  is covered with a derived test fixture. The encrypted split-segment path is
+  implemented but does not yet have an authentic split-image oracle.
 
 EWF2 BZip2 support is covered locally. Some external tools cannot produce or
 export EWF2 BZip2 images, so BZip2 external oracle coverage is tracked

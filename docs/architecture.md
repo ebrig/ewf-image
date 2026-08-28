@@ -23,10 +23,11 @@ opens bounded by storing table ranges instead of eagerly materializing one
 record per logical chunk.
 
 Reads go through `Image::read_at` or a cursor. The reader locates the logical
-chunk, reads the encoded bytes from the owning segment, validates checksums
-where applicable, decodes raw/zlib/BZip2/pattern-fill payloads, and caches the
-decoded chunk in a bounded LRU cache. Table-range lookup uses binary search,
-and segment lengths are cached after their first lookup.
+chunk, reads the encoded bytes from the owning segment, decrypts X-Ways EWF1
+chunks when an encryption context is present, validates checksums where
+applicable, decodes raw/zlib/Zstandard/BZip2/pattern-fill payloads, and caches
+the decoded chunk in a bounded LRU cache. Table-range lookup uses binary
+search, and segment lengths are cached after their first lookup.
 
 Table entries are loaded through a byte-bounded page cache shared by every
 clone and cursor from the same `Image`. A zero-byte limit disables page
@@ -59,7 +60,9 @@ also mirror the completed primary segment set to a secondary/shadow target.
   parsing.
 - `metadata`: EWF header/case/device/hash/range metadata parsing.
 - `index`: lazy logical chunk lookup across table ranges.
-- `decode`: bounded raw, zlib, BZip2, and pattern-fill decoding.
+- `decode`: bounded raw, zlib, Zstandard, BZip2, and pattern-fill decoding.
+- `encryption`: zeroizing password storage, X-Ways metadata and verifier
+  handling, key derivation, and AES-CTR chunk transforms.
 - `image`: open flow, immutable image state, cache ownership, and read APIs.
 - `writer`: EWF output generation, segment splitting, secondary target
   mirroring, metadata emission, and resume support.

@@ -18,6 +18,27 @@ if ewf_image::check_file_encryption("case.Ex01")? {
 Decrypting EWF2 section payloads is not yet implemented, and encrypted EWF2
 writing is not yet implemented.
 
+## X-Ways Encrypted EWF1 Images
+
+The reader supports X-Ways EWF1 AES-128 and AES-256 CTR images through the
+password-aware `Image` open methods. Deflate-compatible and X-Ways Zstandard
+compressed images are supported. Password verifiers are checked before media
+data is exposed; when a valid image omits a verifier, the first decrypted chunk
+must pass structural decoding validation.
+
+Native X-Ways fixtures currently cover compressed images with password
+verifiers. X-Ways 21.9 Beta 2 did not expose an uncompressed-output or
+skip-verifier option in the tested imaging workflow, so native uncompressed and
+verifier-less variants remain external-oracle gaps. A synthetic verifier-less
+test covers the reader's fallback validation behavior.
+
+X-Ways encrypted output is not implemented, and no writer encryption option is
+exposed.
+
+The encrypted segment path supports per-segment contexts, but the committed
+native fixture set is single-segment. Authentic encrypted split-image coverage
+remains an external-oracle gap.
+
 ## Delta, Shadow, and Secondary Output
 
 Secondary/shadow target mirroring is supported for file-backed writer finishes

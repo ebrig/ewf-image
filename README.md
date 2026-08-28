@@ -19,7 +19,7 @@ creation.
 - **Broad format coverage.** Reads and writes EWF1 (`.E01`, `.L01`, `.S01`)
   and EWF2 (`.Ex01`, `.Lx01`), including raw, zlib, BZip2, and pattern-fill
   chunks. The EWF1 reader also supports X-Ways Forensics 20.9+ Zstandard
-  images.
+  images and password-protected X-Ways AES-128/AES-256 images.
 - **Streaming reads.** Immutable `Image` handles offer positioned reads,
   `Read + Seek` cursors, and bounded decoded-chunk caching.
 - **Rich metadata.** Inspect acquisition headers, stored MD5/SHA1 hashes,
@@ -70,6 +70,29 @@ image.cursor().read_exact(&mut first_sector)?;
 let mut sector_at_offset = vec![0; 512];
 image.read_at(&mut sector_at_offset, 4096)?;
 ```
+
+Open a password-protected X-Ways EWF1 image by keeping password bytes in the
+zeroizing `EwfPassword` wrapper:
+
+```rust
+let password = ewf_image::EwfPassword::utf8("operator-supplied-password");
+let image = ewf_image::Image::open_with_password("case.E01", &password)?;
+
+if let Some(encryption) = image.encryption_info() {
+    println!("encryption: {:?}", encryption.method());
+}
+```
+
+`EwfPassword::from_bytes` is available when the password must be supplied in
+an encoding other than UTF-8. X-Ways AES-128 accepts at most 16 password bytes;
+AES-256 accepts at most 32.
+
+Each open attempt accepts one password; callers own candidate iteration.
+Password and derived-key storage is zeroized where owned, and public diagnostics
+do not include cryptographic material. AES-CTR is not authenticated encryption:
+a stored verifier confirms the password, while verifier-less images rely on
+strict validation of the first decrypted media chunk during open. Existing EWF
+checksums and `Image::verify()` remain the integrity mechanisms for later data.
 
 Read forensic metadata and verify stored hashes:
 
@@ -150,7 +173,7 @@ raw export, logical inspection, and mirrored secondary output.
 
 | Family | Read | Write | Notes |
 | --- | :---: | :---: | --- |
-| EWF1 physical `.E01` / EVF | ✓ | ✓ | Segment discovery, raw/zlib chunks, metadata, hashes, acquisition errors, sessions, tracks, and split output. Reading additionally supports the X-Ways 20.9+ Zstandard profile. |
+| EWF1 physical `.E01` / EVF | ✓ | ✓ | Segment discovery, raw/zlib chunks, metadata, hashes, acquisition errors, sessions, tracks, and split output. Reading additionally supports the X-Ways 20.9+ Zstandard profile and X-Ways AES-128/AES-256 encryption. |
 | EWF1 logical `.L01` / LVF | ✓ | ✓ | Logical single-file catalogs and path lookup. |
 | EWF1 SMART `.S01` | ✓ | ✓ | SMART media profile handling. |
 | EWF2 physical `.Ex01` | ✓ | ✓ | Raw, zlib, BZip2, and pattern-fill chunks; EWF2 metadata, memory extents, and split output. |
