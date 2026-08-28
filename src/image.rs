@@ -3212,7 +3212,9 @@ fn parse_ewf2_memory_extents_table(data: &[u8]) -> Result<Vec<MemoryExtent>> {
     }
 
     Ok(data
-        .chunks_exact(ENTRY_SIZE)
+        .as_chunks::<ENTRY_SIZE>()
+        .0
+        .iter()
         .map(|entry| MemoryExtent {
             start_page: u64::from_le_bytes(entry[0..8].try_into().expect("slice length checked")),
             page_count: u64::from_le_bytes(entry[8..16].try_into().expect("slice length checked")),
@@ -4301,8 +4303,10 @@ fn decode_ewf2_string_section(
     }
 
     let units: Vec<u16> = payload
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes(chunk.try_into().expect("slice length checked")))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| u16::from_le_bytes(*chunk))
         .collect();
     let text = String::from_utf16(&units)
         .map_err(|_| EwfError::Malformed(format!("EWF2 {label} section is not valid UTF-16LE")))?;

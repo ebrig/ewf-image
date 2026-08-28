@@ -984,8 +984,10 @@ fn decode_utf16le_lines(data: &[u8]) -> Result<Vec<String>> {
     }
 
     let units: Vec<u16> = data
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes(chunk.try_into().expect("chunk size checked")))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| u16::from_le_bytes(*chunk))
         .collect();
     let text = String::from_utf16(&units)
         .map_err(|_| EwfError::Malformed("EWF2 single files data is not valid UTF-16LE".into()))?;
@@ -1228,8 +1230,10 @@ fn decode_optional_utf16le_string(data: &[u8], label: &str) -> Result<Option<Str
     }
 
     let units: Vec<u16> = data
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes(chunk.try_into().expect("chunk size checked")))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| u16::from_le_bytes(*chunk))
         .collect();
     let mut text = String::from_utf16(&units)
         .map_err(|_| EwfError::Malformed(format!("{label} is not valid UTF-16LE")))?;

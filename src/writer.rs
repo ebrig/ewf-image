@@ -329,7 +329,7 @@ fn parse_writer_hash_value<const N: usize>(label: &str, value: &str) -> Result<[
     }
 
     let mut bytes = [0; N];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let high = writer_hash_nibble(pair[0])
             .ok_or_else(|| EwfError::Unsupported(format!("invalid {label} hash value")))?;
         let low = writer_hash_nibble(pair[1])
