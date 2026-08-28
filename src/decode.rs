@@ -2,13 +2,17 @@ use std::io::Read;
 
 use bzip2::read::BzDecoder;
 use flate2::read::ZlibDecoder;
+use ruzstd::decoding::StreamingDecoder as ZstdDecoder;
 
 use crate::{EwfError, Result};
+
+const MIN_ZSTD_WINDOW_LIMIT: u64 = 128 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChunkEncoding {
     Raw,
     Zlib,
+    Zstd,
     Bzip2,
     PatternFill(u64),
 }
@@ -29,6 +33,7 @@ pub(crate) fn decode_chunk(
             Ok(encoded[..logical_size].to_vec())
         }
         ChunkEncoding::Zlib => decode_compressed(ZlibDecoder::new(encoded), logical_size),
+        ChunkEncoding::Zstd => decode_xways_zstd(encoded, logical_size),
         ChunkEncoding::Bzip2 => decode_compressed(BzDecoder::new(encoded), logical_size),
         ChunkEncoding::PatternFill(pattern) => Ok(pattern_fill(pattern, logical_size)),
     }
@@ -49,6 +54,7 @@ pub(crate) fn validate_encoded_size(
     let cap = match encoding {
         ChunkEncoding::Raw => raw_chunk_size_cap(chunk_size)?,
         ChunkEncoding::Zlib => zlib_compressed_chunk_size_cap(chunk_size)?,
+        ChunkEncoding::Zstd => zstd_compressed_chunk_size_cap(chunk_size)?,
         ChunkEncoding::Bzip2 => bzip2_compressed_chunk_size_cap(chunk_size)?,
         ChunkEncoding::PatternFill(_) => unreachable!("handled above"),
     };
@@ -58,6 +64,31 @@ pub(crate) fn validate_encoded_size(
         )));
     }
     Ok(())
+}
+
+fn decode_xways_zstd(encoded: &[u8], logical_size: usize) -> Result<Vec<u8>> {
+    if encoded == [0] {
+        return Ok(vec![0; logical_size]);
+    }
+    if encoded.len() == 1 {
+        return Err(EwfError::Malformed(format!(
+            "invalid X-Ways zero chunk marker 0x{:02x}",
+            encoded[0]
+        )));
+    }
+
+    const ZSTD_FRAME_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+    let framed = ZSTD_FRAME_MAGIC.as_slice().chain(encoded);
+    let max_window_size = u64::try_from(logical_size)
+        .map_err(|_| EwfError::Malformed("logical chunk size does not fit u64".into()))?
+        .max(MIN_ZSTD_WINDOW_LIMIT);
+    let decoder =
+        ZstdDecoder::new_with_max_window_size(framed, max_window_size).map_err(|err| {
+            EwfError::Malformed(format!(
+                "chunk Zstandard decoder initialization failed: {err}"
+            ))
+        })?;
+    decode_compressed(decoder, logical_size)
 }
 
 fn decode_compressed(mut reader: impl Read, logical_size: usize) -> Result<Vec<u8>> {
@@ -112,6 +143,12 @@ pub(crate) fn zlib_compressed_chunk_size_cap(chunk_size: u64) -> Result<u64> {
         .and_then(|value| value.checked_add(6))
         .ok_or_else(|| EwfError::Malformed("zlib stored block cap overflow".into()))?;
     Ok(compress_bound.max(stored_bound))
+}
+
+pub(crate) fn zstd_compressed_chunk_size_cap(chunk_size: u64) -> Result<u64> {
+    chunk_size
+        .checked_mul(2)
+        .ok_or_else(|| EwfError::Malformed("Zstandard compressed chunk size cap overflow".into()))
 }
 
 fn bzip2_compressed_chunk_size_cap(chunk_size: u64) -> Result<u64> {

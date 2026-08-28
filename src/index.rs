@@ -1,4 +1,4 @@
-use crate::{EwfError, Result};
+use crate::{CompressionMethod, EwfError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TableRangeKind {
@@ -16,6 +16,7 @@ pub(crate) struct TableRange {
     pub(crate) base_offset: u64,
     pub(crate) data_end: Option<u64>,
     pub(crate) ewf1_allow_large_compressed_chunks: bool,
+    pub(crate) ewf1_compression_method: Option<CompressionMethod>,
     pub(crate) ewf2_compression_method: Option<u16>,
 }
 
@@ -131,6 +132,7 @@ mod tests {
             base_offset: 1024,
             data_end: Some(2048),
             ewf1_allow_large_compressed_chunks: false,
+            ewf1_compression_method: Some(CompressionMethod::Zlib),
             ewf2_compression_method: None,
         }
     }

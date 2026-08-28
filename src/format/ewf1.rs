@@ -7,6 +7,7 @@ pub(crate) const LVF_SIGNATURE: [u8; 8] = [0x4c, 0x56, 0x46, 0x09, 0x0d, 0x0a, 0
 pub(crate) struct FileHeader {
     pub(crate) segment_number: u16,
     pub(crate) logical: bool,
+    pub(crate) format_marker: u8,
 }
 
 impl FileHeader {
@@ -29,6 +30,7 @@ impl FileHeader {
         Ok(Self {
             segment_number: u16::from_le_bytes([buf[9], buf[10]]),
             logical,
+            format_marker: buf[8],
         })
     }
 }
@@ -39,6 +41,7 @@ pub(crate) struct SectionDescriptor {
     pub(crate) next: u64,
     pub(crate) size: u64,
     pub(crate) offset: u64,
+    pub(crate) compression_method: Option<String>,
 }
 
 impl SectionDescriptor {
@@ -54,12 +57,16 @@ impl SectionDescriptor {
         let section_type = String::from_utf8_lossy(&buf[..type_end]).into_owned();
         let next = u64::from_le_bytes(buf[16..24].try_into().expect("slice length checked"));
         let size = u64::from_le_bytes(buf[24..32].try_into().expect("slice length checked"));
+        let compression_end = buf[32..72].iter().position(|&byte| byte == 0).unwrap_or(40);
+        let compression_method = (compression_end > 0)
+            .then(|| String::from_utf8_lossy(&buf[32..32 + compression_end]).into_owned());
 
         Ok(Self {
             section_type,
             next,
             size,
             offset,
+            compression_method,
         })
     }
 
@@ -198,6 +205,7 @@ mod tests {
 
         assert_eq!(header.segment_number, 42);
         assert!(!header.logical);
+        assert_eq!(header.format_marker, 1);
     }
 
     #[test]
@@ -234,6 +242,7 @@ mod tests {
         buf[0..6].copy_from_slice(b"volume");
         buf[16..24].copy_from_slice(&1234_u64.to_le_bytes());
         buf[24..32].copy_from_slice(&170_u64.to_le_bytes());
+        buf[32..36].copy_from_slice(b"Zstd");
 
         let desc = SectionDescriptor::parse(&buf, FILE_HEADER_SIZE as u64).unwrap();
 
@@ -241,6 +250,7 @@ mod tests {
         assert_eq!(desc.next, 1234);
         assert_eq!(desc.size, 170);
         assert_eq!(desc.offset, FILE_HEADER_SIZE as u64);
+        assert_eq!(desc.compression_method.as_deref(), Some("Zstd"));
         assert_eq!(desc.data_size().unwrap(), 94);
     }
 

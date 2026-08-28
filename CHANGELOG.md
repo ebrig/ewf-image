@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Breaking Changes
+
+- `CompressionMethod` and `DataChunkEncoding` now expose a `Zstd` variant and
+  are non-exhaustive. Downstream matches must include a wildcard arm. See
+  [Migrating to 0.3](docs/migrating-to-0.3.md).
+
+### Added
+
+- Added reader support for X-Ways Forensics 20.9+ EWF1 images that use
+  Zstandard-compressed metadata, magicless Zstandard media frames, and the
+  X-Ways one-byte zero-chunk marker. Decoding uses a pure-Rust implementation.
+
+### Fixed
+
+- EWF1 continuation segments may now inherit media geometry from the first
+  segment when they omit their own `volume`, `disk`, or `data` section.
+  Repeated media sections are checked for consistent geometry.
+- Reject unknown or contradictory EWF1 compression markers instead of guessing
+  a decoder, and cap Zstandard decoder windows before allocation.
+
 ## 0.2.0 - 2026-07-17
 
 ### Breaking Changes

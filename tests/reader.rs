@@ -15,6 +15,15 @@ const EVF_SIGNATURE: [u8; 8] = [0x45, 0x56, 0x46, 0x09, 0x0d, 0x0a, 0xff, 0x00];
 const LVF_SIGNATURE: [u8; 8] = [0x4c, 0x56, 0x46, 0x09, 0x0d, 0x0a, 0xff, 0x00];
 const EX01_SIGNATURE: [u8; 8] = [0x45, 0x56, 0x46, 0x32, 0x0d, 0x0a, 0x81, 0x00];
 const LEF2_SIGNATURE: [u8; 8] = [0x4c, 0x45, 0x46, 0x32, 0x0d, 0x0a, 0x81, 0x00];
+// A valid frame produced with `zstd --long=27`. It expands to 184,320 bytes but
+// declares a 128 MiB window, which must be rejected before that window is allocated.
+const ZSTD_128_MIB_WINDOW_FRAME: [u8; 80] = [
+    0x28, 0xb5, 0x2f, 0xfd, 0x04, 0x88, 0xbc, 0x01, 0x00, 0xd4, 0x02, 0x54, 0x68, 0x65, 0x20, 0x71,
+    0x75, 0x69, 0x63, 0x6b, 0x20, 0x62, 0x72, 0x6f, 0x77, 0x6e, 0x20, 0x66, 0x6f, 0x78, 0x20, 0x6a,
+    0x75, 0x6d, 0x70, 0x73, 0x20, 0x6f, 0x76, 0x65, 0x72, 0x20, 0x74, 0x68, 0x65, 0x20, 0x6c, 0x61,
+    0x7a, 0x79, 0x20, 0x64, 0x6f, 0x67, 0x2e, 0x0a, 0x01, 0x00, 0x85, 0xfe, 0x87, 0xb9, 0x2a, 0x03,
+    0x4d, 0x00, 0x00, 0x08, 0x68, 0x01, 0x00, 0xfc, 0x4f, 0x1d, 0x08, 0x01, 0xba, 0xb8, 0xd5, 0xc8,
+];
 
 #[derive(Clone, Copy)]
 struct Ewf1BytesOptions<'a> {
@@ -36,6 +45,12 @@ fn section_desc(section_type: &[u8], next: u64, size: u64) -> [u8; 76] {
     desc
 }
 
+fn section_desc_with_marker(section_type: &[u8], next: u64, size: u64, marker: &[u8]) -> [u8; 76] {
+    let mut desc = section_desc(section_type, next, size);
+    desc[32..32 + marker.len()].copy_from_slice(marker);
+    desc
+}
+
 fn compressed_chunk(data: &[u8], chunk_size: usize) -> Vec<u8> {
     let mut padded = data.to_vec();
     padded.resize(chunk_size, 0);
@@ -46,6 +61,155 @@ fn zlib_bytes(data: &[u8]) -> Vec<u8> {
     let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(data).unwrap();
     encoder.finish().unwrap()
+}
+
+fn zstd_bytes(data: &[u8]) -> Vec<u8> {
+    ruzstd::encoding::compress_to_vec(
+        Cursor::new(data),
+        ruzstd::encoding::CompressionLevel::Fastest,
+    )
+}
+
+fn xways_magicless_zstd_chunk(data: &[u8]) -> Vec<u8> {
+    let mut padded = data.to_vec();
+    padded.resize(32_768, 0);
+    let encoded = zstd_bytes(&padded);
+    assert_eq!(&encoded[..4], &[0x28, 0xb5, 0x2f, 0xfd]);
+    encoded[4..].to_vec()
+}
+
+fn ewf1_chunk_only_segment_bytes(
+    payload: &[u8],
+    segment_number: u16,
+    file_header_marker: u8,
+) -> Vec<u8> {
+    let table_desc_offset = 13_u64;
+    let table_data_offset = table_desc_offset + 76;
+    let sectors_desc_offset = table_data_offset + 24 + 4;
+    let sectors_data_offset = sectors_desc_offset + 76;
+    let done_desc_offset = sectors_data_offset + payload.len() as u64;
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&EVF_SIGNATURE);
+    bytes.push(file_header_marker);
+    bytes.extend_from_slice(&segment_number.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+
+    bytes.extend_from_slice(&section_desc(b"table", sectors_desc_offset, 76 + 24 + 4));
+    let mut table_header = [0; 24];
+    table_header[0..4].copy_from_slice(&1_u32.to_le_bytes());
+    table_header[8..16].copy_from_slice(&sectors_data_offset.to_le_bytes());
+    bytes.extend_from_slice(&table_header);
+    bytes.extend_from_slice(&0x8000_0000_u32.to_le_bytes());
+
+    bytes.extend_from_slice(&section_desc(
+        b"sectors",
+        done_desc_offset,
+        76 + payload.len() as u64,
+    ));
+    bytes.extend_from_slice(payload);
+    bytes.extend_from_slice(&section_desc(b"done", 0, 76));
+    bytes
+}
+
+fn ewf1_chunk_and_session_segment_bytes(
+    payload: &[u8],
+    session: &[u8],
+    segment_number: u16,
+    file_header_marker: u8,
+) -> Vec<u8> {
+    let table_desc_offset = 13_u64;
+    let table_data_offset = table_desc_offset + 76;
+    let sectors_desc_offset = table_data_offset + 24 + 4;
+    let sectors_data_offset = sectors_desc_offset + 76;
+    let session_desc_offset = sectors_data_offset + payload.len() as u64;
+    let session_data_offset = session_desc_offset + 76;
+    let done_desc_offset = session_data_offset + session.len() as u64;
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&EVF_SIGNATURE);
+    bytes.push(file_header_marker);
+    bytes.extend_from_slice(&segment_number.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+
+    bytes.extend_from_slice(&section_desc(b"table", sectors_desc_offset, 76 + 24 + 4));
+    let mut table_header = [0; 24];
+    table_header[0..4].copy_from_slice(&1_u32.to_le_bytes());
+    table_header[8..16].copy_from_slice(&sectors_data_offset.to_le_bytes());
+    bytes.extend_from_slice(&table_header);
+    bytes.extend_from_slice(&0x8000_0000_u32.to_le_bytes());
+
+    bytes.extend_from_slice(&section_desc(
+        b"sectors",
+        session_desc_offset,
+        76 + payload.len() as u64,
+    ));
+    bytes.extend_from_slice(payload);
+    bytes.extend_from_slice(&section_desc(
+        b"session",
+        done_desc_offset,
+        76 + session.len() as u64,
+    ));
+    bytes.extend_from_slice(session);
+    bytes.extend_from_slice(&section_desc(b"done", 0, 76));
+    bytes
+}
+
+fn xways_ewf1_segment_bytes(payload: &[u8], header_text: &[u8]) -> Vec<u8> {
+    let header = zstd_bytes(header_text);
+    xways_ewf1_segment_bytes_with_encoded_header(payload, &header)
+}
+
+fn xways_ewf1_segment_bytes_with_encoded_header(payload: &[u8], header: &[u8]) -> Vec<u8> {
+    let header_desc_offset = 13_u64;
+    let disk_desc_offset = header_desc_offset + 76 + header.len() as u64;
+    let disk_data_offset = disk_desc_offset + 76;
+    let table_desc_offset = disk_data_offset + 1052;
+    let table_data_offset = table_desc_offset + 76;
+    let sectors_desc_offset = table_data_offset + 24 + 4;
+    let sectors_data_offset = sectors_desc_offset + 76;
+    let done_desc_offset = sectors_data_offset + payload.len() as u64;
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&EVF_SIGNATURE);
+    bytes.push(0x21);
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+
+    bytes.extend_from_slice(&section_desc_with_marker(
+        b"header",
+        disk_desc_offset,
+        76 + header.len() as u64,
+        b"Zstd",
+    ));
+    bytes.extend_from_slice(header);
+
+    bytes.extend_from_slice(&section_desc(b"disk", table_desc_offset, 76 + 1052));
+    let mut disk = vec![0; 1052];
+    disk[0] = 1;
+    disk[4..8].copy_from_slice(&1_u32.to_le_bytes());
+    disk[8..12].copy_from_slice(&64_u32.to_le_bytes());
+    disk[12..16].copy_from_slice(&512_u32.to_le_bytes());
+    disk[16..24].copy_from_slice(&64_u64.to_le_bytes());
+    disk[36] = 0x02;
+    disk[64..80].fill(0x58);
+    bytes.extend_from_slice(&disk);
+
+    bytes.extend_from_slice(&section_desc(b"table", sectors_desc_offset, 76 + 24 + 4));
+    let mut table_header = [0; 24];
+    table_header[0..4].copy_from_slice(&1_u32.to_le_bytes());
+    table_header[8..16].copy_from_slice(&sectors_data_offset.to_le_bytes());
+    bytes.extend_from_slice(&table_header);
+    bytes.extend_from_slice(&0x8000_0000_u32.to_le_bytes());
+
+    bytes.extend_from_slice(&section_desc(
+        b"sectors",
+        done_desc_offset,
+        76 + payload.len() as u64,
+    ));
+    bytes.extend_from_slice(payload);
+    bytes.extend_from_slice(&section_desc(b"done", 0, 76));
+    bytes
 }
 
 fn stored_zlib_bytes(data: &[u8], block_size: usize) -> Vec<u8> {
@@ -5260,6 +5424,339 @@ fn image_open_reads_synthetic_multisegment_ewf1() {
     assert_eq!(&first_buf, b"first segment");
     assert_eq!(second_read, 14);
     assert_eq!(&second_buf, b"second segment");
+}
+
+#[test]
+fn image_open_reads_ewf1_continuation_without_media_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("media-once.E01");
+    let second = dir.path().join("media-once.E02");
+    std::fs::write(
+        &first,
+        ewf1_bytes(b"first segment", EVF_SIGNATURE, 1, 2, 128, true, None),
+    )
+    .unwrap();
+    std::fs::write(
+        &second,
+        ewf1_chunk_only_segment_bytes(&compressed_chunk(b"second segment", 32_768), 2, 1),
+    )
+    .unwrap();
+
+    let image = ewf_image::Image::open(&first).unwrap();
+    let mut second_buf = [0; 14];
+
+    let second_read = image.read_at(&mut second_buf, 32_768).unwrap();
+
+    assert_eq!(image.info().logical_size, 65_536);
+    assert_eq!(second_read, 14);
+    assert_eq!(&second_buf, b"second segment");
+}
+
+#[test]
+fn image_open_reads_ewf1_continuation_session_without_media_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("session-inherit.E01");
+    let second = dir.path().join("session-inherit.E02");
+    std::fs::write(
+        &first,
+        ewf1_bytes(b"first segment", EVF_SIGNATURE, 1, 2, 128, true, None),
+    )
+    .unwrap();
+    std::fs::write(
+        &second,
+        ewf1_chunk_and_session_segment_bytes(
+            &compressed_chunk(b"second segment", 32_768),
+            &ewf1_session_payload(&[(0, 0), (64, 0)]),
+            2,
+            1,
+        ),
+    )
+    .unwrap();
+
+    let image = ewf_image::Image::open(&first).unwrap();
+
+    assert_eq!(
+        image.info().sessions,
+        [
+            ewf_image::SectorRange {
+                first_sector: 0,
+                sector_count: 64,
+            },
+            ewf_image::SectorRange {
+                first_sector: 64,
+                sector_count: 64,
+            },
+        ]
+    );
+}
+
+#[test]
+fn image_open_rejects_mismatched_ewf1_continuation_media() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("media-mismatch.E01");
+    let second = dir.path().join("media-mismatch.E02");
+    std::fs::write(
+        &first,
+        ewf1_bytes(b"first segment", EVF_SIGNATURE, 1, 2, 128, true, None),
+    )
+    .unwrap();
+    let mut second_bytes = ewf1_bytes(b"second segment", EVF_SIGNATURE, 2, 2, 128, true, None);
+    second_bytes[97..101].copy_from_slice(&32_u32.to_le_bytes());
+    std::fs::write(&second, second_bytes).unwrap();
+
+    let err = ewf_image::Image::open(&first).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ewf_image::EwfError::Malformed(message)
+            if message.contains("EWF1 media geometry mismatch")
+    ));
+}
+
+#[test]
+fn image_open_rejects_mismatched_ewf1_compression_across_segments() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("compression-mismatch.E01");
+    let second = dir.path().join("compression-mismatch.E02");
+    std::fs::write(
+        &first,
+        ewf1_bytes(b"first segment", EVF_SIGNATURE, 1, 2, 128, true, None),
+    )
+    .unwrap();
+    std::fs::write(
+        &second,
+        ewf1_chunk_only_segment_bytes(&xways_magicless_zstd_chunk(b"second segment"), 2, 0x21),
+    )
+    .unwrap();
+
+    let err = ewf_image::Image::open(&first).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ewf_image::EwfError::Malformed(message)
+            if message.contains("EWF1 compression method mismatch across segments")
+    ));
+}
+
+#[test]
+fn image_open_rejects_conflicting_xways_compression_markers() {
+    let mut bytes = xways_ewf1_segment_bytes(&xways_magicless_zstd_chunk(b"marker conflict"), b"");
+    bytes[8] = 1;
+    let file = write_temp_with_suffix(".e01", &bytes);
+
+    let err = ewf_image::Image::open(file.path()).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ewf_image::EwfError::Malformed(message)
+            if message.contains("compression marker conflict")
+    ));
+}
+
+#[test]
+fn image_open_rejects_unknown_ewf1_descriptor_compression_marker() {
+    let mut bytes = xways_ewf1_segment_bytes(&xways_magicless_zstd_chunk(b"unknown marker"), b"");
+    bytes[13 + 32..13 + 72].fill(0);
+    bytes[13 + 32..13 + 38].copy_from_slice(b"Snappy");
+    let file = write_temp_with_suffix(".e01", &bytes);
+
+    let err = ewf_image::Image::open(file.path()).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ewf_image::EwfError::Malformed(message)
+            if message.contains("unsupported EWF1 descriptor compression marker")
+    ));
+}
+
+#[test]
+fn image_open_rejects_unknown_ewf1_file_header_marker() {
+    let mut bytes = ewf1_bytes(
+        b"unknown header marker",
+        EVF_SIGNATURE,
+        1,
+        1,
+        64,
+        true,
+        None,
+    );
+    bytes[8] = 0x7f;
+    let file = write_temp_with_suffix(".e01", &bytes);
+
+    let err = ewf_image::Image::open(file.path()).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ewf_image::EwfError::Malformed(message)
+            if message.contains("unsupported EWF1 file header marker")
+    ));
+}
+
+#[test]
+fn image_open_decodes_xways_zstd_header_metadata() {
+    let header = b"1\r\nmain\r\nc\tn\ta\te\tm\tu\tp\tov\tr\r\nXW-CASE\tEVID\tDesc\tExaminer\t2026\t2026\tpassword\tWindows\tgood\r\n";
+    let bytes = xways_ewf1_segment_bytes(&xways_magicless_zstd_chunk(b"xways data"), header);
+    let file = write_temp_with_suffix(".e01", &bytes);
+
+    let image = ewf_image::Image::open(file.path()).unwrap();
+
+    assert_eq!(
+        image.info().metadata.case_number.as_deref(),
+        Some("XW-CASE")
+    );
+}
+
+#[test]
+fn image_open_reports_xways_zstd_compression_method() {
+    let bytes = xways_ewf1_segment_bytes(&xways_magicless_zstd_chunk(b"xways compression"), b"");
+    let file = write_temp_with_suffix(".e01", &bytes);
+
+    let image = ewf_image::Image::open(file.path()).unwrap();
+
+    assert_eq!(
+        image.compression_method(),
+        Some(ewf_image::CompressionMethod::Zstd)
+    );
+}
+
+#[test]
+fn image_open_reads_xways_magicless_zstd_chunk() {
+    let bytes = xways_ewf1_segment_bytes(&xways_magicless_zstd_chunk(b"xways compressed"), b"");
+    let file = write_temp_with_suffix(".e01", &bytes);
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    let mut buf = [0; 16];
+
+    let read = image.read_at(&mut buf, 0).unwrap();
+
+    assert_eq!(read, 16);
+    assert_eq!(&buf, b"xways compressed");
+}
+
+#[test]
+fn image_open_reads_xways_zero_chunk_marker() {
+    let bytes = xways_ewf1_segment_bytes(&[0], b"");
+    let file = write_temp_with_suffix(".e01", &bytes);
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    let mut buf = [0xff; 32];
+
+    let read = image.read_at(&mut buf, 0).unwrap();
+
+    assert_eq!(read, 32);
+    assert_eq!(buf, [0; 32]);
+}
+
+#[test]
+fn image_read_rejects_invalid_xways_zero_chunk_marker() {
+    let bytes = xways_ewf1_segment_bytes(&[1], b"");
+    let file = write_temp_with_suffix(".e01", &bytes);
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    let mut buf = [0; 32];
+
+    let err = image.read_at(&mut buf, 0).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ewf_image::EwfError::Malformed(message)
+            if message.contains("invalid X-Ways zero chunk marker")
+    ));
+}
+
+#[test]
+fn image_read_rejects_xways_zstd_window_above_limit() {
+    let bytes = xways_ewf1_segment_bytes(&ZSTD_128_MIB_WINDOW_FRAME[4..], b"");
+    let file = write_temp_with_suffix(".e01", &bytes);
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    let mut buf = [0; 32];
+
+    let err = image.read_at(&mut buf, 0).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ewf_image::EwfError::Malformed(message)
+            if message.to_ascii_lowercase().contains("window")
+    ));
+}
+
+#[test]
+fn image_open_rejects_xways_zstd_metadata_window_above_limit() {
+    let bytes = xways_ewf1_segment_bytes_with_encoded_header(
+        &xways_magicless_zstd_chunk(b"metadata window"),
+        &ZSTD_128_MIB_WINDOW_FRAME,
+    );
+    let file = write_temp_with_suffix(".e01", &bytes);
+
+    let err = ewf_image::Image::open(file.path()).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ewf_image::EwfError::Malformed(message)
+            if message.to_ascii_lowercase().contains("window")
+    ));
+}
+
+#[test]
+#[ignore = "requires EWF_XWAYS_FIXTURE pointing to a complete X-Ways E01 set"]
+fn external_xways_zstd_fixture_opens_and_reads() {
+    let path = std::env::var_os("EWF_XWAYS_FIXTURE")
+        .expect("EWF_XWAYS_FIXTURE must point to the first X-Ways segment");
+
+    let image = ewf_image::Image::open(path).unwrap();
+    let mut boot = [0; 1024];
+    let mut sparse = [0xff; 32];
+
+    assert_eq!(image.read_at(&mut boot, 0).unwrap(), boot.len());
+    assert_eq!(image.read_at(&mut sparse, 32_768).unwrap(), sparse.len());
+    assert_eq!(image.number_of_segments(), 6);
+    assert_eq!(image.info().chunk_size, 32_768);
+    assert_eq!(image.info().logical_size, 136_365_211_648);
+    assert_eq!(
+        image.compression_method(),
+        Some(ewf_image::CompressionMethod::Zstd)
+    );
+    assert_eq!(
+        image.info().stored_hashes.md5,
+        Some([
+            0xef, 0x1a, 0xaa, 0x4a, 0xc3, 0x47, 0xc3, 0x91, 0x98, 0x38, 0x37, 0x9e, 0x00, 0x4c,
+            0xa5, 0x6c,
+        ])
+    );
+    assert_eq!(&boot[510..512], &[0x55, 0xaa]);
+    assert_eq!(&boot[512..520], b"EFI PART");
+    assert_eq!(sparse, [0; 32]);
+
+    let chunk_count = image.number_of_chunks().unwrap();
+    let segment_index_for_chunk = |chunk_index| {
+        let path = image.segment_filename_for_chunk(chunk_index).unwrap();
+        image
+            .segment_filenames()
+            .iter()
+            .position(|candidate| candidate == path)
+            .unwrap()
+    };
+    for target_segment in 1..image.number_of_segments() {
+        let mut low = 0;
+        let mut high = chunk_count;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if segment_index_for_chunk(middle) < target_segment {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+
+        assert!(low > 0);
+        assert!(low < chunk_count);
+        assert_eq!(segment_index_for_chunk(low), target_segment);
+        let boundary_offset = low.checked_mul(image.info().chunk_size).unwrap();
+        let mut cross_boundary = [0; 32];
+        assert_eq!(
+            image
+                .read_at(&mut cross_boundary, boundary_offset - 16)
+                .unwrap(),
+            cross_boundary.len()
+        );
+    }
 }
 
 #[test]

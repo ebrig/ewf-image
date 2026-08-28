@@ -36,6 +36,14 @@ decode and writer round trips. Some external EWF tools cannot generate or
 export EWF2 BZip2 images, so external oracle coverage for this path is tracked
 separately.
 
+## X-Ways Zstandard Output
+
+The reader supports the X-Ways Forensics 20.9+ EWF1 Zstandard profile,
+including its magicless media frames and zero-chunk marker. The writer does not
+generate or preserve this producer-specific encoding. Copying X-Ways
+compression settings or encoded Zstandard chunks into a writer returns an
+unsupported-feature error instead of silently producing a different format.
+
 ## Additional Interfaces
 
 CLI, filesystem mount, service runtime, and native FFI-wrapper layers are not

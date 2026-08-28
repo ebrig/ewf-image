@@ -1764,6 +1764,9 @@ fn write_compression_from_media_method(method: CompressionMethod) -> Result<Writ
     match method {
         CompressionMethod::None => Ok(WriteCompression::None),
         CompressionMethod::Zlib => Ok(WriteCompression::Zlib),
+        CompressionMethod::Zstd => Err(EwfError::Unsupported(
+            "cannot copy X-Ways Zstandard compression settings".into(),
+        )),
         CompressionMethod::Bzip2 => Ok(WriteCompression::Bzip2),
         CompressionMethod::Unknown(value) => Err(EwfError::Unsupported(format!(
             "cannot copy unknown compression method {value}"
@@ -2030,6 +2033,11 @@ fn decode_write_encoded_data_chunk(chunk: &EncodedDataChunk) -> Result<Vec<u8>> 
 }
 
 fn validate_write_encoded_data_chunk(chunk: &EncodedDataChunk) -> Result<()> {
+    if chunk.encoding == DataChunkEncoding::Zstd {
+        return Err(EwfError::Unsupported(
+            "writer does not support X-Ways Zstandard encoded chunks".into(),
+        ));
+    }
     let encoded_size = usize::try_from(chunk.encoded_size)
         .map_err(|_| EwfError::Malformed("writer encoded chunk size does not fit usize".into()))?;
     if chunk.data.len() != encoded_size {
@@ -2045,6 +2053,7 @@ fn encoded_data_chunk_encoding(encoding: DataChunkEncoding) -> ChunkEncoding {
     match encoding {
         DataChunkEncoding::Raw => ChunkEncoding::Raw,
         DataChunkEncoding::Zlib => ChunkEncoding::Zlib,
+        DataChunkEncoding::Zstd => ChunkEncoding::Zstd,
         DataChunkEncoding::Bzip2 => ChunkEncoding::Bzip2,
         DataChunkEncoding::PatternFill(pattern) => ChunkEncoding::PatternFill(pattern),
     }
@@ -2094,6 +2103,7 @@ fn remembered_encoded_data_chunk(
             has_checksum: false,
             pattern_fill: None,
         },
+        DataChunkEncoding::Zstd => return None,
         DataChunkEncoding::PatternFill(pattern) => EncodedChunk {
             bytes: Vec::new(),
             compressed: true,
@@ -2116,6 +2126,7 @@ fn encoded_data_chunk_encoding_compatible(
     match encoding {
         DataChunkEncoding::Raw => true,
         DataChunkEncoding::Zlib => options.compression != WriteCompression::Bzip2,
+        DataChunkEncoding::Zstd => false,
         DataChunkEncoding::Bzip2 => {
             is_ewf2_format(options.format) && options.compression == WriteCompression::Bzip2
         }

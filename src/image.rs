@@ -320,6 +320,8 @@ impl Image {
         let mut next_ewf1_chunk = 0_u64;
         let mut discovered_table_chunks = 0_u64;
         let mut expected_set_identifier: Option<[u8; 16]> = None;
+        let mut expected_ewf1_media = None;
+        let mut expected_ewf1_compression_method = None;
         let mut expected_ewf2_header_profile = None;
         let mut expected_ewf2_device_information = None;
         let mut expected_ewf2_case_data = None;
@@ -332,7 +334,10 @@ impl Image {
                     file.as_mut(),
                     path,
                     segment_index,
-                    next_ewf1_chunk,
+                    Ewf1SegmentContext {
+                        first_chunk: next_ewf1_chunk,
+                        inherited_media_geometry: expected_ewf1_media,
+                    },
                     options.strictness(),
                     options.header_codepage(),
                     &statistics,
@@ -349,6 +354,25 @@ impl Image {
                 )));
             }
             validate_set_identifier(&mut expected_set_identifier, parsed.set_identifier)?;
+            if let Some(observed) = parsed.ewf1_compression_method {
+                if expected_ewf1_compression_method.is_some_and(|expected| expected != observed) {
+                    return Err(EwfError::Malformed(
+                        "EWF1 compression method mismatch across segments".into(),
+                    ));
+                }
+                expected_ewf1_compression_method.get_or_insert(observed);
+            }
+            if let Some(observed) = parsed.ewf1_media_geometry {
+                if expected_ewf1_media
+                    .as_ref()
+                    .is_some_and(|expected| expected != &observed)
+                {
+                    return Err(EwfError::Malformed(
+                        "EWF1 media geometry mismatch across segments".into(),
+                    ));
+                }
+                expected_ewf1_media.get_or_insert(observed);
+            }
             validate_ewf2_header_profile(
                 &mut expected_ewf2_header_profile,
                 parsed.ewf2_header_profile,
@@ -1403,8 +1427,15 @@ impl Image {
             ));
         }
         let encoded_size = next_offset - entry.offset;
-        let encoding =
-            ewf1_chunk_encoding(entry.compressed, encoded_size, self.inner.info.chunk_size)?;
+        let compression_method = range.ewf1_compression_method.ok_or_else(|| {
+            EwfError::Malformed("EWF1 table range has no compression method".into())
+        })?;
+        let encoding = ewf1_chunk_encoding(
+            entry.compressed,
+            encoded_size,
+            self.inner.info.chunk_size,
+            compression_method,
+        )?;
         validate_ewf1_encoded_size(
             encoded_size,
             self.inner.info.chunk_size,
@@ -1631,7 +1662,10 @@ impl Image {
             validate_raw_chunk_checksum(&encoded, chunk.logical_size)?;
         }
         let decompression_started = (self.inner.statistics.enabled()
-            && matches!(chunk.encoding, ChunkEncoding::Zlib | ChunkEncoding::Bzip2))
+            && matches!(
+                chunk.encoding,
+                ChunkEncoding::Zlib | ChunkEncoding::Zstd | ChunkEncoding::Bzip2
+            ))
         .then(Instant::now);
         let decoded = decode_chunk(&encoded, chunk.encoding, chunk.logical_size)?;
         if let Some(started) = decompression_started {
@@ -1867,6 +1901,7 @@ fn data_chunk_encoding(encoding: ChunkEncoding) -> DataChunkEncoding {
     match encoding {
         ChunkEncoding::Raw => DataChunkEncoding::Raw,
         ChunkEncoding::Zlib => DataChunkEncoding::Zlib,
+        ChunkEncoding::Zstd => DataChunkEncoding::Zstd,
         ChunkEncoding::Bzip2 => DataChunkEncoding::Bzip2,
         ChunkEncoding::PatternFill(pattern) => DataChunkEncoding::PatternFill(pattern),
     }
@@ -2125,6 +2160,8 @@ struct ParsedSegment {
     segment_number: u64,
     set_identifier: Option<[u8; 16]>,
     ewf2_header_profile: Option<Ewf2HeaderProfile>,
+    ewf1_compression_method: Option<CompressionMethod>,
+    ewf1_media_geometry: Option<Ewf1MediaGeometry>,
     chunk_size: u64,
     logical_size: u64,
     acquisition_complete: bool,
@@ -2154,6 +2191,28 @@ struct Ewf2HeaderProfile {
     compression_method: ewf2::CompressionMethod,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Ewf1MediaGeometry {
+    chunk_size: u64,
+    logical_size: u64,
+    sectors_per_chunk: u32,
+    bytes_per_sector: u32,
+    sector_count: u64,
+    chunk_count: u32,
+}
+
+#[derive(Clone, Copy)]
+struct Ewf1SegmentContext {
+    first_chunk: u64,
+    inherited_media_geometry: Option<Ewf1MediaGeometry>,
+}
+
+#[derive(Clone, Copy)]
+struct Ewf1RangeProfile {
+    allow_large_compressed_chunks: bool,
+    compression_method: CompressionMethod,
+}
+
 #[derive(Clone)]
 struct Section {
     desc: ewf1::SectionDescriptor,
@@ -2179,6 +2238,7 @@ fn parse_ewf1_segment(
     file: &mut dyn SegmentReader,
     segment_index: usize,
     first_chunk: u64,
+    inherited_media_geometry: Option<Ewf1MediaGeometry>,
     profile_hint: FormatProfile,
     header_codepage: HeaderCodepage,
     statistics: &ReaderStatisticsCollector,
@@ -2189,6 +2249,7 @@ fn parse_ewf1_segment(
     let file_header = ewf1::FileHeader::parse(&header)?;
 
     let sections = scan_ewf1_sections(file)?;
+    let compression_method = detect_ewf1_compression_method(file_header, &sections)?;
     let acquisition_complete = ewf1_acquisition_complete(&sections);
     let volume = sections
         .iter()
@@ -2198,45 +2259,61 @@ fn parse_ewf1_segment(
                 "volume" | "disk" | "data"
             )
         })
-        .ok_or_else(|| EwfError::Malformed("missing EWF1 media section".into()))
-        .and_then(|section| {
+        .map(|section| {
             let data = read_exact_at(file, section.data_offset, section.data_size)?;
             validate_present_ewf1_media_checksum(&data, &section.desc.section_type)?;
             ewf1::Volume::parse(&data)
-        })?;
-    let chunk_size = volume.chunk_size()?;
-    validate_chunk_size(chunk_size)?;
-    let declared_logical_size = volume.logical_size()?;
-    let logical_size = if declared_logical_size > 0 {
-        declared_logical_size
+        })
+        .transpose()?;
+    if segment_index == 0 && volume.is_none() {
+        return Err(EwfError::Malformed("missing EWF1 media section".into()));
+    }
+    let (chunk_size, logical_size, smart_profile, media) = if let Some(volume) = volume.as_ref() {
+        let chunk_size = volume.chunk_size()?;
+        validate_chunk_size(chunk_size)?;
+        let declared_logical_size = volume.logical_size()?;
+        let logical_size = if declared_logical_size > 0 {
+            declared_logical_size
+        } else {
+            chunk_size
+                .checked_mul(u64::from(volume.chunk_count))
+                .ok_or_else(|| EwfError::Malformed("EWF1 logical size overflow".into()))?
+        };
+        let smart_profile = !file_header.logical && volume.smart;
+        let media = MediaInfo {
+            sectors_per_chunk: Some(u64::from(volume.sectors_per_chunk)),
+            bytes_per_sector: Some(u64::from(volume.bytes_per_sector)),
+            sector_count: Some(volume.sector_count),
+            chunk_count: Some(u64::from(volume.chunk_count)),
+            error_granularity: volume.error_granularity.map(u64::from),
+            set_identifier: volume.set_identifier,
+            ewf2_segment_file_version: None,
+            compression_method: Some(compression_method),
+            compression_values: CompressionValues {
+                level: volume
+                    .compression_level
+                    .map(|value| CompressionLevel::from_i8(value as i8))
+                    .unwrap_or_default(),
+                ..CompressionValues::default()
+            },
+            media_type: volume
+                .media_type
+                .map(ewf1_media_type)
+                .or_else(|| smart_profile.then_some(MediaType::Removable)),
+            media_flags: ewf1_media_flags(volume.media_flags, file_header.logical || smart_profile),
+        };
+        (chunk_size, logical_size, smart_profile, media)
     } else {
-        chunk_size
-            .checked_mul(u64::from(volume.chunk_count))
-            .ok_or_else(|| EwfError::Malformed("EWF1 logical size overflow".into()))?
+        (0, 0, false, MediaInfo::default())
     };
-    let smart_profile = !file_header.logical && volume.smart;
-    let media = MediaInfo {
-        sectors_per_chunk: Some(u64::from(volume.sectors_per_chunk)),
-        bytes_per_sector: Some(u64::from(volume.bytes_per_sector)),
-        sector_count: Some(volume.sector_count),
-        chunk_count: Some(u64::from(volume.chunk_count)),
-        error_granularity: volume.error_granularity.map(u64::from),
-        set_identifier: volume.set_identifier,
-        ewf2_segment_file_version: None,
-        compression_method: Some(CompressionMethod::Zlib),
-        compression_values: CompressionValues {
-            level: volume
-                .compression_level
-                .map(|value| CompressionLevel::from_i8(value as i8))
-                .unwrap_or_default(),
-            ..CompressionValues::default()
-        },
-        media_type: volume
-            .media_type
-            .map(ewf1_media_type)
-            .or_else(|| smart_profile.then_some(MediaType::Removable)),
-        media_flags: ewf1_media_flags(volume.media_flags, file_header.logical || smart_profile),
-    };
+    let ewf1_media_geometry = volume.as_ref().map(|volume| Ewf1MediaGeometry {
+        chunk_size,
+        logical_size,
+        sectors_per_chunk: volume.sectors_per_chunk,
+        bytes_per_sector: volume.bytes_per_sector,
+        sector_count: volume.sector_count,
+        chunk_count: volume.chunk_count,
+    });
 
     let mut metadata = EwfMetadata::default();
     let mut stored_hashes = StoredHashes::default();
@@ -2247,6 +2324,8 @@ fn parse_ewf1_segment(
         FormatProfile::LogicalEnCase5
     } else if smart_profile {
         FormatProfile::Smart
+    } else if volume.is_none() {
+        FormatProfile::Unknown
     } else if profile_hint != FormatProfile::Unknown {
         profile_hint
     } else {
@@ -2260,7 +2339,7 @@ fn parse_ewf1_segment(
         match section.desc.section_type.as_str() {
             "header" => {
                 let data = read_exact_at(file, section.data_offset, section.data_size)?;
-                let payload = ewf1_metadata_payload(&data);
+                let payload = ewf1_metadata_payload(&data, compression_method)?;
                 let text = decode_header_bytes(&payload, header_codepage);
                 if !format_profile_detected_from_header2
                     && apply_detected_ewf1_format_profile(
@@ -2274,7 +2353,7 @@ fn parse_ewf1_segment(
             }
             "header2" => {
                 let data = read_exact_at(file, section.data_offset, section.data_size)?;
-                let payload = ewf1_metadata_payload(&data);
+                let payload = ewf1_metadata_payload(&data, compression_method)?;
                 if apply_detected_ewf1_format_profile(
                     &mut format_profile,
                     detect_ewf1_header2_profile(&payload),
@@ -2286,7 +2365,7 @@ fn parse_ewf1_segment(
             }
             "xheader" => {
                 let data = read_exact_at(file, section.data_offset, section.data_size)?;
-                let payload = ewf1_metadata_payload(&data);
+                let payload = ewf1_metadata_payload(&data, compression_method)?;
                 parse_xheader_data(&payload, &mut metadata);
             }
             "error2" => {
@@ -2295,7 +2374,16 @@ fn parse_ewf1_segment(
             }
             "session" => {
                 let data = read_exact_at(file, section.data_offset, section.data_size)?;
-                let parsed_sessions = parse_session_data(&data, 1, volume.sector_count)?;
+                let sector_count = volume
+                    .as_ref()
+                    .map(|volume| volume.sector_count)
+                    .or_else(|| inherited_media_geometry.map(|geometry| geometry.sector_count))
+                    .ok_or_else(|| {
+                        EwfError::Malformed(
+                            "EWF1 session section has no media geometry to inherit".into(),
+                        )
+                    })?;
+                let parsed_sessions = parse_session_data(&data, 1, sector_count)?;
                 sessions.extend(parsed_sessions.sessions);
                 tracks.extend(parsed_sessions.tracks);
             }
@@ -2333,7 +2421,7 @@ fn parse_ewf1_segment(
             }
             "xhash" => {
                 let data = read_exact_at(file, section.data_offset, section.data_size)?;
-                let payload = ewf1_metadata_payload(&data);
+                let payload = ewf1_metadata_payload(&data, compression_method)?;
                 parse_xhash_data(&payload, &mut stored_hashes);
             }
             "ltree" => {
@@ -2350,7 +2438,10 @@ fn parse_ewf1_segment(
         segment_index,
         first_chunk,
         logical_size,
-        volume.smart,
+        Ewf1RangeProfile {
+            allow_large_compressed_chunks: volume.as_ref().is_some_and(|volume| volume.smart),
+            compression_method,
+        },
         statistics,
     )?;
     let table_chunk_count = ranges.iter().try_fold(0_u64, |count, range| {
@@ -2363,8 +2454,10 @@ fn parse_ewf1_segment(
         format_profile,
         format_profile_hint_only,
         segment_number: u64::from(file_header.segment_number),
-        set_identifier: volume.set_identifier,
+        set_identifier: volume.as_ref().and_then(|volume| volume.set_identifier),
         ewf2_header_profile: None,
+        ewf1_compression_method: Some(compression_method),
+        ewf1_media_geometry,
         chunk_size,
         logical_size,
         acquisition_complete,
@@ -2414,6 +2507,51 @@ fn ewf1_media_flags(value: Option<u8>, logical_file_header: bool) -> MediaFlags 
     )
 }
 
+fn detect_ewf1_compression_method(
+    file_header: ewf1::FileHeader,
+    sections: &[Section],
+) -> Result<CompressionMethod> {
+    let header_method = match file_header.format_marker {
+        0x01 => CompressionMethod::Zlib,
+        0x21 => CompressionMethod::Zstd,
+        marker => {
+            return Err(EwfError::Malformed(format!(
+                "unsupported EWF1 file header marker 0x{marker:02x}"
+            )));
+        }
+    };
+
+    let mut descriptor_method = None;
+    for marker in sections
+        .iter()
+        .filter(|section| section.desc.section_type == "header")
+        .filter_map(|section| section.desc.compression_method.as_deref())
+    {
+        let observed = if marker.eq_ignore_ascii_case("zstd") {
+            CompressionMethod::Zstd
+        } else if marker.eq_ignore_ascii_case("zlib") || marker.eq_ignore_ascii_case("deflate") {
+            CompressionMethod::Zlib
+        } else {
+            return Err(EwfError::Malformed(format!(
+                "unsupported EWF1 descriptor compression marker {marker:?}"
+            )));
+        };
+        if descriptor_method.is_some_and(|expected| expected != observed) {
+            return Err(EwfError::Malformed(
+                "EWF1 descriptor compression marker conflict".into(),
+            ));
+        }
+        descriptor_method.get_or_insert(observed);
+    }
+
+    if descriptor_method.is_some_and(|observed| observed != header_method) {
+        return Err(EwfError::Malformed(
+            "EWF1 file header and descriptor compression marker conflict".into(),
+        ));
+    }
+    Ok(header_method)
+}
+
 fn ewf1_format_profile_hint_from_path(path: &Path) -> FormatProfile {
     match path.extension().and_then(|extension| extension.to_str()) {
         Some(extension) if extension.starts_with('e') => FormatProfile::Ewf,
@@ -2430,7 +2568,7 @@ fn parse_segment(
     file: &mut dyn SegmentReader,
     path: &Path,
     segment_index: usize,
-    first_ewf1_chunk: u64,
+    ewf1_context: Ewf1SegmentContext,
     strictness: OpenStrictness,
     header_codepage: HeaderCodepage,
     statistics: &ReaderStatisticsCollector,
@@ -2442,7 +2580,8 @@ fn parse_segment(
         parse_ewf1_segment(
             file,
             segment_index,
-            first_ewf1_chunk,
+            ewf1_context.first_chunk,
+            ewf1_context.inherited_media_geometry,
             ewf1_format_profile_hint_from_path(path),
             header_codepage,
             statistics,
@@ -2696,6 +2835,8 @@ fn parse_ewf2_segment(
             minor_version: header.minor_version,
             compression_method: header.compression_method,
         }),
+        ewf1_compression_method: None,
+        ewf1_media_geometry: None,
         chunk_size,
         logical_size,
         acquisition_complete,
@@ -3171,7 +3312,7 @@ fn parse_ewf1_ranges(
     segment_index: usize,
     first_chunk: u64,
     logical_size: u64,
-    allow_large_compressed_chunks: bool,
+    profile: Ewf1RangeProfile,
     statistics: &ReaderStatisticsCollector,
 ) -> Result<Vec<TableRange>> {
     let mut ranges = Vec::new();
@@ -3280,7 +3421,8 @@ fn parse_ewf1_ranges(
             entries_offset,
             base_offset: data_base,
             data_end: Some(data_end),
-            ewf1_allow_large_compressed_chunks: allow_large_compressed_chunks,
+            ewf1_allow_large_compressed_chunks: profile.allow_large_compressed_chunks,
+            ewf1_compression_method: Some(profile.compression_method),
             ewf2_compression_method: None,
         });
         next_chunk = next_chunk
@@ -3410,6 +3552,7 @@ fn parse_ewf2_ranges(
             base_offset: 0,
             data_end: None,
             ewf1_allow_large_compressed_chunks: false,
+            ewf1_compression_method: None,
             ewf2_compression_method: Some(compression_method_code(compression_method)),
         });
     }
@@ -3475,11 +3618,19 @@ fn ewf1_chunk_encoding(
     entry_compressed: bool,
     encoded_size: u64,
     chunk_size: u64,
+    compression_method: CompressionMethod,
 ) -> Result<ChunkEncoding> {
     if entry_compressed {
-        return Ok(ChunkEncoding::Zlib);
+        return match compression_method {
+            CompressionMethod::Zlib => Ok(ChunkEncoding::Zlib),
+            CompressionMethod::Zstd => Ok(ChunkEncoding::Zstd),
+            method => Err(EwfError::Unsupported(format!(
+                "unsupported EWF1 compression method {method:?}"
+            ))),
+        };
     }
-    if encoded_size > raw_chunk_size_cap(chunk_size)?
+    if compression_method == CompressionMethod::Zlib
+        && encoded_size > raw_chunk_size_cap(chunk_size)?
         && encoded_size <= zlib_compressed_chunk_size_cap(chunk_size)?
     {
         return Ok(ChunkEncoding::Zlib);
@@ -4098,15 +4249,29 @@ fn validate_ewf2_header_profile(
     Ok(())
 }
 
-fn ewf1_metadata_payload(data: &[u8]) -> Vec<u8> {
+fn ewf1_metadata_payload(data: &[u8], compression_method: CompressionMethod) -> Result<Vec<u8>> {
+    if compression_method == CompressionMethod::Zstd && data.starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
+    {
+        let decoder = ruzstd::decoding::StreamingDecoder::new_with_max_window_size(
+            data,
+            MAX_DECOMPRESSED_METADATA,
+        )
+        .map_err(|err| {
+            EwfError::Malformed(format!(
+                "EWF1 metadata Zstandard decoder initialization failed: {err}"
+            ))
+        })?;
+        return decompress_metadata(decoder, "EWF1");
+    }
+
     let mut decompressed = Vec::new();
     let result = flate2::read::ZlibDecoder::new(data)
         .take(MAX_DECOMPRESSED_METADATA + 1)
         .read_to_end(&mut decompressed);
     if result.is_ok() && decompressed.len() <= MAX_DECOMPRESSED_METADATA as usize {
-        decompressed
+        Ok(decompressed)
     } else {
-        data.to_vec()
+        Ok(data.to_vec())
     }
 }
 
@@ -4115,10 +4280,10 @@ fn ewf2_metadata_payload(
     _compression_method: ewf2::CompressionMethod,
 ) -> Result<Vec<u8>> {
     if data.first() == Some(&0x78) {
-        return decompress_ewf2_metadata(flate2::read::ZlibDecoder::new(data));
+        return decompress_metadata(flate2::read::ZlibDecoder::new(data), "EWF2");
     }
     if data.starts_with(b"BZh") {
-        return decompress_ewf2_metadata(bzip2::read::BzDecoder::new(data));
+        return decompress_metadata(bzip2::read::BzDecoder::new(data), "EWF2");
     }
     Ok(data.to_vec())
 }
@@ -4144,16 +4309,18 @@ fn decode_ewf2_string_section(
     Ok(text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned())
 }
 
-fn decompress_ewf2_metadata(reader: impl Read) -> Result<Vec<u8>> {
+fn decompress_metadata(reader: impl Read, format: &str) -> Result<Vec<u8>> {
     let mut decompressed = Vec::new();
     reader
         .take(MAX_DECOMPRESSED_METADATA + 1)
         .read_to_end(&mut decompressed)
-        .map_err(|err| EwfError::Malformed(format!("EWF2 metadata decompression failed: {err}")))?;
+        .map_err(|err| {
+            EwfError::Malformed(format!("{format} metadata decompression failed: {err}"))
+        })?;
     if decompressed.len() > MAX_DECOMPRESSED_METADATA as usize {
-        return Err(EwfError::Malformed(
-            "EWF2 metadata exceeds decompressed size limit".into(),
-        ));
+        return Err(EwfError::Malformed(format!(
+            "{format} metadata exceeds decompressed size limit"
+        )));
     }
     Ok(decompressed)
 }
@@ -4285,12 +4452,18 @@ mod tests {
         encoder.write_all(b"metadata").unwrap();
         let compressed = encoder.finish().unwrap();
 
-        assert_eq!(ewf1_metadata_payload(&compressed), b"metadata");
+        assert_eq!(
+            ewf1_metadata_payload(&compressed, CompressionMethod::Zlib).unwrap(),
+            b"metadata"
+        );
     }
 
     #[test]
     fn ewf1_metadata_payload_keeps_plain_data() {
-        assert_eq!(ewf1_metadata_payload(b"plain metadata"), b"plain metadata");
+        assert_eq!(
+            ewf1_metadata_payload(b"plain metadata", CompressionMethod::Zlib).unwrap(),
+            b"plain metadata"
+        );
     }
 
     #[test]

@@ -842,6 +842,29 @@ fn writer_copies_ewf1_compression_values_from_source_image() {
 }
 
 #[test]
+fn writer_rejects_copying_xways_zstd_media_settings() {
+    let dir = tempdir().unwrap();
+    let source_path = dir.path().join("source.E01");
+    let mut source_writer = EwfWriter::create(&source_path, WriteOptions::default()).unwrap();
+    source_writer.write_all(b"source media").unwrap();
+    source_writer.finish().unwrap();
+    let source = ewf_image::Image::open(&source_path).unwrap();
+    let mut source_info = source.info().clone();
+    source_info.media.compression_method = Some(CompressionMethod::Zstd);
+    let mut options = WriteOptions::default();
+
+    let err = options
+        .copy_media_values_from_info(&source_info)
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ewf_image::EwfError::Unsupported(message)
+            if message.contains("X-Ways Zstandard")
+    ));
+}
+
+#[test]
 fn writer_copies_compatibility_style_media_values_from_source_image() {
     let dir = tempdir().unwrap();
     let source_path = dir.path().join("source.Ex01");
@@ -2166,6 +2189,30 @@ fn writer_rejects_invalid_data_chunks() {
     };
     let err = writer.write_data_chunk(&chunk).unwrap_err();
     assert!(err.to_string().contains("payload length"));
+}
+
+#[test]
+fn writer_rejects_xways_zstd_encoded_chunks() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("xways-zstd-chunk.E01");
+    let mut writer = EwfWriter::create(&path, WriteOptions::default()).unwrap();
+    let chunk = ewf_image::EncodedDataChunk {
+        chunk_index: 0,
+        logical_offset: 0,
+        logical_size: 32_768,
+        encoded_size: 1,
+        encoding: DataChunkEncoding::Zstd,
+        has_checksum: false,
+        data: vec![0],
+    };
+
+    let err = writer.write_encoded_data_chunk(&chunk).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ewf_image::EwfError::Unsupported(message)
+            if message.contains("X-Ways Zstandard")
+    ));
 }
 
 #[test]

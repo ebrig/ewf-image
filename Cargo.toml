@@ -47,6 +47,7 @@ md-5 = "0.11"
 sha1 = "0.11"
 tempfile = "3"
 thiserror = "2"
+ruzstd = "0.9"
 
 [dev-dependencies]
 sha2 = "0.11"

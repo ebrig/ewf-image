@@ -62,12 +62,15 @@ pub enum FormatProfile {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 /// Compression method recorded for stored chunks.
 pub enum CompressionMethod {
     /// Chunks are stored without compression.
     None,
     /// Chunks use zlib compression.
     Zlib,
+    /// Chunks in X-Ways EWF1 images use Zstandard compression.
+    Zstd,
     /// Chunks use `BZip2` compression.
     Bzip2,
     /// An unrecognized on-disk compression method value.
@@ -772,12 +775,15 @@ pub struct MemoryExtent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 /// Encoding used for a data chunk payload.
 pub enum DataChunkEncoding {
     /// Uncompressed chunk data.
     Raw,
     /// zlib-compressed chunk data.
     Zlib,
+    /// X-Ways EWF1 magicless Zstandard data or its one-byte zero marker.
+    Zstd,
     /// BZip2-compressed chunk data.
     Bzip2,
     /// Pattern-fill chunk data with the repeated pattern value.
@@ -880,6 +886,7 @@ fn data_chunk_encoding(encoding: DataChunkEncoding) -> ChunkEncoding {
     match encoding {
         DataChunkEncoding::Raw => ChunkEncoding::Raw,
         DataChunkEncoding::Zlib => ChunkEncoding::Zlib,
+        DataChunkEncoding::Zstd => ChunkEncoding::Zstd,
         DataChunkEncoding::Bzip2 => ChunkEncoding::Bzip2,
         DataChunkEncoding::PatternFill(pattern) => ChunkEncoding::PatternFill(pattern),
     }

@@ -16,8 +16,10 @@ creation.
 
 ## Highlights
 
-- **Full format coverage.** Reads and writes EWF1 (`.E01`, `.L01`, `.S01`) and
-  EWF2 (`.Ex01`, `.Lx01`), including raw, zlib, BZip2, and pattern-fill chunks.
+- **Broad format coverage.** Reads and writes EWF1 (`.E01`, `.L01`, `.S01`)
+  and EWF2 (`.Ex01`, `.Lx01`), including raw, zlib, BZip2, and pattern-fill
+  chunks. The EWF1 reader also supports X-Ways Forensics 20.9+ Zstandard
+  images.
 - **Streaming reads.** Immutable `Image` handles offer positioned reads,
   `Read + Seek` cursors, and bounded decoded-chunk caching.
 - **Rich metadata.** Inspect acquisition headers, stored MD5/SHA1 hashes,
@@ -148,7 +150,7 @@ raw export, logical inspection, and mirrored secondary output.
 
 | Family | Read | Write | Notes |
 | --- | :---: | :---: | --- |
-| EWF1 physical `.E01` / EVF | ✓ | ✓ | Segment discovery, raw/zlib chunks, metadata, hashes, acquisition errors, sessions, tracks, and split output. |
+| EWF1 physical `.E01` / EVF | ✓ | ✓ | Segment discovery, raw/zlib chunks, metadata, hashes, acquisition errors, sessions, tracks, and split output. Reading additionally supports the X-Ways 20.9+ Zstandard profile. |
 | EWF1 logical `.L01` / LVF | ✓ | ✓ | Logical single-file catalogs and path lookup. |
 | EWF1 SMART `.S01` | ✓ | ✓ | SMART media profile handling. |
 | EWF2 physical `.Ex01` | ✓ | ✓ | Raw, zlib, BZip2, and pattern-fill chunks; EWF2 metadata, memory extents, and split output. |
@@ -164,6 +166,8 @@ output, and resume-by-rewrite.
   implemented.
 - Encrypted writing is not yet implemented.
 - Base-plus-overlay delta/shadow images are not yet implemented.
+- X-Ways Zstandard EWF1 images are read-only; the writer does not generate or
+  preserve X-Ways Zstandard chunks.
 - EWF2 BZip2 chunks are supported locally, but some external EWF tools cannot
   generate or export BZip2 fixtures, so external oracle coverage for them is
   tracked separately.
@@ -195,6 +199,7 @@ require local fixtures and installed EWF tools. See
 - [Compatibility](docs/compatibility.md)
 - [Limitations](docs/limitations.md)
 - [Testing](docs/testing.md)
+- [Migrating to 0.3](docs/migrating-to-0.3.md)
 - [Migrating to 0.2](docs/migrating-to-0.2.md)
 - [API reference (docs.rs)](https://docs.rs/ewf-image)
 
