@@ -17,6 +17,7 @@ use crate::decode::{
     ChunkEncoding, decode_chunk, raw_chunk_size_cap, validate_encoded_size,
     zlib_compressed_chunk_size_cap,
 };
+use crate::encryption::EncryptionContext;
 use crate::format::{ewf1, ewf2};
 use crate::index::{LazyChunkIndex, TableRange, TableRangeKind};
 use crate::metadata::{
@@ -38,7 +39,7 @@ use crate::types::{
     SingleFilePermission, SingleFileSource, SingleFileSubject, SingleFilesAuxTables,
     SingleFilesInfo, StoredHashes,
 };
-use crate::{EwfError, Result};
+use crate::{EncryptionInfo, EwfError, EwfPassword, Result};
 
 const MAX_DECOMPRESSED_METADATA: u64 = 16 * 1024 * 1024;
 const MAX_CHUNK_SIZE: u64 = 128 * 1024 * 1024;
@@ -78,6 +79,8 @@ pub struct Image {
 #[derive(Debug)]
 struct ImageInner {
     info: ImageInfo,
+    encryption_info: Option<EncryptionInfo>,
+    encryption_contexts: Vec<Option<EncryptionContext>>,
     segments: Mutex<SegmentFilePool>,
     index: LazyChunkIndex,
     chunk_cache: Mutex<LruCache<u64, Arc<Vec<u8>>>>,
@@ -182,7 +185,39 @@ impl Image {
     /// be read, or the image is unsupported or malformed.
     pub fn open_with_options(path: impl AsRef<Path>, options: OpenOptions) -> Result<Self> {
         let paths = discover_segments(path.as_ref())?;
-        Self::open_segment_paths(paths, options)
+        Self::open_segment_paths(paths, options, None)
+    }
+
+    /// Opens an EWF image using caller-supplied password bytes.
+    ///
+    /// Supplying a password for an unencrypted image is harmless.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no segment set can be discovered, a segment cannot
+    /// be read, the password is rejected, or the image is unsupported or
+    /// malformed.
+    pub fn open_with_password(path: impl AsRef<Path>, password: &EwfPassword) -> Result<Self> {
+        Self::open_with_options_and_password(path, OpenOptions::default(), password)
+    }
+
+    /// Opens an EWF image using explicit options and caller-supplied password
+    /// bytes.
+    ///
+    /// Supplying a password for an unencrypted image is harmless.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no segment set can be discovered, a segment cannot
+    /// be read, the password is rejected, or the image is unsupported or
+    /// malformed.
+    pub fn open_with_options_and_password(
+        path: impl AsRef<Path>,
+        options: OpenOptions,
+        password: &EwfPassword,
+    ) -> Result<Self> {
+        let paths = discover_segments(path.as_ref())?;
+        Self::open_segment_paths(paths, options, Some(password))
     }
 
     /// Opens an EWF image from an explicit ordered segment path list.
@@ -214,7 +249,32 @@ impl Image {
             .into_iter()
             .map(|path| path.as_ref().to_path_buf())
             .collect();
-        Self::open_segment_paths(paths, options)
+        Self::open_segment_paths(paths, options, None)
+    }
+
+    /// Opens an explicit ordered segment path list using explicit options and
+    /// caller-supplied password bytes.
+    ///
+    /// Supplying a password for an unencrypted image is harmless.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the list is empty, a segment cannot be read, the
+    /// password is rejected, or the image is unsupported or malformed.
+    pub fn open_segments_with_options_and_password<P, I>(
+        paths: I,
+        options: OpenOptions,
+        password: &EwfPassword,
+    ) -> Result<Self>
+    where
+        P: AsRef<Path>,
+        I: IntoIterator<Item = P>,
+    {
+        let paths = paths
+            .into_iter()
+            .map(|path| path.as_ref().to_path_buf())
+            .collect();
+        Self::open_segment_paths(paths, options, Some(password))
     }
 
     /// Opens an EWF image from supplied readers and segment labels.
@@ -253,10 +313,43 @@ impl Image {
             paths.push(name.into());
             readers.push(Box::new(reader) as SegmentReaderHandle);
         }
-        Self::open_segment_readers(paths, readers, options)
+        Self::open_segment_readers(paths, readers, options, None)
     }
 
-    fn open_segment_paths(paths: Vec<PathBuf>, options: OpenOptions) -> Result<Self> {
+    /// Opens supplied readers using explicit options and caller-supplied
+    /// password bytes.
+    ///
+    /// Supplying a password for an unencrypted image is harmless. Supplied
+    /// readers are retained by the image and are never reopened by path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the list is empty, a reader fails, the password is
+    /// rejected, or the image is unsupported or malformed.
+    pub fn open_readers_with_options_and_password<N, R, I>(
+        segments: I,
+        options: OpenOptions,
+        password: &EwfPassword,
+    ) -> Result<Self>
+    where
+        N: Into<PathBuf>,
+        R: SegmentReader + 'static,
+        I: IntoIterator<Item = (N, R)>,
+    {
+        let mut paths = Vec::new();
+        let mut readers = Vec::new();
+        for (name, reader) in segments {
+            paths.push(name.into());
+            readers.push(Box::new(reader) as SegmentReaderHandle);
+        }
+        Self::open_segment_readers(paths, readers, options, Some(password))
+    }
+
+    fn open_segment_paths(
+        paths: Vec<PathBuf>,
+        options: OpenOptions,
+        password: Option<&EwfPassword>,
+    ) -> Result<Self> {
         if paths.is_empty() {
             return Err(EwfError::NoSegments("empty segment list".into()));
         }
@@ -266,13 +359,14 @@ impl Image {
         ));
         let segments =
             SegmentFilePool::new_path(paths.len(), options.maximum_open_handles(), statistics)?;
-        Self::open_segment_sources(paths, segments, options)
+        Self::open_segment_sources(paths, segments, options, password)
     }
 
     fn open_segment_readers(
         paths: Vec<PathBuf>,
         readers: Vec<SegmentReaderHandle>,
         options: OpenOptions,
+        password: Option<&EwfPassword>,
     ) -> Result<Self> {
         if paths.is_empty() {
             return Err(EwfError::NoSegments("empty segment list".into()));
@@ -288,13 +382,14 @@ impl Image {
         ));
         let segments =
             SegmentFilePool::new_readers(readers, options.maximum_open_handles(), statistics)?;
-        Self::open_segment_sources(paths, segments, options)
+        Self::open_segment_sources(paths, segments, options, password)
     }
 
     fn open_segment_sources(
         paths: Vec<PathBuf>,
         mut segments: SegmentFilePool,
         options: OpenOptions,
+        password: Option<&EwfPassword>,
     ) -> Result<Self> {
         let statistics = Arc::clone(&segments.statistics);
         let mut ranges = Vec::new();
@@ -325,12 +420,24 @@ impl Image {
         let mut expected_ewf2_header_profile = None;
         let mut expected_ewf2_device_information = None;
         let mut expected_ewf2_case_data = None;
+        let mut encryption_info = None;
+        let mut encryption_contexts = Vec::with_capacity(paths.len());
 
         for (segment_index, path) in paths.iter().enumerate() {
             statistics.record_segment_parse();
-            let parsed = {
+            let (parsed, encryption_context, observed_encryption_info) = {
                 let file = segments.file_mut(segment_index, path)?;
-                parse_segment(
+                let encryption_metadata = ewf1::read_xways_encryption(file.as_mut())?;
+                let observed_encryption_info =
+                    encryption_metadata.as_ref().map(EncryptionInfo::from_xways);
+                let encryption_context = encryption_metadata
+                    .as_ref()
+                    .map(|metadata| {
+                        let password = password.ok_or(EwfError::PasswordRequired)?;
+                        EncryptionContext::derive(metadata, password)
+                    })
+                    .transpose()?;
+                let parsed = parse_segment(
                     file.as_mut(),
                     path,
                     segment_index,
@@ -341,8 +448,17 @@ impl Image {
                     options.strictness(),
                     options.header_codepage(),
                     &statistics,
-                )?
+                )?;
+                (parsed, encryption_context, observed_encryption_info)
             };
+            if segment_index == 0 {
+                encryption_info = observed_encryption_info;
+            } else if observed_encryption_info != encryption_info {
+                return Err(EwfError::Malformed(
+                    "X-Ways EWF1 encryption settings differ across segments".into(),
+                ));
+            }
+            encryption_contexts.push(encryption_context);
             let expected_segment_number = u64::try_from(segment_index + 1)
                 .map_err(|_| EwfError::Malformed("segment index overflow".into()))?;
             if parsed.segment_number != expected_segment_number {
@@ -518,9 +634,11 @@ impl Image {
             .unwrap_or(u64::MAX)
             .saturating_mul(info.chunk_size);
 
-        Ok(Self {
+        let image = Self {
             inner: Arc::new(ImageInner {
                 info,
+                encryption_info,
+                encryption_contexts,
                 segments: Mutex::new(segments),
                 index,
                 chunk_cache: Mutex::new(LruCache::new(cache_size)),
@@ -533,12 +651,26 @@ impl Image {
                 read_zero_chunk_on_error: AtomicBool::new(options.read_zero_chunk_on_error()),
                 abort_signaled: AtomicBool::new(false),
             }),
-        })
+        };
+        if image
+            .encryption_info()
+            .is_some_and(|info| !info.password_verifier_present())
+            && image.info().logical_size > 0
+        {
+            image.read_data_chunk(0)?;
+        }
+        Ok(image)
     }
 
     /// Returns parsed image metadata and geometry.
     pub fn info(&self) -> &ImageInfo {
         &self.inner.info
+    }
+
+    /// Returns non-secret encryption status for the opened image.
+    #[must_use]
+    pub fn encryption_info(&self) -> Option<EncryptionInfo> {
+        self.inner.encryption_info
     }
 
     /// Returns cumulative reader counters when statistics were enabled at open time.
@@ -1320,7 +1452,7 @@ impl Image {
     pub fn read_encoded_data_chunk(&self, chunk_index: u64) -> Result<EncodedDataChunk> {
         self.ensure_not_aborted()?;
         let chunk = self.lookup_chunk(chunk_index)?;
-        let data = self.read_encoded_chunk_bytes(chunk)?;
+        let data = self.read_encoded_chunk_bytes(chunk_index, chunk)?;
         let logical_offset = chunk_index
             .checked_mul(self.inner.info.chunk_size)
             .ok_or_else(|| EwfError::Malformed("data chunk logical offset overflow".into()))?;
@@ -1614,7 +1746,7 @@ impl Image {
             .has_supplied_readers())
     }
 
-    fn read_encoded_chunk_bytes(&self, chunk: Chunk) -> Result<Vec<u8>> {
+    fn read_encoded_chunk_bytes(&self, chunk_id: u64, chunk: Chunk) -> Result<Vec<u8>> {
         self.ensure_not_aborted()?;
         if matches!(chunk.encoding, ChunkEncoding::PatternFill(_)) {
             return Ok(Vec::new());
@@ -1653,11 +1785,22 @@ impl Image {
         self.inner
             .statistics
             .record_encoded_bytes_read(chunk.encoded_size);
+        if let Some(context) = self
+            .inner
+            .encryption_contexts
+            .get(chunk.segment_index)
+            .and_then(Option::as_ref)
+        {
+            let stream_offset = chunk_id
+                .checked_mul(self.inner.info.chunk_size)
+                .ok_or_else(|| EwfError::Malformed("encrypted chunk offset overflow".into()))?;
+            context.apply_keystream(stream_offset, &mut encoded)?;
+        }
         Ok(encoded)
     }
 
-    fn decode_chunk(&self, chunk: Chunk) -> Result<Vec<u8>> {
-        let encoded = self.read_encoded_chunk_bytes(chunk)?;
+    fn decode_chunk(&self, chunk_id: u64, chunk: Chunk) -> Result<Vec<u8>> {
+        let encoded = self.read_encoded_chunk_bytes(chunk_id, chunk)?;
         if chunk.validate_checksum {
             validate_raw_chunk_checksum(&encoded, chunk.logical_size)?;
         }
@@ -1678,8 +1821,17 @@ impl Image {
     }
 
     fn decode_chunk_with_policy(&self, chunk_id: u64, chunk: Chunk) -> Result<(Vec<u8>, bool)> {
-        match self.decode_chunk(chunk) {
+        match self.decode_chunk(chunk_id, chunk) {
             Ok(decoded) => Ok((decoded, false)),
+            Err(EwfError::Malformed(_))
+                if self
+                    .inner
+                    .encryption_contexts
+                    .get(chunk.segment_index)
+                    .is_some_and(Option::is_some) =>
+            {
+                Err(EwfError::DecryptionValidationFailed)
+            }
             Err(EwfError::Malformed(_)) if self.read_zero_chunk_on_error() => {
                 self.record_checksum_error(chunk_id, chunk.logical_size)?;
                 Ok((vec![0; chunk.logical_size], true))
@@ -2512,8 +2664,8 @@ fn detect_ewf1_compression_method(
     sections: &[Section],
 ) -> Result<CompressionMethod> {
     let header_method = match file_header.format_marker {
-        0x01 => CompressionMethod::Zlib,
-        0x21 => CompressionMethod::Zstd,
+        0x01 | 0x81 => CompressionMethod::Zlib,
+        0x21 | 0xa1 => CompressionMethod::Zstd,
         marker => {
             return Err(EwfError::Malformed(format!(
                 "unsupported EWF1 file header marker 0x{marker:02x}"

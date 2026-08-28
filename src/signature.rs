@@ -25,14 +25,15 @@ pub fn check_file_signature(path: impl AsRef<Path>) -> Result<bool> {
     ))
 }
 
-/// Returns whether a file appears to be an encrypted EWF2 segment.
+/// Returns whether a file appears to be an encrypted EWF segment.
 ///
-/// EWF1 files, short files, and files with unknown signatures return `false`.
+/// Plain EWF1 files, short files, and files with unknown signatures return
+/// `false`.
 ///
 /// # Errors
 ///
-/// Returns an error if the file cannot be read or if an EWF2 descriptor chain is
-/// malformed while probing for encryption.
+/// Returns an error if the file cannot be read or if a recognized EWF
+/// descriptor chain is malformed while probing for encryption.
 pub fn check_file_encryption(path: impl AsRef<Path>) -> Result<bool> {
     let mut file = File::open(path)?;
     let Some(signature) = read_signature(&mut file)? else {
@@ -40,7 +41,7 @@ pub fn check_file_encryption(path: impl AsRef<Path>) -> Result<bool> {
     };
 
     if matches!(signature, ewf1::EVF_SIGNATURE | ewf1::LVF_SIGNATURE) {
-        return Ok(false);
+        return ewf1::probe_xways_encryption(&mut file);
     }
     if !matches!(signature, ewf2::EX01_SIGNATURE | ewf2::LEF2_SIGNATURE) {
         return Ok(false);
@@ -90,7 +91,7 @@ pub fn check_file_corruption(path: impl AsRef<Path>) -> Result<bool> {
 
     match Image::open(path) {
         Err(EwfError::Malformed(message)) => Ok(malformed_error_is_corruption(&message)),
-        Ok(_) | Err(EwfError::Unsupported(_)) => Ok(false),
+        Ok(_) | Err(EwfError::Unsupported(_) | EwfError::PasswordRequired) => Ok(false),
         Err(err) => Err(err),
     }
 }
@@ -120,7 +121,7 @@ where
 
     match Image::open_segments(paths) {
         Err(EwfError::Malformed(message)) => Ok(malformed_error_is_corruption(&message)),
-        Ok(_) | Err(EwfError::Unsupported(_)) => Ok(false),
+        Ok(_) | Err(EwfError::Unsupported(_) | EwfError::PasswordRequired) => Ok(false),
         Err(err) => Err(err),
     }
 }

@@ -3,6 +3,7 @@ use std::fmt;
 use aes::{Aes128, Aes256};
 use ctr::cipher::{KeyIvInit, StreamCipher};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::{EwfError, Result};
@@ -60,6 +61,13 @@ pub struct EncryptionInfo {
 }
 
 impl EncryptionInfo {
+    pub(crate) fn from_xways(metadata: &XWaysEncryptionMetadata) -> Self {
+        Self {
+            method: metadata.method,
+            password_verifier_present: metadata.password_verifier.is_some(),
+        }
+    }
+
     /// Returns the image's encryption method.
     #[must_use]
     pub const fn method(self) -> EncryptionMethod {
@@ -73,19 +81,76 @@ impl EncryptionInfo {
     }
 }
 
-#[allow(dead_code)]
-#[derive(Clone)]
+pub(crate) const XWAYS_ENCRYPTION_DATA_SIZE: usize = 84;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct XWaysEncryptionMetadata {
     pub(crate) method: EncryptionMethod,
-    pub(crate) layout_version: u32,
+    pub(crate) flags: u16,
     pub(crate) salt: [u8; 32],
     pub(crate) initial_counter: [u8; 16],
     pub(crate) password_verifier: Option<[u8; 32]>,
-    pub(crate) ewf_header_file_offset: u64,
-    pub(crate) encrypted_stream_file_offset: u64,
 }
 
-#[allow(dead_code)]
+impl XWaysEncryptionMetadata {
+    pub(crate) fn parse(data: &[u8]) -> Result<Self> {
+        if data.len() != XWAYS_ENCRYPTION_DATA_SIZE {
+            return Err(EwfError::Malformed(format!(
+                "X-Ways EWF1 encryption section has size {}, expected {XWAYS_ENCRYPTION_DATA_SIZE}",
+                data.len()
+            )));
+        }
+
+        let raw_method = u16::from_le_bytes([data[0], data[1]]);
+        let flags = u16::from_le_bytes([data[2], data[3]]);
+        if raw_method >= 3 {
+            return Err(EwfError::Malformed(format!(
+                "invalid X-Ways EWF1 encryption method {raw_method}"
+            )));
+        }
+        if flags & 0x0fff >= 8 {
+            return Err(EwfError::Malformed(format!(
+                "invalid X-Ways EWF1 encryption flags 0x{flags:04x}"
+            )));
+        }
+        if (raw_method == 0 && flags & 1 == 0) || (raw_method == 1 && flags & 1 != 0) {
+            return Err(EwfError::Malformed(format!(
+                "X-Ways EWF1 encryption method {raw_method} conflicts with flags 0x{flags:04x}"
+            )));
+        }
+
+        let method = match raw_method {
+            0 => EncryptionMethod::XWaysAes128Ctr,
+            1 => EncryptionMethod::XWaysAes256Ctr,
+            2 => {
+                return Err(EwfError::Unsupported(
+                    "X-Ways EWF1 encryption method 2".into(),
+                ));
+            }
+            _ => unreachable!("raw method was validated above"),
+        };
+        let salt = data[4..36]
+            .try_into()
+            .expect("X-Ways encryption metadata length checked");
+        let initial_counter = data[36..52]
+            .try_into()
+            .expect("X-Ways encryption metadata length checked");
+        let password_verifier = (flags & 2 == 0).then(|| {
+            data[52..84]
+                .try_into()
+                .expect("X-Ways encryption metadata length checked")
+        });
+
+        Ok(Self {
+            method,
+            flags,
+            salt,
+            initial_counter,
+            password_verifier,
+        })
+    }
+}
+
 pub(crate) struct EncryptionContext {
     method: EncryptionMethod,
     key: DerivedKey,
@@ -108,53 +173,65 @@ impl fmt::Debug for EncryptionContext {
     }
 }
 
-#[allow(dead_code)]
 impl EncryptionContext {
-    pub(crate) fn derive(metadata: &XWaysEncryptionMetadata, password: &EwfPassword) -> Self {
+    pub(crate) fn derive(
+        metadata: &XWaysEncryptionMetadata,
+        password: &EwfPassword,
+    ) -> Result<Self> {
+        let password = xways_password_bytes(metadata.method, password.as_bytes())?;
+        if metadata.password_verifier.as_ref().is_some_and(|expected| {
+            let actual = xways_password_verifier(metadata.method, &password, &metadata.salt);
+            !bool::from(actual[..].ct_eq(expected))
+        }) {
+            return Err(EwfError::PasswordRejected);
+        }
+
         let key = match metadata.method {
-            EncryptionMethod::XWaysAes128Ctr => DerivedKey::Aes128(Zeroizing::new(
-                derive_aes128_key(password.as_bytes(), &metadata.salt),
-            )),
-            EncryptionMethod::XWaysAes256Ctr => DerivedKey::Aes256(Zeroizing::new(
-                derive_aes256_key(password.as_bytes(), &metadata.salt),
-            )),
+            EncryptionMethod::XWaysAes128Ctr => {
+                DerivedKey::Aes128(derive_aes128_key(&password, &metadata.salt))
+            }
+            EncryptionMethod::XWaysAes256Ctr => {
+                DerivedKey::Aes256(derive_aes256_key(&password, &metadata.salt))
+            }
         };
-        Self {
+        Ok(Self {
             method: metadata.method,
             key,
             initial_counter: metadata.initial_counter,
-        }
+        })
     }
 
     pub(crate) fn apply_keystream(&self, stream_offset: u64, bytes: &mut [u8]) -> Result<()> {
         if bytes.is_empty() {
             return Ok(());
         }
+        if !stream_offset.is_multiple_of(16) {
+            return Err(EwfError::Malformed(
+                "X-Ways AES chunk offset is not block aligned".into(),
+            ));
+        }
 
         let block_index = stream_offset / 16;
-        let intra_block =
-            usize::try_from(stream_offset % 16).expect("AES intra-block offset is smaller than 16");
-        let spanned_bytes = intra_block
-            .checked_add(bytes.len())
-            .ok_or_else(counter_overflow)?;
         let final_block_delta =
-            u64::try_from((spanned_bytes - 1) / 16).map_err(|_| counter_overflow())?;
-        let final_block_index = block_index
-            .checked_add(final_block_delta)
-            .ok_or_else(counter_overflow)?;
-        let _ = counter_at(self.method, self.initial_counter, final_block_index)?;
-        let counter = counter_at(self.method, self.initial_counter, block_index)?;
+            u64::try_from((bytes.len() - 1) / 16).map_err(|_| counter_overflow())?;
+        let counter = counter_at_chunk_offset(self.initial_counter, block_index)?;
 
         match &self.key {
             DerivedKey::Aes128(key) => {
+                u128::from_be_bytes(counter)
+                    .checked_add(u128::from(final_block_delta))
+                    .ok_or_else(counter_overflow)?;
                 type Aes128Ctr = ctr::Ctr128BE<Aes128>;
                 let mut cipher = Aes128Ctr::new((&**key).into(), (&counter).into());
-                apply_with_intra_block_offset(&mut cipher, intra_block, bytes);
+                cipher.apply_keystream(bytes);
             }
             DerivedKey::Aes256(key) => {
-                type Aes256Ctr = ctr::Ctr128LE<Aes256>;
+                u64::from_le_bytes(counter[..8].try_into().expect("counter prefix length"))
+                    .checked_add(final_block_delta)
+                    .ok_or_else(counter_overflow)?;
+                type Aes256Ctr = ctr::Ctr64LE<Aes256>;
                 let mut cipher = Aes256Ctr::new((&**key).into(), (&counter).into());
-                apply_with_intra_block_offset(&mut cipher, intra_block, bytes);
+                cipher.apply_keystream(bytes);
             }
         }
         Ok(())
@@ -170,76 +247,88 @@ impl EncryptionContext {
     }
 }
 
-fn apply_with_intra_block_offset(
-    cipher: &mut impl StreamCipher,
-    intra_block: usize,
-    bytes: &mut [u8],
-) {
-    let mut discarded = [0_u8; 15];
-    cipher.apply_keystream(&mut discarded[..intra_block]);
-    cipher.apply_keystream(bytes);
-}
-
-fn counter_at(
-    method: EncryptionMethod,
-    initial_counter: [u8; 16],
-    block_index: u64,
-) -> Result<[u8; 16]> {
-    let value = match method {
-        EncryptionMethod::XWaysAes128Ctr => u128::from_be_bytes(initial_counter),
-        EncryptionMethod::XWaysAes256Ctr => u128::from_le_bytes(initial_counter),
-    };
-    let value = value
-        .checked_add(u128::from(block_index))
+fn counter_at_chunk_offset(initial_counter: [u8; 16], block_index: u64) -> Result<[u8; 16]> {
+    let mut counter = initial_counter;
+    let prefix = u64::from_le_bytes(counter[..8].try_into().expect("counter prefix length"))
+        .checked_add(block_index)
         .ok_or_else(counter_overflow)?;
-    Ok(match method {
-        EncryptionMethod::XWaysAes128Ctr => value.to_be_bytes(),
-        EncryptionMethod::XWaysAes256Ctr => value.to_le_bytes(),
-    })
+    counter[..8].copy_from_slice(&prefix.to_le_bytes());
+    Ok(counter)
 }
 
 fn counter_overflow() -> EwfError {
     EwfError::Malformed("X-Ways AES counter overflow".into())
 }
 
-fn derive_aes256_key(password: &[u8], salt: &[u8; 32]) -> [u8; 32] {
-    let password_hash = Sha256::digest(password);
-    Sha256::new()
-        .chain_update(password_hash)
-        .chain_update(salt)
-        .finalize()
-        .into()
+fn xways_password_bytes(method: EncryptionMethod, password: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+    let maximum_length = match method {
+        EncryptionMethod::XWaysAes128Ctr => 16,
+        EncryptionMethod::XWaysAes256Ctr => 32,
+    };
+    if password.len() > maximum_length {
+        return Err(EwfError::PasswordRejected);
+    }
+
+    let mut bytes = Zeroizing::new([0_u8; 32]);
+    bytes[..password.len()].copy_from_slice(password);
+    Ok(bytes)
 }
 
-fn derive_aes128_key(password: &[u8], salt: &[u8; 32]) -> [u8; 16] {
+fn derive_aes256_key(password: &[u8; 32], salt: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(
+        Sha256::new()
+            .chain_update(password)
+            .chain_update(salt)
+            .finalize()
+            .into(),
+    )
+}
+
+fn derive_aes128_key(password: &[u8; 32], salt: &[u8; 32]) -> Zeroizing<[u8; 16]> {
     let key = derive_aes256_key(password, salt);
-    let mut reduced = [0_u8; 16];
+    let mut reduced = Zeroizing::new([0_u8; 16]);
     for (output, (first, second)) in reduced.iter_mut().zip(key[..16].iter().zip(&key[16..])) {
         *output = first ^ second;
     }
     reduced
 }
 
-#[allow(dead_code)]
-fn aes256_password_verifier(password: &[u8], salt: &[u8; 32]) -> [u8; 32] {
-    let password_hash = Sha256::digest(password);
-    let second_hash = Sha256::new()
-        .chain_update(password)
-        .chain_update(password_hash)
-        .finalize();
-    Sha256::new()
-        .chain_update(salt)
-        .chain_update(password_hash)
-        .chain_update(second_hash)
-        .finalize()
-        .into()
+fn xways_password_verifier(
+    method: EncryptionMethod,
+    password: &[u8; 32],
+    salt: &[u8; 32],
+) -> Zeroizing<[u8; 32]> {
+    let rounds = match method {
+        EncryptionMethod::XWaysAes128Ctr => 100_000,
+        EncryptionMethod::XWaysAes256Ctr => 1,
+    };
+    let mut previous: Zeroizing<[u8; 32]> = Zeroizing::new(Sha256::digest(password).into());
+    let mut current = Zeroizing::new([0_u8; 32]);
+    for round in 0..rounds {
+        *current = Sha256::new()
+            .chain_update(password)
+            .chain_update(previous.as_slice())
+            .finalize()
+            .into();
+        if round + 1 < rounds {
+            previous.copy_from_slice(current.as_slice());
+        }
+    }
+    Zeroizing::new(
+        Sha256::new()
+            .chain_update(salt)
+            .chain_update(previous.as_slice())
+            .chain_update(current.as_slice())
+            .finalize()
+            .into(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const PASSWORD: &[u8] = b"ewf-image-test-only";
+    const PASSWORD: &[u8] = b"xways-test";
     const SALT: [u8; 32] = [
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
         0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
@@ -266,34 +355,128 @@ mod tests {
         let password = EwfPassword::from_bytes(PASSWORD.to_vec());
         let metadata = XWaysEncryptionMetadata {
             method: EncryptionMethod::XWaysAes256Ctr,
-            layout_version: 1,
+            flags: 0x1000,
             salt: SALT,
             initial_counter,
             password_verifier: None,
-            ewf_header_file_offset: 0,
-            encrypted_stream_file_offset: 0,
         };
-        EncryptionContext::derive(&metadata, &password)
+        EncryptionContext::derive(&metadata, &password).unwrap()
     }
 
     #[test]
-    fn derives_documented_xways_keys() {
+    fn parses_authentic_xways_encryption_metadata() {
+        let aes128 = XWaysEncryptionMetadata::parse(&hex_vec(
+            "0000011061F995F4B65662828E420139572C452260666DCD481BBBCA8E98528E3F8D8BBA9342D4A3AE0E16F923C5A37B9389A83D14F51270CF749C0E82CA06C8A0ED97602A55ACF684A6A18FCC4F0021BCCC95E4",
+        ))
+        .unwrap();
+        assert_eq!(aes128.method, EncryptionMethod::XWaysAes128Ctr);
+        assert_eq!(aes128.flags, 0x1001);
         assert_eq!(
-            derive_aes256_key(PASSWORD, &SALT),
-            hex_array("5d8c04beb71ca6914d9dc2aaf68b1d8817023a0d669a818a0e974d5f8a2c40f7")
+            aes128.salt,
+            hex_array("61F995F4B65662828E420139572C452260666DCD481BBBCA8E98528E3F8D8BBA")
         );
         assert_eq!(
-            derive_aes128_key(PASSWORD, &SALT),
-            hex_array("4a8e3eb3d186271b430a8ff57ca75d7f")
+            aes128.initial_counter,
+            hex_array("9342D4A3AE0E16F923C5A37B9389A83D")
+        );
+        assert_eq!(
+            aes128.password_verifier,
+            Some(hex_array(
+                "14F51270CF749C0E82CA06C8A0ED97602A55ACF684A6A18FCC4F0021BCCC95E4"
+            ))
+        );
+
+        let aes256 = XWaysEncryptionMetadata::parse(&hex_vec(
+            "01000010FD1E9C28B616BF087EAB72E63578FA65998724AB118F5977485FD0CA970492724376F18ED9736D06E3AB9D3D80EA2DC0F54130378826D53F929D6AE526A1974CA63A10593D097535EE481DD29CA81163",
+        ))
+        .unwrap();
+        assert_eq!(aes256.method, EncryptionMethod::XWaysAes256Ctr);
+        assert_eq!(aes256.flags, 0x1000);
+        assert_eq!(
+            aes256.salt,
+            hex_array("FD1E9C28B616BF087EAB72E63578FA65998724AB118F5977485FD0CA97049272")
+        );
+        assert_eq!(
+            aes256.initial_counter,
+            hex_array("4376F18ED9736D06E3AB9D3D80EA2DC0")
+        );
+        assert_eq!(
+            aes256.password_verifier,
+            Some(hex_array(
+                "F54130378826D53F929D6AE526A1974CA63A10593D097535EE481DD29CA81163"
+            ))
         );
     }
 
     #[test]
-    fn computes_documented_aes256_password_verifier() {
+    fn parses_verifier_absence_from_xways_flags() {
+        let mut data = [0_u8; 84];
+        data[..2].copy_from_slice(&1_u16.to_le_bytes());
+        data[2..4].copy_from_slice(&0x1002_u16.to_le_bytes());
+
+        let metadata = XWaysEncryptionMetadata::parse(&data).unwrap();
+
+        assert_eq!(metadata.password_verifier, None);
+    }
+
+    #[test]
+    fn rejects_invalid_xways_encryption_metadata() {
+        let error = XWaysEncryptionMetadata::parse(&[0_u8; 83]).unwrap_err();
+        assert!(matches!(error, EwfError::Malformed(_)));
+
+        for (method, flags) in [(3_u16, 0_u16), (0, 0), (1, 1), (0, 0x1009)] {
+            let mut data = [0_u8; 84];
+            data[..2].copy_from_slice(&method.to_le_bytes());
+            data[2..4].copy_from_slice(&flags.to_le_bytes());
+
+            let error = XWaysEncryptionMetadata::parse(&data).unwrap_err();
+            assert!(
+                matches!(error, EwfError::Malformed(_)),
+                "method={method}, flags=0x{flags:04x}, error={error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn derives_reverse_engineered_xways_keys() {
+        let password = xways_password_bytes(EncryptionMethod::XWaysAes256Ctr, PASSWORD).unwrap();
         assert_eq!(
-            aes256_password_verifier(PASSWORD, &SALT),
-            hex_array("23215aeabaff9455ccdd288893346b4392dafd3ff298a09559244567a9ceacb6")
+            *derive_aes256_key(&password, &SALT),
+            hex_array("e6e743cc93230c187367b822f06a5207dbbb2f76ca9782ddf7387f1112f71c7c")
         );
+        assert_eq!(
+            *derive_aes128_key(&password, &SALT),
+            hex_array("3d5c6cba59b48ec5845fc733e29d4e7b")
+        );
+    }
+
+    #[test]
+    fn computes_method_specific_xways_password_verifiers() {
+        let password = xways_password_bytes(EncryptionMethod::XWaysAes256Ctr, PASSWORD).unwrap();
+        assert_eq!(
+            *xways_password_verifier(EncryptionMethod::XWaysAes256Ctr, &password, &SALT),
+            hex_array("67848e0c6345512ce5fd75dd57d6ee5f94fcae9fefb5eddc85f147d706c6364b")
+        );
+        assert_eq!(
+            *xways_password_verifier(EncryptionMethod::XWaysAes128Ctr, &password, &SALT),
+            hex_array("bc2387cb286603d72cd6cc0b83c0a9fff7ff08f3ebefe57ad74464f3698abd2d")
+        );
+    }
+
+    #[test]
+    fn canonicalizes_xways_passwords_to_fixed_zero_padded_buffers() {
+        let password = xways_password_bytes(EncryptionMethod::XWaysAes128Ctr, b"abc").unwrap();
+        assert_eq!(&password[..3], b"abc");
+        assert!(password[3..].iter().all(|byte| *byte == 0));
+
+        assert!(matches!(
+            xways_password_bytes(EncryptionMethod::XWaysAes128Ctr, &[b'a'; 17]),
+            Err(EwfError::PasswordRejected)
+        ));
+        assert!(matches!(
+            xways_password_bytes(EncryptionMethod::XWaysAes256Ctr, &[b'a'; 33]),
+            Err(EwfError::PasswordRejected)
+        ));
     }
 
     #[test]
@@ -318,44 +501,37 @@ mod tests {
 
         assert_eq!(
             &two_blocks[..16],
-            hex_vec("e5c8e696d0ed24593152afcd7740a99a")
+            hex_vec("d6d49d46ee7b6965ca7cb74ee3923d5f")
         );
         assert_eq!(
             &two_blocks[16..],
-            hex_vec("363d06a5d8ae94cbb574f597dc511488")
+            hex_vec("d980e413ca4e5da559db937f4712841c")
         );
     }
 
     #[test]
-    fn random_access_matches_one_full_ctr_read_at_every_split() {
-        let context = aes256_context(hex_array("000102030405060708090a0b0c0d0e0f"));
-        let mut expected = vec![0_u8; 48];
-        context.apply_keystream(0, &mut expected).unwrap();
+    fn aes128_chunk_offsets_advance_the_counter_prefix() {
+        let context = EncryptionContext::from_test_aes128_key(
+            hex_array("2b7e151628aed2a6abf7158809cf4f3c"),
+            hex_array("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"),
+        );
+        let mut data = [0_u8; 16];
 
-        for split in 0..=expected.len() {
-            let mut first = vec![0_u8; split];
-            let mut second = vec![0_u8; expected.len() - split];
-            context.apply_keystream(0, &mut first).unwrap();
-            context
-                .apply_keystream(u64::try_from(split).unwrap(), &mut second)
-                .unwrap();
-            first.extend_from_slice(&second);
-            assert_eq!(first, expected, "split at byte {split}");
-        }
+        context.apply_keystream(16, &mut data).unwrap();
+
+        assert_eq!(data, hex_array("eeb9afc6c9b7e3d53576f29fe1e17805"));
     }
 
     #[test]
-    fn unaligned_random_access_matches_full_ctr_read() {
+    fn rejects_unaligned_xways_chunk_offsets() {
         let context = aes256_context(hex_array("000102030405060708090a0b0c0d0e0f"));
-        let mut expected = vec![0_u8; 48];
-        context.apply_keystream(0, &mut expected).unwrap();
+        let mut data = [0_u8; 16];
 
-        for (offset, length) in [(1_u64, 31_usize), (15, 18), (16, 16), (17, 17)] {
-            let mut actual = vec![0_u8; length];
-            context.apply_keystream(offset, &mut actual).unwrap();
-            let start = usize::try_from(offset).unwrap();
-            assert_eq!(actual, expected[start..start + length]);
-        }
+        let error = context.apply_keystream(1, &mut data).unwrap_err();
+
+        assert!(
+            matches!(error, EwfError::Malformed(message) if message == "X-Ways AES chunk offset is not block aligned")
+        );
     }
 
     #[test]

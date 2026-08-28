@@ -23,6 +23,8 @@ include = [
     "/src/**",
     "/tests/api.rs",
     "/tests/corpus.rs",
+    "/tests/encryption.rs",
+    "/tests/data/xways-encrypted/**",
     "/tests/reader.rs",
     "/tests/reader_performance.rs",
     "/tests/signature.rs",

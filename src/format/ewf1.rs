@@ -1,7 +1,95 @@
+use std::io::{Read, Seek, SeekFrom};
+
+use crate::encryption::{XWAYS_ENCRYPTION_DATA_SIZE, XWaysEncryptionMetadata};
 use crate::{EwfError, Result};
 
 pub(crate) const EVF_SIGNATURE: [u8; 8] = [0x45, 0x56, 0x46, 0x09, 0x0d, 0x0a, 0xff, 0x00];
 pub(crate) const LVF_SIGNATURE: [u8; 8] = [0x4c, 0x56, 0x46, 0x09, 0x0d, 0x0a, 0xff, 0x00];
+
+const XWAYS_ENCRYPTED_ZLIB_MARKER: u8 = 0x81;
+const XWAYS_ENCRYPTED_ZSTD_MARKER: u8 = 0xa1;
+pub(crate) fn probe_xways_encryption<R: Read + Seek + ?Sized>(file: &mut R) -> Result<bool> {
+    Ok(read_xways_encryption(file)?.is_some())
+}
+
+pub(crate) fn read_xways_encryption<R: Read + Seek + ?Sized>(
+    file: &mut R,
+) -> Result<Option<XWaysEncryptionMetadata>> {
+    let file_len = file.seek(SeekFrom::End(0))?;
+    if file_len < FILE_HEADER_SIZE as u64 {
+        return Ok(None);
+    }
+
+    let mut header = [0; FILE_HEADER_SIZE];
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut header)?;
+    if header[..8] != EVF_SIGNATURE && header[..8] != LVF_SIGNATURE {
+        return Ok(None);
+    }
+    let header = FileHeader::parse(&header)?;
+    if !matches!(
+        header.format_marker,
+        XWAYS_ENCRYPTED_ZLIB_MARKER | XWAYS_ENCRYPTED_ZSTD_MARKER
+    ) {
+        return Ok(None);
+    }
+
+    let mut offset = FILE_HEADER_SIZE as u64;
+    let max_sections = ((file_len - offset) / SECTION_DESCRIPTOR_SIZE as u64).saturating_add(1);
+    for _ in 0..max_sections {
+        let descriptor_end = offset
+            .checked_add(SECTION_DESCRIPTOR_SIZE as u64)
+            .ok_or_else(|| EwfError::Malformed("EWF1 section descriptor overflow".into()))?;
+        if descriptor_end > file_len {
+            return Err(EwfError::Malformed(
+                "X-Ways EWF1 section descriptor exceeds file".into(),
+            ));
+        }
+
+        let mut bytes = [0; SECTION_DESCRIPTOR_SIZE];
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut bytes)?;
+        let descriptor = SectionDescriptor::parse(&bytes, offset)?;
+        let data_size = descriptor.data_size()?;
+        let section_end = descriptor_end
+            .checked_add(data_size)
+            .ok_or_else(|| EwfError::Malformed("X-Ways EWF1 section overflow".into()))?;
+        if section_end > file_len {
+            return Err(EwfError::Malformed(
+                "X-Ways EWF1 section exceeds file".into(),
+            ));
+        }
+
+        if descriptor.section_type == "x_encryption" {
+            let data_size = usize::try_from(data_size).map_err(|_| {
+                EwfError::Malformed("X-Ways EWF1 encryption section size does not fit usize".into())
+            })?;
+            if data_size != XWAYS_ENCRYPTION_DATA_SIZE {
+                return Err(EwfError::Malformed(format!(
+                    "X-Ways EWF1 encryption section has size {data_size}, expected {XWAYS_ENCRYPTION_DATA_SIZE}"
+                )));
+            }
+            let mut data = [0_u8; XWAYS_ENCRYPTION_DATA_SIZE];
+            file.read_exact(&mut data)?;
+            return XWaysEncryptionMetadata::parse(&data).map(Some);
+        }
+        if matches!(descriptor.section_type.as_str(), "done" | "next") {
+            return Err(EwfError::Malformed(
+                "X-Ways EWF1 encrypted marker has no encryption section".into(),
+            ));
+        }
+        if descriptor.next < section_end || descriptor.next <= offset {
+            return Err(EwfError::Malformed(
+                "X-Ways EWF1 section chain does not advance".into(),
+            ));
+        }
+        offset = descriptor.next;
+    }
+
+    Err(EwfError::Malformed(
+        "X-Ways EWF1 section chain is too long".into(),
+    ))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FileHeader {

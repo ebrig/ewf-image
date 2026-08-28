@@ -1,11 +1,18 @@
 //! Signature, encryption, and corruption probe tests.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 const EVF_SIGNATURE: [u8; 8] = [0x45, 0x56, 0x46, 0x09, 0x0d, 0x0a, 0xff, 0x00];
 const LVF_SIGNATURE: [u8; 8] = [0x4c, 0x56, 0x46, 0x09, 0x0d, 0x0a, 0xff, 0x00];
 const EX01_SIGNATURE: [u8; 8] = [0x45, 0x56, 0x46, 0x32, 0x0d, 0x0a, 0x81, 0x00];
 const LEF2_SIGNATURE: [u8; 8] = [0x4c, 0x45, 0x46, 0x32, 0x0d, 0x0a, 0x81, 0x00];
+
+fn xways_fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/xways-encrypted")
+        .join(name)
+}
 
 fn temp_file(bytes: &[u8]) -> tempfile::NamedTempFile {
     let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -128,6 +135,21 @@ fn check_file_encryption_reports_false_for_unknown_short_and_ewf1_files() {
 }
 
 #[test]
+fn check_file_encryption_detects_xways_encrypted_ewf1_files() {
+    for name in [
+        "aes128-compatible.E01",
+        "aes128-zstd.E01",
+        "aes256-compatible.E01",
+        "aes256-zstd.E01",
+    ] {
+        assert!(
+            ewf_image::check_file_encryption(xways_fixture(name)).unwrap(),
+            "fixture {name} was not detected as encrypted"
+        );
+    }
+}
+
+#[test]
 fn check_file_encryption_reports_false_for_plain_ewf2_files() {
     let mut bytes = ewf2_header(EX01_SIGNATURE);
     bytes.extend_from_slice(&ewf2_desc_with_flags(0x0f, 0, 0, 0));
@@ -212,4 +234,9 @@ fn check_file_corruption_reports_false_for_encrypted_ewf2_sections() {
     let file = temp_file_with_suffix(".Ex01", &bytes);
 
     assert!(!ewf_image::check_file_corruption(file.path()).unwrap());
+}
+
+#[test]
+fn check_file_corruption_reports_false_for_xways_encrypted_ewf1() {
+    assert!(!ewf_image::check_file_corruption(xways_fixture("aes128-compatible.E01")).unwrap());
 }

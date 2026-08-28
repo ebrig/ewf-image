@@ -18,6 +18,7 @@
 //! # Supported container families
 //!
 //! - EWF1 physical `.E01` / EVF images.
+//! - X-Ways AES-128/AES-256 encrypted EWF1 images.
 //! - EWF1 logical `.L01` / LVF images.
 //! - EWF1 SMART `.S01` images.
 //! - EWF2 physical `.Ex01` images.
@@ -41,6 +42,18 @@
 //!     let mut later_sector = vec![0; 512];
 //!     image.read_at(&mut later_sector, 4096)?;
 //!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! Password-protected X-Ways EWF1 images use the same read APIs after a
+//! password-aware open:
+//!
+//! ```no_run
+//! fn main() -> ewf_image::Result<()> {
+//!     let password = ewf_image::EwfPassword::utf8("operator-supplied-password");
+//!     let image = ewf_image::Image::open_with_password("case.E01", &password)?;
+//!     println!("{:?}", image.encryption_info());
 //!     Ok(())
 //! }
 //! ```
@@ -102,10 +115,10 @@
 //!
 //! # Limitations
 //!
-//! Encrypted EWF2 images are detected and rejected, but decryption and
-//! encrypted writing are not implemented. Secondary/shadow target mirroring is
-//! supported by the file-backed writer. Base-plus-overlay delta/shadow images
-//! are not implemented.
+//! X-Ways encrypted EWF1 reading is supported. Encrypted EWF2 images are
+//! detected and rejected, and encrypted writing is not implemented.
+//! Secondary/shadow target mirroring is supported by the file-backed writer.
+//! Base-plus-overlay delta/shadow images are not implemented.
 
 mod codepage;
 mod date_time;
