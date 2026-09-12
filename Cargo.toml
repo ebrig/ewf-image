@@ -29,6 +29,9 @@ include = [
     "/tests/reader_performance.rs",
     "/tests/signature.rs",
     "/tests/writer.rs",
+    "/tests/verification.rs",
+    "/tests/sources.rs",
+    "/tests/recovery.rs",
     "/docs/architecture.md",
     "/docs/assets/ewf-image-banner.png",
     "/docs/compatibility.md",
@@ -36,6 +39,7 @@ include = [
     "/docs/migrating-to-0.2.md",
     "/docs/migrating-to-0.3.md",
     "/docs/testing.md",
+    "/docs/reader-analysis.md",
 ]
 
 [lib]
@@ -44,6 +48,8 @@ name = "ewf_image"
 [features]
 default = ["verify"]
 verify = []
+parallel = ["verify", "dep:rayon"]
+serde = ["dep:serde"]
 external-fixtures = []
 
 [dependencies]
@@ -55,12 +61,17 @@ flate2 = "1"
 lru = "0.18"
 md-5 = "0.11"
 ruzstd = "0.9"
+rayon = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
 sha1 = "0.11"
 sha2 = "0.11"
 subtle = "2.6"
 tempfile = "3"
 thiserror = "2"
 zeroize = { version = "1.9", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
 
 [package.metadata.docs.rs]
 all-features = true

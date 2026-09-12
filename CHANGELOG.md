@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+- Added SHA256 media hashing, external reference comparisons, cancellable
+  progress, and optional bounded parallel verification through `VerifyOptions`.
+- Verification now bypasses decoded-chunk caches and zero-fill policies, so
+  recovery substitutes cannot be accepted as verified media.
+- Added typed integrity reports with scan coverage, bounded findings, matching
+  EWF1 redundant-table comparison, and optional Serde serialization.
+- Added positioned segment sources, bounded subranges, and section summaries
+  for EWF1/EWF2 images, preserving table-cache and path-reader handle limits.
+- Added a separate physical raw/zlib EWF1 recovery API with redundant-table
+  fallback, explicit suspect-data policy, bounded provenance, cancellation,
+  output-size controls, and exclusive creation of raw output files.
+
 ## 0.3.0 - 2026-08-28
 
 ### Breaking Changes

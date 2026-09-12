@@ -6,6 +6,7 @@ images:
 ```bash
 cargo fmt --check
 cargo test --no-default-features
+cargo test
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
@@ -107,3 +108,27 @@ Remove-Item Env:EWF_IMAGE_XWAYS_TEST_PASSWORD
 ```
 
 The test asserts the decoded SHA-256 and does not print the password.
+
+## Reader analysis regression tests
+
+`verification`, `sources`, and `recovery` cover external-reference semantics,
+cancellation, suppressed findings, incomplete media, cache isolation, known
+encrypted vectors, split images, positioned-source bounds/concurrency,
+redundant-table fallback, suspect-data policy, and output alias protection.
+The default-only test run covers verification without the optional worker pool.
+
+An additional ignored oracle test creates raw/zlib images with libewf, exports
+their media independently, removes the terminal descriptor, and checks recovery
+against the original exported bytes:
+
+```bash
+cargo test --all-features --test recovery external_acquisition_and_truncated_recovery_match_ewfexport -- --ignored
+```
+
+The manual throughput test reports median serial/four-worker verification on
+32 MiB synthetic zlib and BZip2 images. It asserts digest equality but sets no
+machine-dependent speed threshold:
+
+```bash
+cargo test --release --features parallel --test verification benchmark_verification_workers -- --ignored --nocapture
+```

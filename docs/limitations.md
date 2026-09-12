@@ -67,5 +67,13 @@ unsupported-feature error instead of silently producing a different format.
 
 ## Additional Interfaces
 
+The library includes positioned segment backings, section summaries, and
+structured media analysis. Structural opening failures produce one finding;
+analysis does not resynchronize a broken descriptor chain or enumerate all
+otherwise-inaccessible defects. Recovery currently supports physical,
+unencrypted raw/zlib EWF1 with separate sectors sections and intact geometry.
+It does not recover logical/SMART, EWF2, encrypted, Zstandard, or table-resident
+images. See [reader analysis](reader-analysis.md) for coverage and output rules.
+
 CLI, filesystem mount, service runtime, and native FFI-wrapper layers are not
 yet implemented. The current public surface is the Rust library API.

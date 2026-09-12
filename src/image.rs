@@ -10,6 +10,7 @@ use std::sync::{
 use std::time::Instant;
 
 use lru::LruCache;
+pub(crate) mod recovery;
 use md5::Digest as _;
 
 use crate::codepage::decode_header_bytes;
@@ -39,7 +40,9 @@ use crate::types::{
     SingleFilePermission, SingleFileSource, SingleFileSubject, SingleFilesAuxTables,
     SingleFilesInfo, StoredHashes,
 };
-use crate::{EncryptionInfo, EwfError, EwfPassword, Result};
+use crate::{
+    EncryptionInfo, EwfError, EwfPassword, Result, SectionInfo, SectionKind, SegmentSource,
+};
 
 const MAX_DECOMPRESSED_METADATA: u64 = 16 * 1024 * 1024;
 const MAX_CHUNK_SIZE: u64 = 128 * 1024 * 1024;
@@ -79,9 +82,12 @@ pub struct Image {
 #[derive(Debug)]
 struct ImageInner {
     info: ImageInfo,
+    sections: Vec<SectionInfo>,
+    open_strictness: OpenStrictness,
     encryption_info: Option<EncryptionInfo>,
     encryption_contexts: Vec<Option<EncryptionContext>>,
     segments: Mutex<SegmentFilePool>,
+    positioned_sources: Option<Vec<SegmentSource>>,
     index: LazyChunkIndex,
     chunk_cache: Mutex<LruCache<u64, Arc<Vec<u8>>>>,
     chunk_cache_capacity_bytes: u64,
@@ -359,7 +365,7 @@ impl Image {
         ));
         let segments =
             SegmentFilePool::new_path(paths.len(), options.maximum_open_handles(), statistics)?;
-        Self::open_segment_sources(paths, segments, options, password)
+        Self::open_segment_sources(paths, segments, options, password, None)
     }
 
     fn open_segment_readers(
@@ -382,7 +388,57 @@ impl Image {
         ));
         let segments =
             SegmentFilePool::new_readers(readers, options.maximum_open_handles(), statistics)?;
-        Self::open_segment_sources(paths, segments, options, password)
+        Self::open_segment_sources(paths, segments, options, password, None)
+    }
+
+    /// Opens explicitly ordered, named positioned sources with default options.
+    /// Supports EWF1 and EWF2. Names are labels, never reopened as filesystem paths.
+    pub fn open_sources<N: Into<PathBuf>>(
+        sources: impl IntoIterator<Item = (N, SegmentSource)>,
+    ) -> Result<Self> {
+        Self::open_sources_with_options(sources, OpenOptions::default())
+    }
+
+    /// Opens positioned sources with reader controls. All supplied backings stay
+    /// owned for the image lifetime; an open-handle limit below their count is rejected.
+    pub fn open_sources_with_options<N: Into<PathBuf>>(
+        sources: impl IntoIterator<Item = (N, SegmentSource)>,
+        options: OpenOptions,
+    ) -> Result<Self> {
+        Self::open_positioned_sources(sources, options, None)
+    }
+
+    /// Opens encrypted positioned sources using one caller-supplied password.
+    pub fn open_sources_with_options_and_password<N: Into<PathBuf>>(
+        sources: impl IntoIterator<Item = (N, SegmentSource)>,
+        options: OpenOptions,
+        password: &EwfPassword,
+    ) -> Result<Self> {
+        Self::open_positioned_sources(sources, options, Some(password))
+    }
+
+    fn open_positioned_sources<N: Into<PathBuf>>(
+        sources: impl IntoIterator<Item = (N, SegmentSource)>,
+        options: OpenOptions,
+        password: Option<&EwfPassword>,
+    ) -> Result<Self> {
+        let (paths, sources): (Vec<_>, Vec<_>) = sources
+            .into_iter()
+            .map(|(name, source)| (name.into(), source))
+            .unzip();
+        if paths.is_empty() {
+            return Err(EwfError::NoSegments("empty segment list".into()));
+        }
+        let statistics = Arc::new(ReaderStatisticsCollector::new(
+            options.reader_statistics_enabled(),
+        ));
+        let readers = sources
+            .iter()
+            .map(|source| Box::new(source.cursor()) as SegmentReaderHandle)
+            .collect();
+        let segments =
+            SegmentFilePool::new_readers(readers, options.maximum_open_handles(), statistics)?;
+        Self::open_segment_sources(paths, segments, options, password, Some(sources))
     }
 
     fn open_segment_sources(
@@ -390,9 +446,11 @@ impl Image {
         mut segments: SegmentFilePool,
         options: OpenOptions,
         password: Option<&EwfPassword>,
+        positioned_sources: Option<Vec<SegmentSource>>,
     ) -> Result<Self> {
         let statistics = Arc::clone(&segments.statistics);
         let mut ranges = Vec::new();
+        let mut section_summaries = Vec::new();
         let mut metadata = EwfMetadata::default();
         let mut acquisition_errors = Vec::new();
         let mut memory_extents = Vec::new();
@@ -459,6 +517,7 @@ impl Image {
                 ));
             }
             encryption_contexts.push(encryption_context);
+            section_summaries.extend(parsed.sections);
             let expected_segment_number = u64::try_from(segment_index + 1)
                 .map_err(|_| EwfError::Malformed("segment index overflow".into()))?;
             if parsed.segment_number != expected_segment_number {
@@ -637,9 +696,12 @@ impl Image {
         let image = Self {
             inner: Arc::new(ImageInner {
                 info,
+                sections: section_summaries,
+                open_strictness: options.strictness(),
                 encryption_info,
                 encryption_contexts,
                 segments: Mutex::new(segments),
+                positioned_sources,
                 index,
                 chunk_cache: Mutex::new(LruCache::new(cache_size)),
                 chunk_cache_capacity_bytes,
@@ -665,6 +727,17 @@ impl Image {
     /// Returns parsed image metadata and geometry.
     pub fn info(&self) -> &ImageInfo {
         &self.inner.info
+    }
+
+    /// Returns descriptor summaries in segment order and parser traversal order.
+    /// Summary offsets are segment-relative, not logical media offsets.
+    pub fn sections(&self) -> &[SectionInfo] {
+        &self.inner.sections
+    }
+
+    /// Returns the structural policy used when opening this image.
+    pub fn open_strictness(&self) -> OpenStrictness {
+        self.inner.open_strictness
     }
 
     /// Returns non-secret encryption status for the opened image.
@@ -1653,20 +1726,7 @@ impl Image {
             .is_disabled();
         if cache_disabled {
             self.inner.statistics.record_table_page_cache_access(false);
-            let path = self
-                .inner
-                .info
-                .segment_paths
-                .get(segment_index)
-                .ok_or_else(|| EwfError::Malformed("table references missing segment".into()))?
-                .clone();
-            let mut segments = self
-                .inner
-                .segments
-                .lock()
-                .map_err(|_| EwfError::Malformed("segment file pool lock poisoned".into()))?;
-            let file = segments.file_mut(segment_index, &path)?;
-            return read_exact_at(file.as_mut(), offset, size);
+            return self.read_segment_range(segment_index, offset, size, false);
         }
         let mut output = Vec::with_capacity(requested);
         let mut current = offset;
@@ -1688,27 +1748,8 @@ impl Image {
             let page = if let Some(page) = cached {
                 page
             } else {
-                let path = self
-                    .inner
-                    .info
-                    .segment_paths
-                    .get(segment_index)
-                    .ok_or_else(|| EwfError::Malformed("table references missing segment".into()))?
-                    .clone();
-                let bytes = {
-                    let mut segments = self.inner.segments.lock().map_err(|_| {
-                        EwfError::Malformed("segment file pool lock poisoned".into())
-                    })?;
-                    let segment_len = segments.segment_len(segment_index, &path)?;
-                    let page_size = TABLE_PAGE_SIZE.min(segment_len.saturating_sub(page_offset));
-                    if page_size == 0 {
-                        return Err(EwfError::Malformed(
-                            "table page starts beyond segment end".into(),
-                        ));
-                    }
-                    let file = segments.file_mut(segment_index, &path)?;
-                    read_exact_at(file.as_mut(), page_offset, page_size)?
-                };
+                let bytes =
+                    self.read_segment_range(segment_index, page_offset, TABLE_PAGE_SIZE, true)?;
                 self.inner
                     .table_page_cache
                     .lock()
@@ -1730,11 +1771,68 @@ impl Image {
         Ok(output)
     }
 
-    fn ensure_not_aborted(&self) -> Result<()> {
+    pub(crate) fn ensure_not_aborted(&self) -> Result<()> {
         if self.inner.abort_signaled.load(Ordering::Relaxed) {
             return Err(EwfError::Aborted);
         }
         Ok(())
+    }
+
+    pub(crate) fn read_segment_range(
+        &self,
+        segment_index: usize,
+        offset: u64,
+        size: u64,
+        clamp: bool,
+    ) -> Result<Vec<u8>> {
+        let bounded_size = |length: u64| -> Result<u64> {
+            if clamp {
+                let size = size.min(length.saturating_sub(offset));
+                if size == 0 {
+                    return Err(EwfError::Malformed(
+                        "table page starts beyond segment end".into(),
+                    ));
+                }
+                return Ok(size);
+            }
+            if offset.checked_add(size).is_none_or(|end| end > length) {
+                return Err(EwfError::Malformed(
+                    "requested byte range exceeds segment size".into(),
+                ));
+            }
+            Ok(size)
+        };
+        if let Some(sources) = &self.inner.positioned_sources {
+            let source = sources
+                .get(segment_index)
+                .ok_or_else(|| EwfError::Malformed("missing segment source".into()))?;
+            let size = bounded_size(source.len())?;
+            let mut bytes = vec![
+                0;
+                usize::try_from(size).map_err(|_| EwfError::Malformed(
+                    "segment read size exceeds usize".into()
+                ))?
+            ];
+            source.read_exact_at(&mut bytes, offset)?;
+            return Ok(bytes);
+        }
+        let path = self
+            .inner
+            .info
+            .segment_paths
+            .get(segment_index)
+            .ok_or_else(|| EwfError::Malformed("missing segment source".into()))?;
+        let mut segments = self
+            .inner
+            .segments
+            .lock()
+            .map_err(|_| EwfError::Malformed("segment file pool lock poisoned".into()))?;
+        let size = bounded_size(segments.segment_len(segment_index, path)?)?;
+        read_exact_at(
+            segments.file_mut(segment_index, path)?.as_mut(),
+            offset,
+            size,
+        )
     }
 
     fn has_supplied_segment_readers(&self) -> Result<bool> {
@@ -1752,36 +1850,8 @@ impl Image {
             return Ok(Vec::new());
         }
 
-        let encoded_size = usize::try_from(chunk.encoded_size)
-            .map_err(|_| EwfError::Malformed("encoded chunk size does not fit usize".into()))?;
-        let path = self
-            .inner
-            .info
-            .segment_paths
-            .get(chunk.segment_index)
-            .ok_or_else(|| EwfError::Malformed("chunk references missing segment".into()))?
-            .clone();
-        let mut segments = self
-            .inner
-            .segments
-            .lock()
-            .map_err(|_| EwfError::Malformed("segment file pool lock poisoned".into()))?;
-        let segment_size = segments.segment_len(chunk.segment_index, &path)?;
-        let file = segments.file_mut(chunk.segment_index, &path)?;
-        let end = chunk
-            .offset
-            .checked_add(chunk.encoded_size)
-            .ok_or_else(|| EwfError::Malformed("chunk byte range overflow".into()))?;
-        if end > segment_size {
-            return Err(EwfError::Malformed(format!(
-                "chunk byte range {}..{} exceeds segment size {}",
-                chunk.offset, end, segment_size
-            )));
-        }
-
-        let mut encoded = vec![0; encoded_size];
-        file.seek(SeekFrom::Start(chunk.offset))?;
-        file.read_exact(&mut encoded)?;
+        let mut encoded =
+            self.read_segment_range(chunk.segment_index, chunk.offset, chunk.encoded_size, false)?;
         self.inner
             .statistics
             .record_encoded_bytes_read(chunk.encoded_size);
@@ -1818,6 +1888,20 @@ impl Image {
         }
         self.inner.statistics.record_decoded_bytes(decoded.len());
         Ok(decoded)
+    }
+
+    #[cfg(feature = "verify")]
+    pub(crate) fn verification_chunk(&self, chunk_id: u64) -> Result<Vec<u8>> {
+        self.ensure_not_aborted()?;
+        let chunk = self.lookup_chunk(chunk_id)?;
+        // Verification never consumes cached or zero-filled recovery bytes.
+        self.decode_chunk(chunk_id, chunk).map_err(|error| {
+            if matches!(error, EwfError::Malformed(_)) && self.encryption_info().is_some() {
+                EwfError::DecryptionValidationFailed
+            } else {
+                error
+            }
+        })
     }
 
     fn decode_chunk_with_policy(&self, chunk_id: u64, chunk: Chunk) -> Result<(Vec<u8>, bool)> {
@@ -2307,6 +2391,7 @@ fn single_file_size(entry: &SingleFileEntry) -> Result<u64> {
 
 struct ParsedSegment {
     format: Format,
+    sections: Vec<SectionInfo>,
     format_profile: FormatProfile,
     format_profile_hint_only: bool,
     segment_number: u64,
@@ -2603,6 +2688,18 @@ fn parse_ewf1_segment(
     })?;
     Ok(ParsedSegment {
         format: Format::Ewf1,
+        sections: sections
+            .iter()
+            .map(|section| SectionInfo {
+                segment_index,
+                kind: SectionKind::Ewf1(section.desc.section_type.clone()),
+                descriptor_offset: section.desc.offset,
+                data_offset: section.data_offset,
+                data_size: section.data_size,
+                linked_descriptor_offset: section.desc.next,
+                data_flags: 0,
+            })
+            .collect(),
         format_profile,
         format_profile_hint_only,
         segment_number: u64::from(file_header.segment_number),
@@ -2974,6 +3071,23 @@ fn parse_ewf2_segment(
 
     Ok(ParsedSegment {
         format: Format::Ewf2,
+        sections: sections
+            .iter()
+            .map(|section| {
+                let raw_kind = read_exact_at(file, section.desc.offset, 4)?;
+                Ok(SectionInfo {
+                    segment_index,
+                    kind: SectionKind::Ewf2(u32::from_le_bytes(
+                        raw_kind[..4].try_into().expect("four bytes read"),
+                    )),
+                    descriptor_offset: section.desc.offset,
+                    data_offset: section.data_offset,
+                    data_size: section.data_size,
+                    linked_descriptor_offset: section.desc.previous_offset,
+                    data_flags: section.desc.data_flags,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
         format_profile: if header.logical {
             FormatProfile::Ewf2LogicalEnCase7
         } else {

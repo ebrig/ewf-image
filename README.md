@@ -25,7 +25,12 @@ creation.
 - **Rich metadata.** Inspect acquisition headers, stored MD5/SHA1 hashes,
   acquisition errors, sessions, and tracks.
 - **Integrity verification.** Recompute and compare stored hashes with a single
-  `Image::verify()` call.
+  `Image::verify()` call, or compute SHA256 and compare external references with
+  progress, cancellation, and optional parallel decompression.
+- **Analysis and recovery.** Typed integrity findings, bounded reports, section
+  inspection, and a separate physical raw/zlib EWF1 recovery API with provenance.
+- **Positioned backings.** Open EWF1/EWF2 segments from files, memory, bounded
+  subranges, or caller-provided thread-safe positioned sources.
 - **Flexible writing.** Compression, segment splitting, secondary/shadow
   mirroring, authored metadata, and resume-by-rewrite.
 - **Safe by construction.** `#![forbid(unsafe_code)]`, linted under clippy
@@ -147,6 +152,23 @@ Statistics collection is disabled by default. `reader_statistics()` returns
 [Migrating to 0.2](docs/migrating-to-0.2.md) for the `OpenOptions` builder
 migration.
 
+### Verification and analysis
+
+`Image::verify_with_options` computes MD5, SHA1, and SHA256 and accepts external
+reference digests through `VerifyOptions`. `verify_with_progress` supports
+per-operation cancellation. Verification always validates backing chunks,
+including when ordinary reads permit zero-filling damaged data.
+
+`Image::analyze` collects typed findings and reports incomplete media coverage
+without producing partial-stream hashes. `EwfRecovery` separately exports
+recoverable physical raw/zlib EWF1 data to a new raw file, recording primary,
+redundant-table, suspect, and zero-filled outcomes.
+
+The optional `parallel` feature enables bounded parallel scans; `serde` enables
+report serialization. Defaults remain single-threaded. See
+[Verification, analysis, and recovery](docs/reader-analysis.md) for APIs,
+cancellation, source backings, memory budgets, and recovery limits.
+
 Write a new compressed EWF2 image from raw bytes:
 
 ```rust
@@ -222,6 +244,7 @@ require local fixtures and installed EWF tools. See
 - [Compatibility](docs/compatibility.md)
 - [Limitations](docs/limitations.md)
 - [Testing](docs/testing.md)
+- [Verification, analysis, and recovery](docs/reader-analysis.md)
 - [Migrating to 0.3](docs/migrating-to-0.3.md)
 - [Migrating to 0.2](docs/migrating-to-0.2.md)
 - [API reference (docs.rs)](https://docs.rs/ewf-image)

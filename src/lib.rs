@@ -112,6 +112,19 @@
 //!   without this feature.
 //! - `external-fixtures` enables ignored integration tests that require local
 //!   EWF corpora and external EWF tools. It does not change library behavior.
+//! - `parallel` enables multiple decompression workers for verification and
+//!   analysis. It implies `verify`; scans remain single-threaded by default.
+//! - `serde` enables serialization of analysis, verification, recovery, and
+//!   section-summary results.
+//!
+//! # Analysis and recovery
+//!
+//! [`Image::sections`] exposes descriptor locations. [`Image::open_sources`]
+//! accepts [`SegmentSource`] backings with independent positioned reads.
+//! With `verify`, `verify_with_options` computes SHA256 and compares external
+//! references; `analyze` returns typed findings and explicit media coverage.
+//! [`EwfRecovery`] separately recovers physical raw/zlib EWF1 data with
+//! provenance and exclusive creation of output files.
 //!
 //! # Limitations
 //!
@@ -128,12 +141,16 @@ mod error;
 mod format;
 mod image;
 mod index;
+#[cfg(feature = "verify")]
+mod integrity;
 mod metadata;
 mod reader_cache;
 mod reader_statistics;
+mod sections;
 mod segment;
 mod signature;
 mod single_files;
+mod source;
 mod types;
 #[cfg(feature = "verify")]
 mod verify;
@@ -141,13 +158,19 @@ mod writer;
 
 pub use encryption::{EncryptionInfo, EncryptionMethod, EwfPassword};
 pub use error::{EwfError, Result};
+pub use image::recovery::{
+    EwfRecovery, RecoveryNotice, RecoveryOptions, RecoveryProgress, RecoveryRange, RecoveryReport,
+    RecoveryStatus,
+};
 pub use image::{Image, ImageCursor, SegmentReader, SingleFileCursor};
 pub use reader_statistics::{ReaderCacheInfo, ReaderStatistics};
+pub use sections::{SectionInfo, SectionKind};
 pub use signature::{
     check_file_corruption, check_file_encryption, check_file_signature,
     check_segment_files_corruption, check_segment_files_encryption,
 };
 pub use single_files::SINGLE_FILE_PATH_SEPARATOR;
+pub use source::{SegmentReadAt, SegmentSource};
 pub use types::{
     AcquisitionError, ChunkCacheCapacity, CompressionFlags, CompressionLevel, CompressionMethod,
     CompressionValues, DataChunk, DataChunkEncoding, EncodedDataChunk, EwfMetadata, Format,
@@ -163,4 +186,14 @@ pub use writer::{
 };
 
 #[cfg(feature = "verify")]
+pub use integrity::{
+    IntegrityFinding, IntegrityFindingKind, IntegrityReport, IntegritySeverity, MediaScanStatus,
+    analyze_path, analyze_path_with_password,
+};
+#[cfg(feature = "verify")]
 pub use types::VerifyResult;
+#[cfg(feature = "verify")]
+pub use verify::{
+    ComputedHashes, HashAlgorithm, HashComparison, HashReference, VerificationReport,
+    VerifyOptions, VerifyProgress,
+};

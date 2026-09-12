@@ -41,6 +41,19 @@ handle, checksum, and decompression counters. `ReaderCacheInfo` reports cache
 capacity plus current and peak retained table-page payload bytes. Statistics
 collection is disabled by default; cache limits remain enforced regardless.
 
+`SegmentSource` adds independent positioned reads over immutable file, memory,
+and bounded-subrange backings. Supplied sources use cursor adapters only while
+opening; subsequent chunk and table reads access the positioned backend
+directly. They retain the same table-page cache. `Image::sections` retains
+descriptor summaries without retaining section payloads.
+
+Verification uses strict uncached chunk decoding, bounded optional worker
+batches, and ordered MD5/SHA1/SHA256 hashing. Analysis builds typed findings on
+that scan and checks matching redundant table entries in bounded blocks.
+Incomplete scans have no complete-media hashes. A separate EWF1 recovery path
+accepts a reliable descriptor prefix, validates geometry, and records primary,
+redundant, suspect, and zero-filled output provenance.
+
 ## Writer Flow
 
 The writer accepts sequential writes, positioned writes, and chunk-oriented
@@ -56,6 +69,8 @@ also mirror the completed primary segment set to a secondary/shadow target.
 ## Internal Boundaries
 
 - `segment`: segment discovery, ordering, and handle pooling.
+- `source`: positioned segment backings and bounded views.
+- `sections`: public descriptor summaries.
 - `format`: low-level EWF1/EWF2 descriptors, tables, signatures, and primitive
   parsing.
 - `metadata`: EWF header/case/device/hash/range metadata parsing.
@@ -67,7 +82,9 @@ also mirror the completed primary segment set to a secondary/shadow target.
 - `writer`: EWF output generation, segment splitting, secondary target
   mirroring, metadata emission, and resume support.
 - `single_files`: logical single-file catalog parsing and lookup.
-- `verify`: optional streamed MD5/SHA1 verification through `Image::verify`;
+- `integrity`: bounded findings, media coverage, and redundant-table analysis.
+- `image::recovery`: restricted EWF1 recovery with explicit output provenance.
+- `verify`: optional streamed MD5/SHA1/SHA256 verification and ordered scan workers;
   stored hash parsing, EWF2 section integrity checks, and writer hash support
   are part of the normal reader/writer implementation.
 

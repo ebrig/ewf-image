@@ -31,6 +31,9 @@ jobs:
       - name: Test
         run: cargo test --all-features
 
+      - name: Default-feature verification
+        run: cargo test
+
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 

@@ -8288,3 +8288,27 @@ fn verify_computes_hashes_and_compares_stored_digest() {
     assert!(result.computed_md5.is_some());
     assert!(result.computed_sha1.is_some());
 }
+
+#[cfg(feature = "parallel")]
+#[test]
+fn verification_supports_xways_zstd_zero_markers_and_ewf2_patterns() {
+    use sha2::Sha256;
+    let zstd = write_temp_with_suffix(
+        ".e01",
+        &xways_ewf1_segment_bytes(&xways_magicless_zstd_chunk(b"zstd verification"), b""),
+    );
+    let zero = write_temp_with_suffix(".e01", &xways_ewf1_segment_bytes(&[0], b""));
+    let pattern = synthetic_ex01_pattern_fill(0x0807_0605_0403_0201);
+    for file in [zstd, zero, pattern] {
+        let image = ewf_image::Image::open(file.path()).unwrap();
+        let mut expected = Vec::new();
+        image.cursor().read_to_end(&mut expected).unwrap();
+        let report = image
+            .verify_with_options(&ewf_image::VerifyOptions::default().with_parallelism(4))
+            .unwrap();
+        assert_eq!(
+            report.hashes.sha256.as_slice(),
+            Sha256::digest(&expected).as_slice()
+        );
+    }
+}
