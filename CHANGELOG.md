@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased
+## 0.4.0 - 2026-09-12
 
 - Added SHA256 media hashing, external reference comparisons, cancellable
   progress, and optional bounded parallel verification through `VerifyOptions`.
