@@ -860,6 +860,15 @@ fn ewf_tool_fixture_cases() -> Vec<EwfFixtureCase> {
             segment_size: None,
         },
         EwfFixtureCase {
+            name: "ewfx-sha256",
+            format: "ewfx",
+            compression: "none",
+            media_type: "fixed",
+            media_flags: "physical",
+            digest: Some("sha256"),
+            segment_size: None,
+        },
+        EwfFixtureCase {
             name: "ewfx-memory",
             format: "ewfx",
             compression: "none",
@@ -890,6 +899,15 @@ fn generated_ewf_tool_oracle_paths(
     for case in ewf_tool_fixture_cases() {
         eprintln!("checking tool-generated fixture case {case:?}");
         let first_segment = acquire_ewf_tool_fixture(&tools.ewfacquirestream, root, &case, data)?;
+        if case.digest == Some("sha256") {
+            let image = ewf_image::Image::open(&first_segment)?;
+            assert!(
+                image.hash_value("SHA256").is_some(),
+                "producer omitted SHA256"
+            );
+            #[cfg(feature = "verify")]
+            assert_eq!(image.verify()?.sha256_match, Some(true));
+        }
         compare_with_ewfexport(&tools.ewfexport, &first_segment)?;
         compare_with_ewfinfo(&tools.ewfinfo, &first_segment)?;
         verify_with_ewfverify(&tools.ewfverify, &first_segment)?;
@@ -1662,10 +1680,10 @@ fn corpus_paths() -> Result<Vec<PathBuf>, Box<dyn Error>> {
         env::var_os("EWF_CORPUS_DIR"),
     );
     if roots.is_empty() {
-        eprintln!(
-            "EWF_CORPUS_DIRS and EWF_CORPUS_DIR are not set and default corpus root is missing: {DEFAULT_CORPUS_DIR}"
+        return Err(
+            "external corpus test requested without an available EWF_CORPUS_DIR or EWF_CORPUS_DIRS"
+                .into(),
         );
-        return Ok(Vec::new());
     }
 
     let mut paths = Vec::new();
@@ -1675,6 +1693,9 @@ fn corpus_paths() -> Result<Vec<PathBuf>, Box<dyn Error>> {
     }
     paths.sort();
     paths.dedup();
+    if paths.is_empty() {
+        return Err("external corpus contains no EWF first segments".into());
+    }
     Ok(paths)
 }
 
