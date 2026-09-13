@@ -360,6 +360,8 @@ impl Image {
             return Err(EwfError::NoSegments("empty segment list".into()));
         }
 
+        crate::publication::ensure_no_pending(&paths[0])?;
+
         let statistics = Arc::new(ReaderStatisticsCollector::new(
             options.reader_statistics_enabled(),
         ));

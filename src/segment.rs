@@ -69,7 +69,7 @@ fn extension_key(path: &Path) -> String {
         .to_ascii_uppercase()
 }
 
-fn is_segment_extension(ext: &str, prefix: char, is_v2: bool) -> bool {
+pub(crate) fn is_segment_extension(ext: &str, prefix: char, is_v2: bool) -> bool {
     let chars: Vec<char> = ext.chars().collect();
     if is_v2 {
         chars.len() == 4 && v2_segment_extension_matches(&chars, prefix)

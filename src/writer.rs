@@ -98,6 +98,9 @@ pub struct WriteOptions {
     pub hashes: WriteHashes,
     /// Maximum output segment size in bytes.
     pub maximum_segment_size: Option<u64>,
+    /// Permit replacing existing segment files during file-backed finalization.
+    /// Defaults to false. Replacement uses a recoverable publication journal.
+    pub overwrite_existing: bool,
     /// First path of the mirrored secondary output segment set.
     pub secondary_segment_filename: Option<PathBuf>,
     /// Declared logical media size in bytes.
@@ -145,6 +148,7 @@ impl Default for WriteOptions {
             compression_values: WriteCompressionValues::default(),
             hashes: WriteHashes::default(),
             maximum_segment_size: None,
+            overwrite_existing: false,
             secondary_segment_filename: None,
             media_size: None,
             metadata: EwfMetadata::default(),
@@ -554,6 +558,7 @@ impl EwfWriter {
         let image = Image::open(&path)?;
         let mut writer = Self::create_from_image(&path, &image)?;
         writer.options.media_size = None;
+        writer.options.overwrite_existing = true;
         Ok(writer)
     }
 
@@ -1322,6 +1327,14 @@ impl EwfWriter {
         self.finish_with_terminal_section(TerminalSection::Next)
     }
 
+    /// Recovers an interrupted file-backed publication. Pass the actual first
+    /// segment filename and the original secondary first filename, if any.
+    /// Uncommitted output is rolled back; committed output is retained. Returns
+    /// false if no journal exists. Recovery refuses a currently active writer.
+    pub fn recover_output(path: impl AsRef<Path>, secondary: Option<&Path>) -> Result<bool> {
+        crate::publication::Publication::recover(path.as_ref(), secondary)
+    }
+
     fn finish_with_terminal_section(self, terminal: TerminalSection) -> Result<WriteResult> {
         let PreparedWrite {
             path,
@@ -1335,70 +1348,12 @@ impl EwfWriter {
             sector_count,
             computed_sha256,
         } = self.prepare_write()?;
-
-        if is_ewf2_format(options.format) {
-            let groups = segment_groups(
-                &chunks,
-                options.maximum_segment_size,
-                &options,
-                sector_count,
-                u64::from(chunk_count_u32),
-            )?;
-            let group_count = groups.len();
-            let mut segment_paths = Vec::with_capacity(group_count);
-            let mut first_chunk = 0_u64;
-            for (index, group) in groups.into_iter().enumerate() {
-                let group_chunks = &chunks[group];
-                let segment_number = u32::try_from(index + 1).map_err(|_| {
-                    EwfError::Unsupported("EWF2 writer segment count exceeds u32".into())
-                })?;
-                let terminal_section_type = if index + 1 == group_count {
-                    terminal.ewf2_type()
-                } else {
-                    EWF2_NEXT_SECTION
-                };
-                let segment_path = ewf2_segment_path(&path, index + 1)?;
-                let mut file = File::create(&segment_path)?;
-                write_ewf2_segment(
-                    &mut file,
-                    &mut spool,
-                    group_chunks,
-                    &options,
-                    Ewf2SegmentWriteContext {
-                        segment_number,
-                        first_chunk,
-                        total_chunk_count: chunk_count_u32,
-                        sector_count,
-                        terminal_section_type,
-                    },
-                )?;
-                file.flush()?;
-                first_chunk = first_chunk
-                    .checked_add(u64::try_from(group_chunks.len()).expect("usize fits u64"))
-                    .ok_or_else(|| {
-                        EwfError::Malformed("writer EWF2 first chunk overflow".into())
-                    })?;
-                segment_paths.push(segment_path);
-            }
-            remove_stale_segment_files(&path, group_count, true)?;
-            let secondary_segment_paths = mirror_secondary_segment_files(
-                &path,
-                options.secondary_segment_filename.as_deref(),
-                &segment_paths,
-                group_count,
-                true,
-            )?;
-
-            return Ok(WriteResult {
-                segment_paths,
-                secondary_segment_paths,
-                logical_size,
-                chunk_size,
-                chunk_count,
-                computed_sha256,
-            });
-        }
-
+        let is_v2 = is_ewf2_format(options.format);
+        let path_for_segment = if is_v2 {
+            ewf2_segment_path
+        } else {
+            segment_path
+        };
         let groups = segment_groups(
             &chunks,
             options.maximum_segment_size,
@@ -1407,49 +1362,92 @@ impl EwfWriter {
             u64::from(chunk_count_u32),
         )?;
         let group_count = groups.len();
-        let mut segment_paths = Vec::with_capacity(group_count);
+        let segment_paths = (1..=group_count)
+            .map(|index| path_for_segment(&path, index))
+            .collect::<Result<Vec<_>>>()?;
+        let secondary_segment_paths = if let Some(base) = &options.secondary_segment_filename {
+            let paths = (1..=group_count)
+                .map(|index| path_for_segment(base, index))
+                .collect::<Result<Vec<_>>>()?;
+            for secondary in &paths {
+                ensure_secondary_segment_path_is_distinct(&segment_paths, secondary)?;
+            }
+            paths
+        } else {
+            Vec::new()
+        };
+        let mut publication = crate::publication::Publication::begin(
+            &segment_paths[0],
+            secondary_segment_paths.first().map(PathBuf::as_path),
+            options.overwrite_existing,
+        )?;
+        let mut first_chunk = 0_u64;
         for (index, group) in groups.into_iter().enumerate() {
             let group_chunks = &chunks[group];
-            let segment_number = u16::try_from(index + 1).map_err(|_| {
-                EwfError::Unsupported("EWF1 writer segment count exceeds u16".into())
-            })?;
             let is_last = index + 1 == group_count;
-            let segment_terminal = if is_last {
-                terminal
+            let staged = publication.stage(0, &segment_paths[index])?;
+            let mut file = File::create(&staged)?;
+            if is_v2 {
+                write_ewf2_segment(
+                    &mut file,
+                    &mut spool,
+                    group_chunks,
+                    &options,
+                    Ewf2SegmentWriteContext {
+                        segment_number: u32::try_from(index + 1).map_err(|_| {
+                            EwfError::Unsupported("EWF2 writer segment count exceeds u32".into())
+                        })?,
+                        first_chunk,
+                        total_chunk_count: chunk_count_u32,
+                        sector_count,
+                        terminal_section_type: if is_last {
+                            terminal.ewf2_type()
+                        } else {
+                            EWF2_NEXT_SECTION
+                        },
+                    },
+                )?;
             } else {
-                TerminalSection::Done
-            };
-            let sections = Ewf1SegmentSections::for_segment(
-                index == 0,
-                is_last && terminal == TerminalSection::Done,
-            );
-            let segment_path = segment_path(&path, index + 1)?;
-            let mut file = File::create(&segment_path)?;
-            write_ewf1_segment(
-                &mut file,
-                &mut spool,
-                group_chunks,
-                &options,
-                Ewf1SegmentWriteContext {
-                    segment_number,
-                    chunk_count: chunk_count_u32,
-                    sector_count,
-                    sections,
-                    terminal_section: segment_terminal,
-                },
-            )?;
-            file.flush()?;
-            segment_paths.push(segment_path);
+                write_ewf1_segment(
+                    &mut file,
+                    &mut spool,
+                    group_chunks,
+                    &options,
+                    Ewf1SegmentWriteContext {
+                        segment_number: u16::try_from(index + 1).map_err(|_| {
+                            EwfError::Unsupported("EWF1 writer segment count exceeds u16".into())
+                        })?,
+                        chunk_count: chunk_count_u32,
+                        sector_count,
+                        sections: Ewf1SegmentSections::for_segment(
+                            index == 0,
+                            is_last && terminal == TerminalSection::Done,
+                        ),
+                        terminal_section: if is_last {
+                            terminal
+                        } else {
+                            TerminalSection::Done
+                        },
+                    },
+                )?;
+            }
+            file.sync_all()?;
+            drop(file);
+            if let Some(secondary) = secondary_segment_paths.get(index) {
+                let mirror = publication.stage(1, secondary)?;
+                fs::copy(&staged, &mirror)?;
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(mirror)?
+                    .sync_all()?;
+            }
+            first_chunk += group_chunks.len() as u64;
         }
-        remove_stale_segment_files(&path, group_count, false)?;
-        let secondary_segment_paths = mirror_secondary_segment_files(
-            &path,
-            options.secondary_segment_filename.as_deref(),
-            &segment_paths,
-            group_count,
-            false,
-        )?;
-
+        let mut destinations = vec![publication_segment_paths(&segment_paths, is_v2)?];
+        if !secondary_segment_paths.is_empty() {
+            destinations.push(publication_segment_paths(&secondary_segment_paths, is_v2)?);
+        }
+        publication.publish(&destinations, group_count)?;
         Ok(WriteResult {
             segment_paths,
             secondary_segment_paths,
@@ -4844,71 +4842,43 @@ fn ewf2_segment_path(first_path: &Path, segment_number: usize) -> Result<PathBuf
     Ok(first_path.with_extension(v2_segment_extension(first_path, segment_number)?))
 }
 
-fn remove_stale_segment_files(
-    first_path: &Path,
-    written_segment_count: usize,
-    is_v2: bool,
-) -> Result<()> {
-    let path_for_segment = if is_v2 {
-        ewf2_segment_path
-    } else {
-        segment_path
-    };
-    let mut segment_number = written_segment_count
-        .checked_add(1)
-        .ok_or_else(|| EwfError::Malformed("writer stale segment cleanup overflow".into()))?;
-
-    loop {
-        let path = match path_for_segment(first_path, segment_number) {
-            Ok(path) => path,
-            Err(EwfError::Unsupported(_)) => return Ok(()),
-            Err(err) => return Err(err),
-        };
-        match fs::remove_file(&path) {
-            Ok(()) => {
-                segment_number = segment_number.checked_add(1).ok_or_else(|| {
-                    EwfError::Malformed("writer stale segment cleanup overflow".into())
-                })?;
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(err.into()),
-        }
-    }
-}
-
-fn mirror_secondary_segment_files(
-    primary_base: &Path,
-    secondary_base: Option<&Path>,
-    primary_segment_paths: &[PathBuf],
-    written_segment_count: usize,
-    is_v2: bool,
-) -> Result<Vec<PathBuf>> {
-    let Some(secondary_base) = secondary_base else {
-        return Ok(Vec::new());
-    };
-    validate_secondary_segment_filename(primary_base, Some(secondary_base))?;
-
-    let path_for_segment = if is_v2 {
-        ewf2_segment_path
-    } else {
-        segment_path
-    };
-    let mut secondary_segment_paths = Vec::with_capacity(primary_segment_paths.len());
-    for segment_number in 1..=primary_segment_paths.len() {
-        let secondary_path = path_for_segment(secondary_base, segment_number)?;
-        ensure_secondary_segment_path_is_distinct(primary_segment_paths, &secondary_path)?;
-        secondary_segment_paths.push(secondary_path);
-    }
-
-    for (primary_path, secondary_path) in primary_segment_paths
+fn publication_segment_paths(written: &[PathBuf], is_v2: bool) -> Result<Vec<PathBuf>> {
+    let first = &written[0];
+    let prefix = first
+        .extension()
+        .and_then(|value| value.to_str())
+        .and_then(|value| value.chars().next())
+        .unwrap_or('E');
+    let mut paths = written.to_vec();
+    let existing = written
         .iter()
-        .zip(secondary_segment_paths.iter())
-    {
-        fs::copy(primary_path, secondary_path)?;
+        .filter_map(|path| path.canonicalize().ok())
+        .collect::<Vec<_>>();
+    let mut stale = Vec::new();
+    for entry in fs::read_dir(crate::segment::segment_dir(first))? {
+        let path = entry?.path();
+        if path.file_stem() != first.file_stem() {
+            continue;
+        }
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        if !crate::segment::is_segment_extension(extension, prefix, is_v2) {
+            continue;
+        }
+        if written.contains(&path)
+            || path
+                .canonicalize()
+                .is_ok_and(|path| existing.contains(&path))
+        {
+            continue;
+        }
+        stale.push(path);
     }
-    remove_stale_segment_files(secondary_base, written_segment_count, is_v2)?;
-
-    Ok(secondary_segment_paths)
+    stale.sort();
+    paths.extend(stale);
+    Ok(paths)
 }
 
 fn validate_secondary_segment_filename(

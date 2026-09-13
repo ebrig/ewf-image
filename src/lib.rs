@@ -145,6 +145,7 @@ mod index;
 #[cfg(feature = "verify")]
 mod integrity;
 mod metadata;
+mod publication;
 mod reader_cache;
 mod reader_statistics;
 mod sections;

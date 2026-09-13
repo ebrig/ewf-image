@@ -3402,6 +3402,7 @@ fn writer_removes_stale_ewf2_segments_when_replacing_existing_output() {
         &first,
         WriteOptions {
             format: WriteFormat::Ewf2Physical,
+            overwrite_existing: true,
             ..WriteOptions::default()
         },
     )
@@ -4868,7 +4869,14 @@ fn writer_removes_stale_e01_segments_when_replacing_existing_output() {
     writer.finish().unwrap();
     assert!(second.exists());
 
-    let mut writer = EwfWriter::create(&first, WriteOptions::default()).unwrap();
+    let mut writer = EwfWriter::create(
+        &first,
+        WriteOptions {
+            overwrite_existing: true,
+            ..WriteOptions::default()
+        },
+    )
+    .unwrap();
     writer.write_all(small).unwrap();
     let result = writer.finish().unwrap();
 
@@ -5102,6 +5110,53 @@ fn writer_rejects_conflicting_reference_maps_before_creating_output() {
         .insert("mD5".into(), "bb".repeat(16));
     assert!(EwfWriter::create(&path, options).is_err());
     assert!(!path.exists());
+}
+
+#[test]
+fn writer_refuses_existing_outputs_by_default_and_preserves_both_destinations() {
+    let dir = tempdir().unwrap();
+    let primary = dir.path().join("primary.E01");
+    let secondary = dir.path().join("secondary.E01");
+    std::fs::write(&secondary, b"existing evidence").unwrap();
+    let mut writer = EwfWriter::create(
+        &primary,
+        WriteOptions {
+            secondary_segment_filename: Some(secondary.clone()),
+            ..WriteOptions::default()
+        },
+    )
+    .unwrap();
+    writer.write_all(b"replacement").unwrap();
+    assert!(writer.finish().is_err());
+    assert!(!primary.exists());
+    assert_eq!(std::fs::read(&secondary).unwrap(), b"existing evidence");
+    assert!(!EwfWriter::recover_output(&primary, Some(&secondary)).unwrap());
+}
+
+#[test]
+fn replacement_removes_stale_segments_beyond_a_numbering_gap() {
+    let dir = tempdir().unwrap();
+    let primary = dir.path().join("gap.E01");
+    let stale = primary.with_extension("E04");
+    std::fs::write(&stale, b"old segment").unwrap();
+    let mut writer = EwfWriter::create(
+        &primary,
+        WriteOptions {
+            overwrite_existing: true,
+            ..WriteOptions::default()
+        },
+    )
+    .unwrap();
+    writer.write_all(b"replacement").unwrap();
+    writer.finish().unwrap();
+    assert!(!stale.exists());
+    assert_eq!(
+        ewf_image::Image::open(primary)
+            .unwrap()
+            .info()
+            .segment_count,
+        1
+    );
 }
 
 #[test]
