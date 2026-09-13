@@ -12,6 +12,7 @@ use flate2::Compression as ZlibCompression;
 use flate2::write::ZlibEncoder;
 use md5::{Digest, Md5};
 use sha1::Sha1;
+use sha2::Sha256;
 use tempfile::NamedTempFile;
 
 use crate::codepage::encode_header_text;
@@ -295,7 +296,7 @@ impl WriteHashes {
     ///
     /// # Errors
     ///
-    /// Returns an error if an `MD5` or `SHA1` value is not valid hexadecimal of
+    /// Returns an error if an `MD5`, `SHA1`, or `SHA256` value is not valid hexadecimal of
     /// the required length.
     pub fn set_hash_value(
         &mut self,
@@ -304,6 +305,9 @@ impl WriteHashes {
     ) -> Result<Option<String>> {
         let identifier = identifier.into();
         let value = value.into();
+        if identifier.eq_ignore_ascii_case("SHA256") {
+            crate::hashes::validate_digest(&identifier, &value)?;
+        }
         if identifier.eq_ignore_ascii_case("MD5") {
             self.md5 = Some(parse_writer_hash_value("MD5", &value)?);
         } else if identifier.eq_ignore_ascii_case("SHA1") {
@@ -418,6 +422,10 @@ pub struct WriteResult {
     pub chunk_size: u64,
     /// Number of logical chunks written.
     pub chunk_count: u64,
+    /// SHA256 of the written logical media, including sector padding.
+    /// EWF1 complete output also embeds it unless a reference was supplied.
+    /// EWF2 has no SHA256 section here; retain this value externally.
+    pub computed_sha256: [u8; 32],
 }
 
 /// Incremental EWF writer.
@@ -447,6 +455,7 @@ struct PreparedWrite {
     chunk_count: u64,
     chunk_count_u32: u32,
     sector_count: u64,
+    computed_sha256: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1079,7 +1088,7 @@ impl EwfWriter {
     ///
     /// # Errors
     ///
-    /// Returns an error if an `MD5` or `SHA1` value is not valid hexadecimal of
+    /// Returns an error if an `MD5`, `SHA1`, or `SHA256` value is not valid hexadecimal of
     /// the required length.
     pub fn set_hash_value(
         &mut self,
@@ -1324,6 +1333,7 @@ impl EwfWriter {
             chunk_count,
             chunk_count_u32,
             sector_count,
+            computed_sha256,
         } = self.prepare_write()?;
 
         if is_ewf2_format(options.format) {
@@ -1385,6 +1395,7 @@ impl EwfWriter {
                 logical_size,
                 chunk_size,
                 chunk_count,
+                computed_sha256,
             });
         }
 
@@ -1445,6 +1456,7 @@ impl EwfWriter {
             logical_size,
             chunk_size,
             chunk_count,
+            computed_sha256,
         })
     }
 
@@ -1494,6 +1506,7 @@ impl EwfWriter {
             chunk_count,
             chunk_count_u32,
             sector_count,
+            computed_sha256,
         } = self.prepare_write()?;
         if options.secondary_segment_filename.is_some() {
             return Err(EwfError::Unsupported(
@@ -1589,6 +1602,7 @@ impl EwfWriter {
             logical_size,
             chunk_size,
             chunk_count,
+            computed_sha256,
         })
     }
 
@@ -1636,6 +1650,7 @@ impl EwfWriter {
             spool,
             computed_md5,
             computed_sha1,
+            computed_sha256,
         } = encode_raw_spool(
             &mut raw,
             encoded_chunks,
@@ -1645,7 +1660,12 @@ impl EwfWriter {
             &options,
         )?;
 
-        options.hashes = effective_write_hashes(&options.hashes, computed_md5, computed_sha1);
+        options.hashes = effective_write_hashes(
+            &options.hashes,
+            computed_md5,
+            computed_sha1,
+            computed_sha256,
+        )?;
         validate_session_ranges("sessions", &options.sessions, sector_count)?;
         validate_session_ranges("tracks", &options.tracks, sector_count)?;
         let chunk_count = u64::try_from(chunks.len())
@@ -1663,6 +1683,7 @@ impl EwfWriter {
             chunk_count,
             chunk_count_u32,
             sector_count,
+            computed_sha256,
         })
     }
 
@@ -1900,6 +1921,7 @@ impl std::io::Seek for EwfWriter {
 struct WriteHashState {
     md5: Md5,
     sha1: Sha1,
+    sha256: Sha256,
 }
 
 impl WriteHashState {
@@ -1907,20 +1929,27 @@ impl WriteHashState {
         Self {
             md5: Md5::new(),
             sha1: Sha1::new(),
+            sha256: Sha256::new(),
         }
     }
 
     fn update(&mut self, data: &[u8]) {
         self.md5.update(data);
         self.sha1.update(data);
+        self.sha256.update(data);
     }
 
-    fn finalize(self) -> ([u8; 16], [u8; 20]) {
-        (self.md5.finalize().into(), self.sha1.finalize().into())
+    fn finalize(self) -> ([u8; 16], [u8; 20], [u8; 32]) {
+        (
+            self.md5.finalize().into(),
+            self.sha1.finalize().into(),
+            self.sha256.finalize().into(),
+        )
     }
 }
 
 fn validate_options(options: &WriteOptions) -> Result<()> {
+    validated_write_hashes(&options.hashes)?;
     if options.sectors_per_chunk == 0 {
         return Err(EwfError::Malformed(
             "writer sectors_per_chunk is zero".into(),
@@ -4086,15 +4115,36 @@ fn checked_add(left: u64, right: u64, label: &str) -> Result<u64> {
         .ok_or_else(|| EwfError::Malformed(format!("writer {label} offset overflow")))
 }
 
+fn validated_write_hashes(requested: &WriteHashes) -> Result<WriteHashes> {
+    let mut hashes = StoredHashes {
+        md5: requested.md5,
+        sha1: requested.sha1,
+        ..StoredHashes::default()
+    };
+    for (identifier, value) in &requested.hash_values {
+        crate::hashes::insert_stored_hash(&mut hashes, identifier, value)?;
+    }
+    Ok(WriteHashes {
+        md5: hashes.md5,
+        sha1: hashes.sha1,
+        hash_values: hashes.hash_values,
+    })
+}
+
 fn effective_write_hashes(
     requested: &WriteHashes,
     computed_md5: [u8; 16],
     computed_sha1: [u8; 20],
-) -> WriteHashes {
-    let mut hashes = requested.clone();
+    computed_sha256: [u8; 32],
+) -> Result<WriteHashes> {
+    let mut hashes = validated_write_hashes(requested)?;
     hashes.md5 = hashes.md5.or(Some(computed_md5));
     hashes.sha1 = hashes.sha1.or(Some(computed_sha1));
     hashes
+        .hash_values
+        .entry("SHA256".into())
+        .or_insert_with(|| hex_string(&computed_sha256));
+    Ok(hashes)
 }
 
 fn checked_writer_seek(
@@ -4169,12 +4219,13 @@ fn encode_raw_spool(
             .ok_or_else(|| EwfError::Malformed("writer raw spool encode offset overflow".into()))?;
     }
 
-    let (computed_md5, computed_sha1) = hash_state.finalize();
+    let (computed_md5, computed_sha1, computed_sha256) = hash_state.finalize();
     Ok(EncodedSpool {
         chunks,
         spool: encoded_spool,
         computed_md5,
         computed_sha1,
+        computed_sha256,
     })
 }
 
@@ -4183,6 +4234,7 @@ struct EncodedSpool {
     spool: ChunkSpool,
     computed_md5: [u8; 16],
     computed_sha1: [u8; 20],
+    computed_sha256: [u8; 32],
 }
 
 struct RememberedEncodedChunk {

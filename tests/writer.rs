@@ -4996,7 +4996,7 @@ fn write_hashes_expose_compatibility_style_hash_values() {
     assert_eq!(hashes.hash_value("MD5"), None);
 
     assert_eq!(
-        hashes.set_hash_value("SHA256", "sha256-value").unwrap(),
+        hashes.set_hash_value("SHA256", "aa".repeat(32)).unwrap(),
         None
     );
     assert_eq!(
@@ -5004,17 +5004,15 @@ fn write_hashes_expose_compatibility_style_hash_values() {
         None
     );
     assert_eq!(
-        hashes
-            .set_hash_value("SHA256", "sha256-replacement")
-            .unwrap(),
-        Some("sha256-value".to_string())
+        hashes.set_hash_value("SHA256", "bb".repeat(32)).unwrap(),
+        Some("aa".repeat(32))
     );
 
     assert_eq!(hashes.number_of_hash_values(), 2);
     assert_eq!(hashes.hash_value_identifier(0), Some("SHA256"));
     assert_eq!(hashes.hash_value_identifier(1), Some("SHA512"));
     assert_eq!(hashes.hash_value_identifier(2), None);
-    assert_eq!(hashes.hash_value("SHA256"), Some("sha256-replacement"));
+    assert_eq!(hashes.hash_value("SHA256"), Some("bb".repeat(32).as_str()));
     assert_eq!(hashes.hash_value("SHA512"), Some("sha512-value"));
 }
 
@@ -5056,6 +5054,80 @@ fn write_hashes_reject_invalid_typed_hash_values() {
     assert_eq!(hashes.md5, None);
     assert_eq!(hashes.sha1, None);
     assert_eq!(hashes.number_of_hash_values(), 0);
+    assert!(hashes.set_hash_value("SHA256", "not-a-digest").is_err());
+    assert_eq!(hashes.number_of_hash_values(), 0);
+}
+
+#[test]
+fn writer_sha256_covers_sector_padding_and_is_returned_for_ewf2() {
+    use sha2::{Digest as _, Sha256};
+    for format in [WriteFormat::Ewf1Physical, WriteFormat::Ewf2Physical] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hash.E01");
+        let mut writer = EwfWriter::create(
+            &path,
+            WriteOptions {
+                format,
+                ..WriteOptions::default()
+            },
+        )
+        .unwrap();
+        writer.write_all(b"abc").unwrap();
+        let result = writer.finish().unwrap();
+        let mut padded = vec![0; 512];
+        padded[..3].copy_from_slice(b"abc");
+        let expected: [u8; 32] = Sha256::digest(&padded).into();
+        assert_eq!(result.computed_sha256, expected);
+        let image = ewf_image::Image::open(&result.segment_paths[0]).unwrap();
+        if format == WriteFormat::Ewf1Physical {
+            assert_eq!(
+                image.hash_value("SHA256"),
+                Some(hex_string(&expected).as_str())
+            );
+        } else {
+            assert_eq!(image.hash_value("SHA256"), None);
+        }
+    }
+}
+
+#[test]
+fn writer_rejects_conflicting_reference_maps_before_creating_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("conflicting.E01");
+    let mut options = WriteOptions::default();
+    options.hashes.md5 = Some([0xaa; 16]);
+    options
+        .hashes
+        .hash_values
+        .insert("mD5".into(), "bb".repeat(16));
+    assert!(EwfWriter::create(&path, options).is_err());
+    assert!(!path.exists());
+}
+
+#[test]
+fn resumed_media_gets_a_new_sha256_instead_of_the_old_reference() {
+    use sha2::{Digest as _, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("resume-hash.E01");
+    let mut writer = EwfWriter::create(
+        &path,
+        WriteOptions {
+            bytes_per_sector: 1,
+            ..WriteOptions::default()
+        },
+    )
+    .unwrap();
+    writer.write_all(b"ab").unwrap();
+    writer.finish_incomplete().unwrap();
+    let mut writer = EwfWriter::resume(&path).unwrap();
+    writer.write_all(b"c").unwrap();
+    let result = writer.finish().unwrap();
+    let expected: [u8; 32] = Sha256::digest(b"abc").into();
+    assert_eq!(result.computed_sha256, expected);
+    assert_eq!(
+        ewf_image::Image::open(path).unwrap().hash_value("SHA256"),
+        Some(hex_string(&expected).as_str())
+    );
 }
 
 #[test]
