@@ -387,37 +387,21 @@ fn adler32(data: &[u8]) -> u32 {
     (b << 16) | a
 }
 
-pub(crate) fn parse_xhash_data(raw: &[u8], stored_hashes: &mut StoredHashes) {
+pub(crate) fn parse_xhash_data(raw: &[u8], stored_hashes: &mut StoredHashes) -> Result<()> {
     let raw = raw.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(raw);
     let text = String::from_utf8_lossy(raw);
-
+    let mut result = Ok(());
     for_each_simple_xml_child(&text, "xhash", |tag, value| {
-        let value = value.trim();
-        if value.is_empty() {
+        if result.is_err() {
             return;
         }
-        let value = decode_xml_entities(value);
-        let key = match tag {
-            "MD5" | "md5" => "MD5",
-            "SHA1" | "sha1" => "SHA1",
-            _ => tag,
-        };
-        stored_hashes
-            .hash_values
-            .entry(key.to_string())
-            .or_insert_with(|| value.clone());
-
-        if key == "MD5" && stored_hashes.md5.is_none() {
-            if let Some(hash) = parse_hex_bytes(&value) {
-                stored_hashes.md5 = Some(hash);
-            }
-        } else if key == "SHA1"
-            && stored_hashes.sha1.is_none()
-            && let Some(hash) = parse_hex_bytes(&value)
-        {
-            stored_hashes.sha1 = Some(hash);
+        let value = decode_xml_entities(value.trim());
+        if value.is_empty() && crate::hashes::canonical_identifier(tag).is_none() {
+            return;
         }
+        result = crate::hashes::insert_stored_hash(stored_hashes, tag, &value);
     });
+    result
 }
 
 pub(crate) fn parse_xheader_data(raw: &[u8], metadata: &mut EwfMetadata) {
@@ -667,30 +651,6 @@ fn decode_utf16le(raw: &[u8]) -> Option<String> {
         units.remove(0);
     }
     String::from_utf16(&units).ok()
-}
-
-fn parse_hex_bytes<const N: usize>(text: &str) -> Option<[u8; N]> {
-    let text = text.trim();
-    if text.len() != N * 2 {
-        return None;
-    }
-
-    let mut bytes = [0; N];
-    for (index, pair) in text.as_bytes().as_chunks::<2>().0.iter().enumerate() {
-        let high = hex_nibble(pair[0])?;
-        let low = hex_nibble(pair[1])?;
-        bytes[index] = (high << 4) | low;
-    }
-    Some(bytes)
-}
-
-fn hex_nibble(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn ewf1_header_identifier(name: &str) -> &str {
@@ -1001,7 +961,7 @@ mod tests {
         parse_xhash_data(
             b"<xhash><MD5>00112233445566778899aabbccddeeff</MD5><SHA1>ffeeddccbbaa9988776655443322110010325476</SHA1></xhash>",
             &mut stored_hashes,
-        );
+        ).unwrap();
 
         assert_eq!(
             stored_hashes.hash_values.get("MD5").map(String::as_str),
@@ -1020,7 +980,7 @@ mod tests {
         parse_xhash_data(
             b"<xhash><md5>00112233445566778899aabbccddeeff</md5><sha1>ffeeddccbbaa9988776655443322110010325476</sha1></xhash>",
             &mut stored_hashes,
-        );
+        ).unwrap();
 
         assert_eq!(
             stored_hashes.md5,
@@ -1045,7 +1005,7 @@ mod tests {
         parse_xhash_data(
             b"<xhash><MD5>00112233445566778899aabbccddeeff</MD5><SHA256>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</SHA256></xhash>",
             &mut stored_hashes,
-        );
+        ).unwrap();
 
         assert_eq!(
             stored_hashes.hash_values.get("SHA256").map(String::as_str),

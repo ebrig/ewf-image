@@ -618,7 +618,7 @@ impl Image {
                 tracks.extend(parsed.tracks);
                 acquisition_complete = parsed.acquisition_complete;
             }
-            merge_hashes(&mut stored_hashes, &parsed.stored_hashes);
+            merge_hashes(&mut stored_hashes, &parsed.stored_hashes)?;
             if parsed.format == Format::Ewf1 {
                 next_ewf1_chunk = next_ewf1_chunk
                     .checked_add(parsed.table_chunk_count)
@@ -2628,11 +2628,8 @@ fn parse_ewf1_segment(
                 validate_hash_section_size(section.data_size, EWF1_HASH_SECTION_SIZE, "EWF1 MD5")?;
                 let data = read_exact_at(file, section.data_offset, section.data_size)?;
                 validate_adler32_checksum(&data, 32, 32, "EWF1 MD5 hash")?;
-                if stored_hashes.md5.is_none()
-                    && let Some(hash) = parse_nonzero_hash(&data)
-                {
-                    stored_hashes.md5 = Some(hash);
-                    insert_hash_value(&mut stored_hashes, "MD5", &hash);
+                if let Some(hash) = parse_nonzero_hash::<16>(&data) {
+                    insert_hash_value(&mut stored_hashes, "MD5", &hash)?;
                 }
             }
             "digest" => {
@@ -2643,23 +2640,17 @@ fn parse_ewf1_segment(
                 )?;
                 let data = read_exact_at(file, section.data_offset, section.data_size)?;
                 validate_adler32_checksum(&data, 76, 76, "EWF1 digest")?;
-                if stored_hashes.md5.is_none()
-                    && let Some(hash) = parse_nonzero_hash(&data[..16])
-                {
-                    stored_hashes.md5 = Some(hash);
-                    insert_hash_value(&mut stored_hashes, "MD5", &hash);
+                if let Some(hash) = parse_nonzero_hash::<16>(&data[..16]) {
+                    insert_hash_value(&mut stored_hashes, "MD5", &hash)?;
                 }
-                if stored_hashes.sha1.is_none()
-                    && let Some(hash) = parse_nonzero_hash(&data[16..36])
-                {
-                    stored_hashes.sha1 = Some(hash);
-                    insert_hash_value(&mut stored_hashes, "SHA1", &hash);
+                if let Some(hash) = parse_nonzero_hash::<20>(&data[16..36]) {
+                    insert_hash_value(&mut stored_hashes, "SHA1", &hash)?;
                 }
             }
             "xhash" => {
                 let data = read_exact_at(file, section.data_offset, section.data_size)?;
                 let payload = ewf1_metadata_payload(&data, compression_method)?;
-                parse_xhash_data(&payload, &mut stored_hashes);
+                parse_xhash_data(&payload, &mut stored_hashes)?;
             }
             "ltree" => {
                 let data = read_exact_at(file, section.data_offset, section.data_size)?;
@@ -2934,22 +2925,16 @@ fn parse_ewf2_segment(
                 validate_hash_section_size(section.data_size, EWF2_HASH_SECTION_SIZE, "EWF2 MD5")?;
                 let data = read_exact_at(file, section.data_offset, section.data_size)?;
                 validate_adler32_checksum(&data, 16, 16, "EWF2 MD5 hash")?;
-                if stored_hashes.md5.is_none()
-                    && let Some(hash) = parse_nonzero_hash(&data)
-                {
-                    stored_hashes.md5 = Some(hash);
-                    insert_hash_value(&mut stored_hashes, "MD5", &hash);
+                if let Some(hash) = parse_nonzero_hash::<16>(&data) {
+                    insert_hash_value(&mut stored_hashes, "MD5", &hash)?;
                 }
             }
             ewf2::SectionType::Sha1Hash => {
                 validate_hash_section_size(section.data_size, EWF2_HASH_SECTION_SIZE, "EWF2 SHA1")?;
                 let data = read_exact_at(file, section.data_offset, section.data_size)?;
                 validate_adler32_checksum(&data, 20, 20, "EWF2 SHA1 hash")?;
-                if stored_hashes.sha1.is_none()
-                    && let Some(hash) = parse_nonzero_hash(&data)
-                {
-                    stored_hashes.sha1 = Some(hash);
-                    insert_hash_value(&mut stored_hashes, "SHA1", &hash);
+                if let Some(hash) = parse_nonzero_hash::<20>(&data) {
+                    insert_hash_value(&mut stored_hashes, "SHA1", &hash)?;
                 }
             }
             ewf2::SectionType::ErrorTable => {
@@ -4113,19 +4098,17 @@ fn compression_method_code(method: ewf2::CompressionMethod) -> u16 {
     }
 }
 
-fn merge_hashes(target: &mut StoredHashes, source: &StoredHashes) {
-    if target.md5.is_none() {
-        target.md5 = source.md5;
+fn merge_hashes(target: &mut StoredHashes, source: &StoredHashes) -> Result<()> {
+    if let Some(hash) = source.md5 {
+        insert_hash_value(target, "MD5", &hash)?;
     }
-    if target.sha1.is_none() {
-        target.sha1 = source.sha1;
+    if let Some(hash) = source.sha1 {
+        insert_hash_value(target, "SHA1", &hash)?;
     }
     for (identifier, value) in &source.hash_values {
-        target
-            .hash_values
-            .entry(identifier.clone())
-            .or_insert_with(|| value.clone());
+        crate::hashes::insert_stored_hash(target, identifier, value)?;
     }
+    Ok(())
 }
 
 fn merge_segment_format_profile(
@@ -4446,11 +4429,12 @@ fn adler32_update(checksum: u32, data: &[u8]) -> u32 {
     (b << 16) | a
 }
 
-fn insert_hash_value(stored_hashes: &mut StoredHashes, identifier: &str, hash: &[u8]) {
-    stored_hashes
-        .hash_values
-        .entry(identifier.to_string())
-        .or_insert_with(|| hex_string(hash));
+fn insert_hash_value(
+    stored_hashes: &mut StoredHashes,
+    identifier: &str,
+    hash: &[u8],
+) -> Result<()> {
+    crate::hashes::insert_stored_hash(stored_hashes, identifier, &hex_string(hash))
 }
 
 fn hex_string(bytes: &[u8]) -> String {

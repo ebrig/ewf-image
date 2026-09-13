@@ -139,6 +139,7 @@ mod decode;
 mod encryption;
 mod error;
 mod format;
+mod hashes;
 mod image;
 mod index;
 #[cfg(feature = "verify")]

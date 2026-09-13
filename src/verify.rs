@@ -198,7 +198,7 @@ pub(crate) struct MediaScan {
 }
 
 impl Image {
-    /// Computes MD5 and SHA1 hashes and compares embedded references.
+    /// Computes MD5, SHA1, and SHA256 hashes and compares embedded references.
     /// Reads backing chunks without using cached or zero-filled recovery data.
     /// Returns an error on corruption, I/O failure, or cancellation.
     pub fn verify(&self) -> Result<VerifyResult> {
@@ -206,8 +206,17 @@ impl Image {
         Ok(VerifyResult {
             computed_md5: Some(report.hashes.md5),
             computed_sha1: Some(report.hashes.sha1),
+            computed_sha256: Some(report.hashes.sha256),
             md5_match: self.md5_hash().map(|hash| hash == report.hashes.md5),
             sha1_match: self.sha1_hash().map(|hash| hash == report.hashes.sha1),
+            sha256_match: report
+                .comparisons
+                .iter()
+                .find(|item| {
+                    item.algorithm == HashAlgorithm::Sha256
+                        && item.reference == HashReference::Stored
+                })
+                .map(|item| item.matches),
         })
     }
 
@@ -244,6 +253,16 @@ impl Image {
         options: &VerifyOptions,
     ) -> Vec<HashComparison> {
         let references = [
+            (
+                HashAlgorithm::Sha256,
+                HashReference::Stored,
+                self.info()
+                    .stored_hashes
+                    .hash_value("SHA256")
+                    .and_then(crate::types::parse_hex_array::<32>)
+                    .map(|v| v.to_vec()),
+                hashes.sha256.as_slice(),
+            ),
             (
                 HashAlgorithm::Md5,
                 HashReference::Stored,

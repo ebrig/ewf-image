@@ -2,12 +2,16 @@
 
 ## Media verification
 
-`Image::verify()` preserves its MD5/SHA1 result type. It now reads backing
+`Image::verify()` returns MD5/SHA1/SHA256 results. It reads backing
 chunks without consulting the decoded-chunk cache or the zero-fill recovery
 policy. Corrupt media cannot pass verification using cached substitute bytes.
 
 `verify_with_options` and `verify_with_progress` additionally compute SHA256
-and compare caller-supplied reference digests. Embedded and external references
+and compare caller-supplied reference digests. Recognized embedded SHA256
+references in EWF1 xhash sections are also compared. Supported digest identifiers
+are case-insensitive; malformed values and conflicting references cause opening
+to fail, including in lenient mode. Unknown hash identifiers remain available in
+the generic metadata map and are not verified. Embedded and external references
 remain separate in `VerificationReport::comparisons`. A mismatch is a result;
 unreadable media is an error. `references_match()` returns `None` when no
 supported reference exists, rather than treating the absence of references as

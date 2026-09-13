@@ -724,7 +724,7 @@ pub(crate) fn set_typed_hash_value(
     }
 }
 
-fn parse_hex_array<const N: usize>(text: &str) -> Option<[u8; N]> {
+pub(crate) fn parse_hex_array<const N: usize>(text: &str) -> Option<[u8; N]> {
     if text.len() != N * 2 {
         return None;
     }
@@ -1186,8 +1186,12 @@ pub struct VerifyResult {
     pub computed_md5: Option<[u8; 16]>,
     /// SHA1 hash computed from the logical media stream.
     pub computed_sha1: Option<[u8; 20]>,
+    /// SHA256 hash computed from the logical media stream.
+    pub computed_sha256: Option<[u8; 32]>,
     /// Whether computed MD5 matched the stored MD5, or `None` if no MD5 was stored.
     pub md5_match: Option<bool>,
     /// Whether computed SHA1 matched the stored SHA1, or `None` if no SHA1 was stored.
     pub sha1_match: Option<bool>,
+    /// Whether computed SHA256 matched the stored SHA256, or `None` if absent.
+    pub sha256_match: Option<bool>,
 }

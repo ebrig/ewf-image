@@ -70,6 +70,42 @@ fn known_sha256_vector_and_independent_reference_mismatch() {
 }
 
 #[test]
+fn embedded_sha256_is_compared_by_both_verification_interfaces() {
+    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    for (reference, matches) in [(ABC_SHA256.to_uppercase(), true), ("00".repeat(32), false)] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sha256.E01");
+        let mut options = WriteOptions {
+            bytes_per_sector: 1,
+            ..WriteOptions::default()
+        };
+        options.hashes.set_hash_value("sHa256", reference).unwrap();
+        let mut writer = EwfWriter::create(&path, options).unwrap();
+        writer.write_all(b"abc").unwrap();
+        writer.finish().unwrap();
+        let image = Image::open(path).unwrap();
+        let report = image
+            .verify_with_options(&VerifyOptions::default())
+            .unwrap();
+        assert_eq!(report.references_match(), Some(matches));
+        let legacy = image.verify().unwrap();
+        assert_eq!(legacy.sha256_match, Some(matches));
+        assert_eq!(legacy.computed_sha256, Some(report.hashes.sha256));
+        let analysis = image.analyze(&VerifyOptions::default()).unwrap();
+        assert_eq!(
+            analysis.findings.iter().any(|finding| matches!(
+                finding.kind,
+                IntegrityFindingKind::HashMismatch {
+                    algorithm: ewf_image::HashAlgorithm::Sha256,
+                    reference: HashReference::Stored
+                }
+            )),
+            !matches
+        );
+    }
+}
+
+#[test]
 fn progress_is_ordered_exact_and_locally_cancellable() {
     let data = vec![0x57; 32768 * 3 + 7];
     let (_dir, path) = fixture(&data, WriteFormat::Ewf1Physical, WriteCompression::Zlib);
