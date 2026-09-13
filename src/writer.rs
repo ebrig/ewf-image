@@ -3534,6 +3534,9 @@ fn ewf2_single_files_data_payload(info: &SingleFilesInfo) -> Result<Vec<u8>> {
     append_single_file_source_category(&mut lines, &info.sources)?;
     append_single_file_subject_category(&mut lines, &info.subjects);
     append_single_file_entry_category(&mut lines, &info.root, &source_ids)?;
+    // Terminate the final empty category-separator line, as well as the last
+    // record line. Streaming consumers must not need to read past the payload.
+    lines.push(String::new());
     Ok(utf16le_with_bom(&lines.join("\n")))
 }
 

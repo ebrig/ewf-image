@@ -2366,6 +2366,7 @@ fn writer_creates_readable_logical_l01_single_files_catalog() {
     let bytes = fs::read(&path).unwrap();
     let ltree = ewf1_section_data(&bytes, b"ltree");
     let ltree_data = &ltree[48..];
+    assert!(utf16le_string(ltree_data).ends_with("\n\n"));
     let mut hasher = Md5::new();
     hasher.update(ltree_data);
     assert_eq!(&ltree[0..16], hasher.finalize().as_slice());
@@ -2714,6 +2715,7 @@ fn writer_creates_readable_ewf2_lx01_single_files_catalog() {
 
     let bytes = fs::read(&path).unwrap();
     let single_files_data = utf16le_string(ewf2_section_data(&bytes, 0x20));
+    assert!(single_files_data.ends_with("\n\n"));
     let category_headers = single_files_data
         .lines()
         .filter(|line| matches!(*line, "5" | "rec" | "perm" | "srce" | "sub" | "entry"))
