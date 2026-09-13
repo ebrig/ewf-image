@@ -23,7 +23,7 @@ struct Set {
     first: PathBuf,
     journal: PathBuf,
     // A persistent lock file avoids unlink/recreate races between processes.
-    lock: File,
+    _lock: OutputLock,
 }
 
 impl Publication {
@@ -42,6 +42,7 @@ impl Publication {
         let paths = normalized_paths(first, secondary)?;
         for path in &paths {
             let set = Set::lock(path)?;
+            ensure_no_acquisition(path)?;
             fs::create_dir(&set.journal).map_err(|error| {
                 if error.kind() == std::io::ErrorKind::AlreadyExists {
                     EwfError::Unsupported(
@@ -273,20 +274,10 @@ impl Drop for Publication {
 impl Set {
     fn lock(first: &Path) -> Result<Self> {
         let journal = journal_path(first)?;
-        let lock_path = journal.with_extension("lock");
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(lock_path)?;
-        lock.try_lock().map_err(|error| {
-            EwfError::Unsupported(format!("output publication is busy: {error}"))
-        })?;
         Ok(Self {
             first: first.into(),
             journal,
-            lock,
+            _lock: OutputLock::acquire(first)?,
         })
     }
 
@@ -325,11 +316,29 @@ impl Set {
     }
 }
 
-impl Drop for Set {
+pub(crate) struct OutputLock(File);
+
+impl OutputLock {
+    pub(crate) fn acquire(first: &Path) -> Result<Self> {
+        let lock_path = journal_path(first)?.with_extension("lock");
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)?;
+        lock.try_lock().map_err(|error| {
+            EwfError::Unsupported(format!("output publication is busy: {error}"))
+        })?;
+        Ok(Self(lock))
+    }
+}
+
+impl Drop for OutputLock {
     fn drop(&mut self) {
         // Explicit unlock also releases an inherited flock description during
         // a concurrent fork/exec, rather than waiting for the child to close it.
-        let _ = self.lock.unlock();
+        let _ = self.0.unlock();
     }
 }
 
@@ -345,6 +354,24 @@ fn journal_path(first: &Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn ensure_no_pending(first: &Path) -> Result<()> {
+    ensure_no_acquisition(first)?;
+    ensure_no_publication(first)
+}
+
+pub(crate) fn acquisition_path(first: &Path) -> Result<PathBuf> {
+    Ok(journal_path(first)?.with_extension("ewf-acquisition"))
+}
+
+fn ensure_no_acquisition(first: &Path) -> Result<()> {
+    if acquisition_path(first)?.try_exists()? {
+        return Err(EwfError::Unsupported(
+            "unfinished acquisition; resume it with AcquisitionWriter::resume".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_no_publication(first: &Path) -> Result<()> {
     if journal_path(first)?.try_exists()? {
         return Err(EwfError::Unsupported(
             "unfinished output publication; call EwfWriter::recover_output before opening".into(),
@@ -418,7 +445,7 @@ fn remove_if_present(path: &Path) -> Result<()> {
 }
 
 #[allow(clippy::unnecessary_wraps)] // Unix synchronizes directory entries; other platforms retain the fallible interface.
-fn sync_dir(path: &Path) -> Result<()> {
+pub(crate) fn sync_dir(path: &Path) -> Result<()> {
     #[cfg(unix)]
     File::open(path)?.sync_all()?;
     #[cfg(not(unix))]

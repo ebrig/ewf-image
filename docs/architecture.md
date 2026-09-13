@@ -95,3 +95,18 @@ Malformed images, unimplemented format features, invalid signatures, I/O
 errors, and aborts are reported without panics. Bounds checks are applied to
 offsets, section chains, chunk sizes, decompression limits, table coverage,
 segment references, and media geometry arithmetic.
+
+## Append-only acquisition
+
+`AcquisitionWriter` encodes chunks directly into one segment's scratch spool,
+seals native EWF1 segments, and checkpoints their byte lengths and SHA256 values.
+Its options and caller-supplied source identity are bound to a versioned
+configuration fingerprint. Resume validates sealed files and uses a private
+reader path that accepts exactly the checkpointed prefix of the declared media
+size; public image opens still require full table coverage. Rehashing that prefix
+restores MD5, SHA1, and SHA256 without serializing hash-library internals.
+
+Exclusive hard links publish a completed set without copying payloads. The
+acquisition sidecar remains present until every output segment is installed and
+synchronized, and the shared output lock excludes the general writer. See
+[streaming acquisition](acquisition.md) for the API and filesystem requirements.

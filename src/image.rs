@@ -367,7 +367,28 @@ impl Image {
         ));
         let segments =
             SegmentFilePool::new_path(paths.len(), options.maximum_open_handles(), statistics)?;
-        Self::open_segment_sources(paths, segments, options, password, None)
+        Self::open_segment_sources(paths, segments, options, password, None, None)
+    }
+
+    // Only the acquisition checkpoint reader may open a sealed prefix whose
+    // volume declares the eventual full size. Public opens keep exact coverage.
+    pub(crate) fn open_acquisition_prefix(
+        paths: Vec<PathBuf>,
+        expected_size: u64,
+        committed_size: u64,
+    ) -> Result<Self> {
+        let options = OpenOptions::default().with_chunk_cache_size(1);
+        let statistics = Arc::new(ReaderStatisticsCollector::new(false));
+        let segments =
+            SegmentFilePool::new_path(paths.len(), options.maximum_open_handles(), statistics)?;
+        Self::open_segment_sources(
+            paths,
+            segments,
+            options,
+            None,
+            None,
+            Some((expected_size, committed_size)),
+        )
     }
 
     fn open_segment_readers(
@@ -390,7 +411,7 @@ impl Image {
         ));
         let segments =
             SegmentFilePool::new_readers(readers, options.maximum_open_handles(), statistics)?;
-        Self::open_segment_sources(paths, segments, options, password, None)
+        Self::open_segment_sources(paths, segments, options, password, None, None)
     }
 
     /// Opens explicitly ordered, named positioned sources with default options.
@@ -440,7 +461,7 @@ impl Image {
             .collect();
         let segments =
             SegmentFilePool::new_readers(readers, options.maximum_open_handles(), statistics)?;
-        Self::open_segment_sources(paths, segments, options, password, Some(sources))
+        Self::open_segment_sources(paths, segments, options, password, Some(sources), None)
     }
 
     fn open_segment_sources(
@@ -449,6 +470,7 @@ impl Image {
         options: OpenOptions,
         password: Option<&EwfPassword>,
         positioned_sources: Option<Vec<SegmentSource>>,
+        acquisition_prefix: Option<(u64, u64)>,
     ) -> Result<Self> {
         let statistics = Arc::clone(&segments.statistics);
         let mut ranges = Vec::new();
@@ -656,6 +678,18 @@ impl Image {
         }
         if discovered_table_chunks > 0 {
             media.chunk_count = Some(discovered_table_chunks);
+        }
+        if let Some((expected_size, committed_size)) = acquisition_prefix {
+            if format != Format::Ewf1
+                || logical_size != expected_size
+                || committed_size == 0
+                || committed_size > expected_size
+            {
+                return Err(EwfError::Malformed(
+                    "invalid acquisition prefix geometry".into(),
+                ));
+            }
+            logical_size = committed_size;
         }
 
         let info = ImageInfo {

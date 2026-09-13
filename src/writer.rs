@@ -32,6 +32,9 @@ use crate::types::{
 };
 use crate::{EwfError, Result};
 
+mod acquisition;
+pub use acquisition::{AcquisitionOptions, AcquisitionWriter};
+
 const VOLUME_DATA_SIZE: usize = 1052;
 const EWF1_LTREE_HEADER_SIZE: usize = 48;
 const EWF2_DEVICE_INFORMATION_SECTION: u32 = 0x01;
@@ -1916,6 +1919,7 @@ impl std::io::Seek for EwfWriter {
     }
 }
 
+#[derive(Clone)]
 struct WriteHashState {
     md5: Md5,
     sha1: Sha1,
