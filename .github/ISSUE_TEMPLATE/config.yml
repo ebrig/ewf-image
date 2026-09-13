@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/ebrig/ewf-image/security/advisories/new
+    about: Privately report a suspected security vulnerability.

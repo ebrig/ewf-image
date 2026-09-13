@@ -2,7 +2,7 @@
 
 Version 0.2 makes `OpenOptions` fields private and replaces struct-literal
 configuration with builders. This is the only intentional reader API break in
-the current unreleased changes. `Image`, cursor, error, checksum-recovery, and
+the 0.2 release. `Image`, cursor, error, checksum-recovery, and
 writer behavior remain source-compatible unless a caller constructs or reads
 `OpenOptions` fields directly.
 

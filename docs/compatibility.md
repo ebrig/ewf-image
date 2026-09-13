@@ -17,9 +17,12 @@ summarize the public support surface.
 | Multi-segment discovery | ✓ | EWF1 and EWF2 sibling naming schemes, plus explicit segment lists. |
 | Metadata and hashes | ✓ | Typed fields and compatibility-oriented generic header/hash value maps. |
 | Stored MD5/SHA1 parsing | ✓ | Available with or without default features. |
-| Streamed MD5/SHA1 verification | ✓ | `Image::verify()` and `VerifyResult`, enabled by the default `verify` feature. |
+| Streamed media verification | ✓ | MD5, SHA1, and SHA256 hashing, stored/external reference comparisons, progress, and cancellation through `Image::verify*`; enabled by the default `verify` feature. Optional bounded parallel scans use the `parallel` feature. |
 | EWF2 section integrity checks | ✓ | Available with or without default features. |
 | Corruption and encryption probes | ✓ | Lightweight file and segment probes that run without fully opening an image. |
+| Positioned sources and section inspection | ✓ | File, memory, bounded-subrange, and caller-provided positioned segment sources, plus EWF1/EWF2 section summaries. |
+| Integrity analysis | ✓ | Typed, bounded findings with media coverage and EWF1 redundant-table comparison. Optional report serialization uses the `serde` feature. |
+| Physical EWF1 recovery | ✓ | Separate raw/zlib recovery with redundant-table fallback, suspect-data policy, provenance, cancellation, and output bounds. |
 | Encrypted EWF2 decryption | — | Not yet implemented; encrypted images are detected and rejected. |
 | Base-plus-overlay delta/shadow images | — | Not yet implemented; no confirmed public reference surface is available. |
 
@@ -50,6 +53,8 @@ Compatibility is tested in layers:
   values, and verification behavior against external EWF tools.
 - Generated fixture tests exercise externally-created EWF1 and extended EWF
   profiles, plus writer-created EWF2 and logical single-file cases.
+- Recovery oracle tests compare recovery from externally generated truncated
+  raw/zlib EWF1 images with independently exported media.
 - X-Ways encryption coverage crosses AES-128/AES-256 with compatible Deflate
   and X-Ways Zstandard compression. Native uncompressed and verifier-less
   X-Ways fixtures are not currently available; verifier-less fallback behavior

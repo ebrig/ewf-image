@@ -1,22 +1,28 @@
 # Contributing
 
-Thanks for helping improve `ewf`. The package currently exposes a Rust library
-crate, so changes should keep the public API small, documented, and directly
-testable.
+Thanks for helping improve `ewf-image`. The package currently exposes a Rust
+library crate, so changes should keep the public API small, documented, and
+directly testable.
 
 ## Setup
 
-Install a current Rust toolchain with `rustfmt` and `clippy`:
+Install the current stable Rust toolchain with `rustfmt` and `clippy`:
 
 ```bash
+rustup toolchain install stable --profile minimal
+rustup default stable
 rustup component add rustfmt clippy
 ```
+
+The crate's minimum supported Rust version (MSRV) is 1.96. CI checks the full
+suite on stable Rust and checks that all features compile on the MSRV.
 
 Run the self-contained checks before opening a pull request:
 
 ```bash
 cargo fmt --check
 cargo test --no-default-features
+cargo test
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo check --examples --all-features
@@ -40,9 +46,16 @@ compatibility-sensitive behavior, run the relevant ignored tests described in
 - Update `README.md`, crate-level rustdoc, and public docs when public behavior
   changes.
 - Document intentional limitations in [docs/limitations.md](docs/limitations.md).
+- Add notable user-facing changes to the `Unreleased` section of
+  [CHANGELOG.md](CHANGELOG.md).
 - Do not commit private images, generated fixture corpora, or local raw dumps.
 
 ## Security Issues
 
 Do not file public issues for suspected vulnerabilities. Follow
 [SECURITY.md](SECURITY.md).
+
+## Releases
+
+Maintainers should follow [RELEASING.md](RELEASING.md) so the crate, tag,
+changelog, and GitHub release remain synchronized.

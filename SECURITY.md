@@ -1,6 +1,6 @@
 # Security Policy
 
-`ewf` parses attacker-controlled forensic image files. Reports involving
+`ewf-image` parses attacker-controlled forensic image files. Reports involving
 malformed input are treated seriously, even when the immediate impact appears
 limited to local tooling.
 
@@ -8,14 +8,13 @@ limited to local tooling.
 
 | Version | Supported |
 | --- | --- |
-| 0.1.x | Yes |
+| 0.4.x | Yes |
+| 0.3.x and earlier | No |
 
-## Reporting A Vulnerability
+## Reporting a Vulnerability
 
-Do not open a public issue with exploit details. Use GitHub private
-vulnerability reporting for this repository when available. If private
-reporting is unavailable, open a minimal public issue asking for a private
-contact path and omit technical details until a maintainer responds.
+Do not open a public issue with exploit details. Use this repository's
+[private vulnerability reporting form](https://github.com/ebrig/ewf-image/security/advisories/new).
 
 Please include:
 
@@ -25,8 +24,13 @@ Please include:
 - Whether the issue causes panic, incorrect output, resource exhaustion, or
   unsafe behavior in downstream applications.
 
+Do not attach confidential case evidence or other sensitive forensic material.
+Describe the material first so the maintainer can arrange an appropriate
+transfer method if it is needed.
+
 ## Handling Expectations
 
-Security reports are triaged before ordinary feature work. Confirmed issues
-receive a fix, regression coverage, and a changelog entry. Public disclosure
-timing should give users a reasonable update window.
+The maintainer aims to acknowledge reports within 14 calendar days. Security
+reports are triaged before ordinary feature work. Confirmed issues receive a
+fix, regression coverage, and a changelog entry. Disclosure timing is
+coordinated with the reporter so users have a reasonable update window.

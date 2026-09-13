@@ -1,9 +1,16 @@
 name: Bug Report
-description: Report a reproducible problem in ewf.
+description: >-
+  Report a reproducible problem in ewf-image.
 title: "bug: "
 labels:
   - bug
 body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not report vulnerabilities or attach confidential forensic evidence
+        here. Use [private vulnerability reporting](https://github.com/ebrig/ewf-image/security/advisories/new)
+        for security issues.
   - type: textarea
     id: summary
     attributes:
@@ -30,4 +37,6 @@ body:
     id: notes
     attributes:
       label: Notes
-      description: Format family, compression, segment count, and whether a shareable fixture exists.
+      description: >-
+        Include the platform, Rust version, format family, compression, segment
+        count, and whether a non-sensitive shareable fixture exists.

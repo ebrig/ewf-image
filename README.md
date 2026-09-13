@@ -4,6 +4,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/ewf-image.svg)](https://crates.io/crates/ewf-image)
 [![Documentation](https://docs.rs/ewf-image/badge.svg)](https://docs.rs/ewf-image)
+[![CI](https://github.com/ebrig/ewf-image/actions/workflows/ci.yml/badge.svg)](https://github.com/ebrig/ewf-image/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 ![ewf-image project banner](https://raw.githubusercontent.com/ebrig/ewf-image/main/docs/assets/ewf-image-banner.png)
@@ -227,9 +228,11 @@ optional external EWF tool oracle tests. The routine checks are:
 ```bash
 cargo fmt --check
 cargo test --no-default-features
+cargo test
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo check --examples --all-features
+cargo test --doc --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 ```
 
@@ -244,6 +247,7 @@ require local fixtures and installed EWF tools. See
 - [Compatibility](docs/compatibility.md)
 - [Limitations](docs/limitations.md)
 - [Testing](docs/testing.md)
+- [Release process](RELEASING.md)
 - [Verification, analysis, and recovery](docs/reader-analysis.md)
 - [Migrating to 0.3](docs/migrating-to-0.3.md)
 - [Migrating to 0.2](docs/migrating-to-0.2.md)
