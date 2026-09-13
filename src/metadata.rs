@@ -79,11 +79,11 @@ pub(crate) fn detect_ewf1_header_profile(
         .and_then(|index| values.get(index))
         .and_then(|value| value.as_bytes().first().copied());
 
-    let mut profile = match (header_section_number, number_of_sections) {
-        (1, "3") => Some(FormatProfile::Linen5),
-        (1, "1") => Some(FormatProfile::EnCase1),
-        _ => None,
-    };
+    // A single main section also appears in sparse, producer-neutral headers.
+    // Keep the container hint unless a characteristic field layout identifies
+    // the generation (including the EnCase 1 compression field below).
+    let mut profile =
+        (header_section_number == 1 && number_of_sections == "3").then_some(FormatProfile::Linen5);
 
     for (index, name) in types.iter().enumerate() {
         match (header_section_number, index, *name) {

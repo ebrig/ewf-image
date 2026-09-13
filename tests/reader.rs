@@ -5302,6 +5302,17 @@ fn image_open_exposes_smart_format_profile() {
 }
 
 #[test]
+fn sparse_ewf1_header_does_not_claim_encase1_generation() {
+    let file = synthetic_e01_with_header_text(b"sparse metadata", "1\nmain\nc\nCASE-001\n");
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    assert_eq!(image.format_profile(), ewf_image::FormatProfile::EnCase2);
+    assert_eq!(
+        image.info().metadata.case_number.as_deref(),
+        Some("CASE-001")
+    );
+}
+
+#[test]
 fn image_open_detects_ewf1_encase1_format_profile_from_header() {
     let file = synthetic_e01_with_header_text(
         b"encase1 profile",
