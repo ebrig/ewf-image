@@ -268,7 +268,7 @@ fn acquire(
     };
     report["read_policy"] = json!({"retries": args.retries, "zero_fill": args.zero_fill,
         "checkpoint_interval": args.checkpoint_interval});
-    let result = writer.acquire_with_progress(&mut source.file, &options, |p| {
+    let result = writer.acquire_with_progress(source, &options, |p| {
         report["read_attempts"] = json!(p.read_attempts);
         report["retry_attempts"] = json!(p.retry_attempts);
         if args

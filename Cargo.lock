@@ -329,6 +329,7 @@ dependencies = [
  "lru",
  "md-5",
  "rayon",
+ "rustix",
  "ruzstd",
  "serde",
  "serde_json",

@@ -365,6 +365,10 @@ fn recoverable(error: &io::Error) -> bool {
             | io::ErrorKind::NotFound
             | io::ErrorKind::Interrupted
             | io::ErrorKind::WouldBlock
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::BrokenPipe
     )
 }
 

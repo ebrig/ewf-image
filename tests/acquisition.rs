@@ -676,6 +676,11 @@ fn fatal_source_errors_and_invalid_controls_never_substitute_data() {
         (false, std::io::ErrorKind::Interrupted),
         (false, std::io::ErrorKind::InvalidInput),
         (false, std::io::ErrorKind::Unsupported),
+        (false, std::io::ErrorKind::NotFound),
+        (false, std::io::ErrorKind::NotConnected),
+        (false, std::io::ErrorKind::ConnectionAborted),
+        (false, std::io::ErrorKind::ConnectionReset),
+        (false, std::io::ErrorKind::BrokenPipe),
     ] {
         let dir = tempdir().unwrap();
         let path = dir.path().join("case.E01");
