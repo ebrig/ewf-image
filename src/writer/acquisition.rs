@@ -127,6 +127,7 @@ pub struct AcquisitionWriter {
     hashes: WriteHashState,
     sealed: Vec<Seal>,
     errors: Vec<AcquisitionError>,
+    substituted_sectors: u64,
     failed: bool,
     #[cfg(test)]
     fail_seal: bool,
@@ -255,6 +256,7 @@ impl AcquisitionWriter {
         writer.offset = previous;
         writer.hashes = hashes;
         writer.sealed = sealed;
+        writer.substituted_sectors = errors.iter().map(|range| range.sector_count).sum();
         writer.errors = errors;
         Ok(writer)
     }
@@ -286,6 +288,7 @@ impl AcquisitionWriter {
             hashes: WriteHashState::new(),
             sealed: Vec::new(),
             errors: Vec::new(),
+            substituted_sectors: 0,
             failed: false,
             #[cfg(test)]
             fail_seal: false,

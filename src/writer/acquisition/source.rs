@@ -1,6 +1,7 @@
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::ControlFlow;
 
+use super::super::segment_path;
 use super::{AcquisitionError, AcquisitionWriter, EwfError, Result};
 
 /// Treatment of a sector that remains unreadable after its retries.
@@ -131,6 +132,22 @@ impl AcquisitionWriter {
                 "invalid acquisition read options or unaligned source position".into(),
             ));
         }
+        // Early checkpoints consume native segment names too. Reject an
+        // impossible interval before starting I/O, rather than after filling
+        // the supported E01 segment namespace with a partial acquisition.
+        let maximum_segment_bytes = self.chunk_size as u64 * self.chunks_per_segment as u64;
+        let interval = options
+            .checkpoint_interval
+            .unwrap_or(maximum_segment_bytes)
+            .min(maximum_segment_bytes);
+        let remaining_segments = (self.source_size - self.checkpoint_offset()).div_ceil(interval);
+        let final_segment =
+            u64::try_from(self.sealed.len()).expect("segment count fits u64") + remaining_segments;
+        segment_path(
+            &self.first,
+            usize::try_from(final_segment)
+                .map_err(|_| EwfError::Unsupported("too many acquisition segments".into()))?,
+        )?;
         let mut progress = self.source_progress();
         let result = self.acquire_loop(source, options, &mut progress, &mut on_progress);
         let status = match result {
@@ -168,7 +185,7 @@ impl AcquisitionWriter {
         progress.bytes_written = self.offset;
         progress.checkpoint_bytes = self.checkpoint_offset();
         progress.sealed_segments = self.sealed.len();
-        progress.substituted_sectors = self.errors.iter().map(|range| range.sector_count).sum();
+        progress.substituted_sectors = self.substituted_sectors;
     }
 
     fn acquire_loop<R: Read + Seek>(
@@ -272,6 +289,7 @@ impl AcquisitionWriter {
                 sector_count: 1,
             });
         }
+        self.substituted_sectors += 1;
         Ok(())
     }
 }

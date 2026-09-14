@@ -714,3 +714,22 @@ fn fatal_source_errors_and_invalid_controls_never_substitute_data() {
         }
     }
 }
+
+#[test]
+fn checkpoint_interval_must_fit_native_segment_namespace() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("case.E01");
+    let opts = ewf_image::AcquisitionOptions::new(512 * 1024 * 1024);
+    let mut writer = AcquisitionWriter::create(&path, &opts, IDENTITY).unwrap();
+    let read_options = ewf_image::AcquisitionReadOptions {
+        checkpoint_interval: Some(32768),
+        ..ewf_image::AcquisitionReadOptions::default()
+    };
+    let mut source = std::io::Cursor::new(Vec::<u8>::new());
+    assert!(matches!(
+        writer.acquire_from(&mut source, &read_options),
+        Err(ewf_image::EwfError::Unsupported(_))
+    ));
+    assert_eq!(writer.position(), 0);
+    assert_eq!(writer.sealed_segments(), 0);
+}
