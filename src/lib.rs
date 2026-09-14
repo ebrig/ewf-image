@@ -207,8 +207,11 @@ pub use types::{
     SingleFilesAuxTables, SingleFilesInfo, StoredHashes,
 };
 pub use writer::{
-    AcquisitionOptions, AcquisitionWriter, EwfWriter, WriteCompression, WriteCompressionLevel,
-    WriteCompressionValues, WriteFormat, WriteHashes, WriteMediaProfile, WriteOptions, WriteResult,
+    AcquisitionCheckpoint, AcquisitionOperationPhase, AcquisitionOperationProgress,
+    AcquisitionOptions, AcquisitionOutcome, AcquisitionProgress, AcquisitionReadOptions,
+    AcquisitionStatus, AcquisitionWriter, EwfWriter, UnreadableSectorPolicy, WriteCompression,
+    WriteCompressionLevel, WriteCompressionValues, WriteFormat, WriteHashes, WriteMediaProfile,
+    WriteOptions, WriteResult,
 };
 
 #[cfg(feature = "verify")]

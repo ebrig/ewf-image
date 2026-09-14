@@ -1,4 +1,5 @@
 use super::*;
+use crate::Image;
 
 const ID: [u8; 32] = [0x21; 32];
 const SIZE: usize = 9 * 1024 + 512;

@@ -15,7 +15,19 @@ use super::{
     writer_chunk_geometry, xheader_payload,
 };
 use crate::publication::{OutputLock, acquisition_path, sync_dir};
-use crate::{EwfError, EwfMetadata, Image, Result};
+use crate::{AcquisitionError, EwfError, EwfMetadata, Result};
+
+mod checkpoint;
+pub use checkpoint::{
+    AcquisitionCheckpoint, AcquisitionOperationPhase, AcquisitionOperationProgress,
+};
+use checkpoint::{load_checkpoint, operation_progress};
+use std::ops::ControlFlow;
+mod source;
+pub use source::{
+    AcquisitionOutcome, AcquisitionProgress, AcquisitionReadOptions, AcquisitionStatus,
+    UnreadableSectorPolicy,
+};
 
 #[cfg(test)]
 mod tests;
@@ -114,6 +126,7 @@ pub struct AcquisitionWriter {
     spool: Option<ChunkSpool>,
     hashes: WriteHashState,
     sealed: Vec<Seal>,
+    errors: Vec<AcquisitionError>,
     failed: bool,
     #[cfg(test)]
     fail_seal: bool,
@@ -171,73 +184,53 @@ impl AcquisitionWriter {
         options: &AcquisitionOptions,
         source_identity: [u8; 32],
     ) -> Result<Self> {
+        Self::resume_with_progress(first, options, source_identity, |_| {
+            ControlFlow::Continue(())
+        })
+    }
+
+    /// Resumes with cancellable segment validation and media rehash progress.
+    /// Cancellation returns `EwfError::Aborted` and leaves checkpoint files intact.
+    pub fn resume_with_progress(
+        first: impl AsRef<Path>,
+        options: &AcquisitionOptions,
+        source_identity: [u8; 32],
+        mut on_progress: impl FnMut(AcquisitionOperationProgress) -> ControlFlow<()>,
+    ) -> Result<Self> {
         let write_options = options.writer_options()?;
         let first = normalize_first(first.as_ref())?;
         validate_segment_budget(&first, options)?;
         let lock = OutputLock::acquire(&first)?;
-        crate::publication::ensure_no_publication(&first)?;
-        let state = acquisition_path(&first)?;
-        require_directory(&state)?;
-        require_directory(&state.join("scratch"))?;
-        if read_fixed::<32>(&state.join("config"))?
-            != fingerprint(&first, options, &write_options, source_identity)?
-        {
-            return Err(EwfError::Malformed(
-                "acquisition identity or options changed".into(),
-            ));
-        }
-        let mut sealed = Vec::new();
-        let count = checkpoint_count(&state)?;
-        let mut paths = Vec::new();
-        let mut previous = 0;
-        let chunk_size = u64::from(options.bytes_per_sector) * u64::from(options.sectors_per_chunk);
-        for index in 1..=count {
-            let seal = Seal::read(&checkpoint_path(&state, index))?;
-            if seal.end <= previous
-                || seal.end > options.source_size
-                || (seal.end < options.source_size && !seal.end.is_multiple_of(chunk_size))
-                || (seal.end - previous).div_ceil(chunk_size)
-                    > u64::from(options.chunks_per_segment)
-            {
-                return Err(EwfError::Malformed(
-                    "invalid acquisition checkpoint geometry".into(),
-                ));
-            }
-            let path = staged_path(&first, &state, index)?;
-            seal.validate(&path)?;
-            paths.push(path);
-            previous = seal.end;
-            sealed.push(seal);
-        }
-        let publishing = state.join("publishing").try_exists()?;
-        if publishing {
-            read_fixed::<0>(&state.join("publishing"))?;
-            if previous != options.source_size {
-                return Err(EwfError::Malformed(
-                    "incomplete acquisition publication".into(),
-                ));
-            }
-        } else {
-            ensure_output_absent(&first)?;
-        }
+        let checkpoint = load_checkpoint(
+            &first,
+            options,
+            &write_options,
+            source_identity,
+            true,
+            &mut on_progress,
+        )?;
+        let state = checkpoint.state;
+        let sealed = checkpoint.sealed;
+        let previous = checkpoint.report.checkpoint_bytes;
+        let count = sealed.len();
+        let errors = checkpoint.report.acquisition_errors;
         let mut hashes = WriteHashState::new();
-        if !paths.is_empty() {
-            let image = Image::open_acquisition_prefix(paths, options.source_size, previous)?;
-            if image.chunk_size() != chunk_size
-                || image.info().acquisition_complete != (previous == options.source_size)
-            {
-                return Err(EwfError::Malformed(
-                    "acquisition segment geometry changed".into(),
-                ));
-            }
+        if let Some(image) = checkpoint.image {
+            let mut progress =
+                operation_progress(AcquisitionOperationPhase::RehashingMedia, previous, count);
+            checkpoint::notify(progress, &mut on_progress)?;
             let mut cursor = image.cursor();
-            let mut buffer = vec![0; chunk_size as usize];
+            let mut buffer = vec![0; image.chunk_size() as usize];
             loop {
                 let size = cursor.read(&mut buffer)?;
                 if size == 0 {
                     break;
                 }
                 hashes.update(&buffer[..size]);
+                progress.bytes_processed += size as u64;
+                progress.segments_processed =
+                    sealed.partition_point(|seal| seal.end <= progress.bytes_processed);
+                checkpoint::notify(progress, &mut on_progress)?;
             }
         }
         // Validate first; only uncommitted scratch and the possible next segment
@@ -262,6 +255,7 @@ impl AcquisitionWriter {
         writer.offset = previous;
         writer.hashes = hashes;
         writer.sealed = sealed;
+        writer.errors = errors;
         Ok(writer)
     }
 
@@ -291,6 +285,7 @@ impl AcquisitionWriter {
             spool: Some(spool),
             hashes: WriteHashState::new(),
             sealed: Vec::new(),
+            errors: Vec::new(),
             failed: false,
             #[cfg(test)]
             fail_seal: false,
@@ -313,6 +308,12 @@ impl AcquisitionWriter {
         self.sealed.len()
     }
 
+    /// Unreadable source sectors replaced with zeroes, including unsealed input.
+    /// Checkpointed ranges are recovered from native EWF error sections on resume.
+    pub fn acquisition_errors(&self) -> &[AcquisitionError] {
+        &self.errors
+    }
+
     /// Seals complete buffered chunks and returns the resumable source offset.
     /// Any partial chunk remains in memory and is not included in this offset.
     pub fn checkpoint(&mut self) -> Result<u64> {
@@ -330,7 +331,18 @@ impl AcquisitionWriter {
     /// Before journal retirement, a publication error preserves checkpoints for
     /// `resume(...).finish()`. A cleanup failure after retirement can leave an
     /// already completed image; open the image to check that outcome.
-    pub fn finish(mut self) -> Result<WriteResult> {
+    pub fn finish(self) -> Result<WriteResult> {
+        self.finish_with_progress(|_| ControlFlow::Continue(()))
+    }
+
+    /// Validates and publishes with cooperative cancellation. Returning `Break`
+    /// leaves the acquisition resumable, including after some output links have
+    /// been installed. Cancellation is checked before journal retirement; cleanup
+    /// after that commit point is not cancellable.
+    pub fn finish_with_progress(
+        mut self,
+        mut on_progress: impl FnMut(AcquisitionOperationProgress) -> ControlFlow<()>,
+    ) -> Result<WriteResult> {
         self.ensure_healthy()?;
         if self.checkpoint_offset() != self.source_size {
             return Err(EwfError::Malformed(
@@ -340,6 +352,30 @@ impl AcquisitionWriter {
         let paths = (1..=self.sealed.len())
             .map(|index| segment_path(&self.first, index))
             .collect::<Result<Vec<_>>>()?;
+        let stored_bytes = self
+            .sealed
+            .iter()
+            .try_fold(0_u64, |total, seal| total.checked_add(seal.size))
+            .ok_or_else(|| EwfError::Malformed("acquisition stored-size overflow".into()))?;
+        let mut progress = operation_progress(
+            AcquisitionOperationPhase::ValidatingSegments,
+            stored_bytes,
+            self.sealed.len(),
+        );
+        checkpoint::notify(progress, &mut on_progress)?;
+        for (index, seal) in self.sealed.iter().enumerate() {
+            seal.validate_with_progress(
+                &staged_path(&self.first, &self.state, index + 1)?,
+                &mut progress,
+                &mut on_progress,
+            )?;
+        }
+        let mut progress = operation_progress(
+            AcquisitionOperationPhase::Publishing,
+            stored_bytes,
+            self.sealed.len(),
+        );
+        checkpoint::notify(progress, &mut on_progress)?;
         let publishing = self.state.join("publishing");
         if !publishing.try_exists()? {
             ensure_output_absent(&self.first)?;
@@ -355,14 +391,23 @@ impl AcquisitionWriter {
         }
         for (index, (path, seal)) in paths.iter().zip(&self.sealed).enumerate() {
             let staged = staged_path(&self.first, &self.state, index + 1)?;
-            seal.validate(&staged)?;
             match fs::hard_link(staged, path) {
                 Ok(()) => (),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    seal.validate(path)?;
+                    // Existing links can result from interrupted publication.
+                    // Revalidate their contents without counting the bytes twice.
+                    let mut validation = operation_progress(
+                        AcquisitionOperationPhase::ValidatingSegments,
+                        seal.size,
+                        1,
+                    );
+                    seal.validate_with_progress(path, &mut validation, &mut on_progress)?;
                 }
                 Err(error) => return Err(error.into()),
             }
+            progress.bytes_processed += seal.size;
+            progress.segments_processed += 1;
+            checkpoint::notify(progress, &mut on_progress)?;
             #[cfg(test)]
             tests::crash_at("linked", index + 1);
         }
@@ -440,6 +485,25 @@ impl AcquisitionWriter {
         let index = self.sealed.len() + 1;
         let target = staged_path(&self.first, &self.state, index)?;
         let mut options = self.options.clone();
+        let sector_size = u64::from(options.bytes_per_sector);
+        let end_sector = (self.offset - self.pending.len() as u64) / sector_size;
+        options.acquisition_errors = self
+            .errors
+            .iter()
+            .filter_map(|range| {
+                // libewf replaces its error table when a later segment carries
+                // error2. Keep each sealed prefix independently resumable and
+                // make the last table describe the entire acquired prefix.
+                let start = range.first_sector;
+                let end = (range.first_sector + range.sector_count).min(end_sector);
+                (start < end).then(|| AcquisitionError {
+                    first_sector: start,
+                    sector_count: end - start,
+                })
+            })
+            .collect();
+        let mut sections = Ewf1SegmentSections::for_segment(index == 1, final_segment);
+        sections.bits |= Ewf1SegmentSections::ERRORS;
         if final_segment {
             let (md5, sha1, sha256) = self.hashes.clone().finalize();
             options.hashes = effective_write_hashes(&options.hashes, md5, sha1, sha256)?;
@@ -456,7 +520,7 @@ impl AcquisitionWriter {
                     .map_err(|_| EwfError::Unsupported("too many acquisition segments".into()))?,
                 chunk_count: self.source_size.div_ceil(self.chunk_size as u64) as u32,
                 sector_count: self.source_size / u64::from(options.bytes_per_sector),
-                sections: Ewf1SegmentSections::for_segment(index == 1, final_segment),
+                sections,
                 terminal_section: if final_segment {
                     TerminalSection::Done
                 } else {
@@ -507,6 +571,37 @@ impl AcquisitionWriter {
     }
 }
 
+fn normalize_errors(
+    errors: &[AcquisitionError],
+    bytes: u64,
+    sector_size: u32,
+) -> Result<Vec<AcquisitionError>> {
+    let mut errors = errors.to_vec();
+    errors.sort_unstable_by_key(|range| range.first_sector);
+    let mut normalized: Vec<AcquisitionError> = Vec::new();
+    for range in errors {
+        let end = range
+            .first_sector
+            .checked_add(range.sector_count)
+            .filter(|end| *end <= bytes / u64::from(sector_size))
+            .ok_or_else(|| {
+                EwfError::Malformed("acquisition error range exceeds checkpoint".into())
+            })?;
+        if range.sector_count == 0 {
+            return Err(EwfError::Malformed("empty acquisition error range".into()));
+        }
+        if let Some(previous) = normalized.last_mut()
+            && range.first_sector <= previous.first_sector + previous.sector_count
+        {
+            previous.sector_count =
+                end.max(previous.first_sector + previous.sector_count) - previous.first_sector;
+        } else {
+            normalized.push(range);
+        }
+    }
+    Ok(normalized)
+}
+
 impl Write for AcquisitionWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let result = self.append(bytes);
@@ -541,15 +636,38 @@ impl Seal {
         })
     }
 
-    fn validate(&self, path: &Path) -> Result<()> {
+    fn validate_with_progress(
+        &self,
+        path: &Path,
+        progress: &mut AcquisitionOperationProgress,
+        callback: &mut impl FnMut(AcquisitionOperationProgress) -> ControlFlow<()>,
+    ) -> Result<()> {
         let metadata = fs::symlink_metadata(path)?;
         require_file_type(&metadata)?;
-        if metadata.len() != self.size || file_digest(path)? != self.digest {
+        if metadata.len() != self.size {
             return Err(EwfError::Malformed(
                 "sealed acquisition segment changed".into(),
             ));
         }
-        Ok(())
+        let mut file = File::open(path)?;
+        let mut hash = Sha256::new();
+        let mut buffer = [0; 16 * 1024];
+        let mut remaining = self.size;
+        while remaining > 0 {
+            let take = remaining.min(buffer.len() as u64) as usize;
+            file.read_exact(&mut buffer[..take])?;
+            hash.update(&buffer[..take]);
+            remaining -= take as u64;
+            progress.bytes_processed += take as u64;
+            checkpoint::notify(*progress, callback)?;
+        }
+        if <[u8; 32]>::from(hash.finalize()) != self.digest {
+            return Err(EwfError::Malformed(
+                "sealed acquisition segment changed".into(),
+            ));
+        }
+        progress.segments_processed += 1;
+        checkpoint::notify(*progress, callback)
     }
 }
 

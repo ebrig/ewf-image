@@ -416,6 +416,77 @@ fn external_writer_range_sections_match_ewfinfo() -> Result<(), Box<dyn Error>> 
 
 #[test]
 #[ignore = "requires ewfexport, ewfinfo, and ewfverify"]
+fn external_acquisition_bad_sectors_match_ewf_tools() -> Result<(), Box<dyn Error>> {
+    use std::io::{Cursor, Seek, SeekFrom};
+    use std::ops::ControlFlow;
+
+    struct DamagedSource(Cursor<Vec<u8>>);
+    const BAD: [u64; 5] = [1, 7, 13, 14, 21];
+    impl Read for DamagedSource {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            let start = self.0.position();
+            let end = start + bytes.len() as u64;
+            if BAD
+                .iter()
+                .any(|sector| sector * 512 < end && (sector + 1) * 512 > start)
+            {
+                return Err(std::io::Error::other("simulated unreadable sector"));
+            }
+            self.0.read(bytes)
+        }
+    }
+    impl Seek for DamagedSource {
+        fn seek(&mut self, offset: SeekFrom) -> std::io::Result<u64> {
+            self.0.seek(offset)
+        }
+    }
+    let tools = EwfToolchain::from_env();
+    for compression in [
+        ewf_image::WriteCompression::None,
+        ewf_image::WriteCompression::Zlib,
+    ] {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("bad-sectors.E01");
+        let mut expected = patterned_data(24 * 512);
+        let mut source = DamagedSource(Cursor::new(expected.clone()));
+        let mut options = ewf_image::AcquisitionOptions::new(expected.len() as u64);
+        options.sectors_per_chunk = 2;
+        options.chunks_per_segment = 3;
+        options.compression = compression;
+        let read_options = ewf_image::AcquisitionReadOptions {
+            unreadable_sector_policy: ewf_image::UnreadableSectorPolicy::ZeroFill,
+            ..ewf_image::AcquisitionReadOptions::default()
+        };
+        let identity = [0x31; 32];
+        let mut writer = ewf_image::AcquisitionWriter::create(&path, &options, identity)?;
+        let outcome = writer.acquire_with_progress(&mut source, &read_options, |progress| {
+            if progress.checkpoint_bytes >= 12 * 512 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })?;
+        assert_eq!(outcome.status, ewf_image::AcquisitionStatus::Cancelled);
+        drop(writer);
+        let checkpoint =
+            ewf_image::AcquisitionWriter::inspect_checkpoint(&path, &options, identity)?;
+        assert_eq!(checkpoint.substituted_sectors, 2);
+        let mut writer = ewf_image::AcquisitionWriter::resume(&path, &options, identity)?;
+        let outcome = writer.acquire_from(&mut source, &read_options)?;
+        assert_eq!(outcome.progress.substituted_sectors, 5);
+        writer.finish()?;
+        for sector in BAD {
+            expected[sector as usize * 512..(sector as usize + 1) * 512].fill(0);
+        }
+        compare_ewfexport_bytes(&tools.ewfexport, &path, &expected)?;
+        compare_with_ewfinfo(&tools.ewfinfo, &path)?;
+        verify_with_ewfverify(&tools.ewfverify, &path)?;
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires ewfexport, ewfinfo, and ewfverify"]
 fn external_streaming_acquisition_matches_ewf_tools() -> Result<(), Box<dyn Error>> {
     let tools = EwfToolchain::from_env();
     let data = patterned_data(11 * 32_768 + 512);

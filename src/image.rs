@@ -616,6 +616,7 @@ impl Image {
                     parsed.format_profile,
                     parsed.format_profile_hint_only,
                 )?;
+                merge_acquisition_errors(&mut acquisition_errors, parsed.acquisition_errors)?;
                 memory_extents.extend(parsed.memory_extents);
                 merge_single_files(&mut single_files, parsed.single_files)?;
                 merge_single_files_aux_tables(
@@ -4237,6 +4238,34 @@ fn apply_detected_ewf1_format_profile(
     }
     *target = detected;
     true
+}
+
+fn merge_acquisition_errors(
+    target: &mut Vec<AcquisitionError>,
+    source: Vec<AcquisitionError>,
+) -> Result<()> {
+    if source.is_empty() {
+        return Ok(());
+    }
+    target.extend(source);
+    target.sort_unstable_by_key(|range| range.first_sector);
+    let mut merged: Vec<AcquisitionError> = Vec::with_capacity(target.len());
+    for range in target.drain(..) {
+        let end = range
+            .first_sector
+            .checked_add(range.sector_count)
+            .ok_or_else(|| EwfError::Malformed("acquisition error range overflow".into()))?;
+        if let Some(previous) = merged.last_mut()
+            && range.first_sector <= previous.first_sector + previous.sector_count
+        {
+            previous.sector_count =
+                end.max(previous.first_sector + previous.sector_count) - previous.first_sector;
+        } else {
+            merged.push(range);
+        }
+    }
+    *target = merged;
+    Ok(())
 }
 
 fn merge_single_files(

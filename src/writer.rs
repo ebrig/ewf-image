@@ -33,7 +33,11 @@ use crate::types::{
 use crate::{EwfError, Result};
 
 mod acquisition;
-pub use acquisition::{AcquisitionOptions, AcquisitionWriter};
+pub use acquisition::{
+    AcquisitionCheckpoint, AcquisitionOperationPhase, AcquisitionOperationProgress,
+    AcquisitionOptions, AcquisitionOutcome, AcquisitionProgress, AcquisitionReadOptions,
+    AcquisitionStatus, AcquisitionWriter, UnreadableSectorPolicy,
+};
 
 const VOLUME_DATA_SIZE: usize = 1052;
 const EWF1_LTREE_HEADER_SIZE: usize = 48;
