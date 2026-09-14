@@ -17,6 +17,9 @@ use super::{
 use crate::publication::{OutputLock, acquisition_path, sync_dir};
 use crate::{EwfError, EwfMetadata, Image, Result};
 
+#[cfg(test)]
+mod tests;
+
 /// Configuration for a new, single-destination physical E01 acquisition.
 /// The source size must be known, nonzero, and a multiple of the sector size.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +115,8 @@ pub struct AcquisitionWriter {
     hashes: WriteHashState,
     sealed: Vec<Seal>,
     failed: bool,
+    #[cfg(test)]
+    fail_seal: bool,
     _lock: OutputLock,
 }
 
@@ -239,9 +244,13 @@ impl AcquisitionWriter {
         // may be discarded. Sealed segments and their records stay immutable.
         if previous < options.source_size {
             let unsealed = staged_path(&first, &state, count + 1)?;
-            if let Ok(metadata) = fs::symlink_metadata(&unsealed) {
-                require_file_type(&metadata)?;
-                fs::remove_file(unsealed)?;
+            match fs::symlink_metadata(&unsealed) {
+                Ok(metadata) => {
+                    require_file_type(&metadata)?;
+                    fs::remove_file(unsealed)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => return Err(error.into()),
             }
         }
         for entry in fs::read_dir(state.join("scratch"))? {
@@ -278,11 +287,13 @@ impl AcquisitionWriter {
             chunks_per_segment: acquisition.chunks_per_segment as usize,
             offset: 0,
             pending: Vec::with_capacity(chunk_size),
-            chunks: Vec::new(),
+            chunks: Vec::with_capacity(acquisition.chunks_per_segment as usize),
             spool: Some(spool),
             hashes: WriteHashState::new(),
             sealed: Vec::new(),
             failed: false,
+            #[cfg(test)]
+            fail_seal: false,
             _lock: lock,
         })
     }
@@ -316,7 +327,9 @@ impl AcquisitionWriter {
 
     /// Completes and publishes the exact declared source, including MD5, SHA1,
     /// and SHA256 references. Too little input is an error, never an implicit pad.
-    /// A publication error preserves checkpoints for `resume(...).finish()`.
+    /// Before journal retirement, a publication error preserves checkpoints for
+    /// `resume(...).finish()`. A cleanup failure after retirement can leave an
+    /// already completed image; open the image to check that outcome.
     pub fn finish(mut self) -> Result<WriteResult> {
         self.ensure_healthy()?;
         if self.checkpoint_offset() != self.source_size {
@@ -333,6 +346,8 @@ impl AcquisitionWriter {
             atomic_file(&self.state.join("scratch"), &publishing, &[])?;
             sync_dir(&self.state)?;
         }
+        #[cfg(test)]
+        tests::crash_at("publishing", 0);
         if publication_segment_paths(&paths, false)?.len() != paths.len() {
             return Err(EwfError::Malformed(
                 "unexpected acquisition output segments".into(),
@@ -348,8 +363,12 @@ impl AcquisitionWriter {
                 }
                 Err(error) => return Err(error.into()),
             }
+            #[cfg(test)]
+            tests::crash_at("linked", index + 1);
         }
         sync_dir(crate::segment::segment_dir(&self.first))?;
+        #[cfg(test)]
+        tests::crash_at("published", 0);
         // Retire the entire journal atomically. Interruption during deletion
         // leaves only inert cleanup files, never a half-deleted live checkpoint.
         drop(self.spool.take());
@@ -358,6 +377,8 @@ impl AcquisitionWriter {
             .tempdir_in(crate::segment::segment_dir(&self.first))?;
         fs::rename(&self.state, cleanup.path().join("retired"))?;
         sync_dir(crate::segment::segment_dir(&self.first))?;
+        #[cfg(test)]
+        tests::crash_at("retired", 0);
         cleanup.close()?;
         let (_, _, computed_sha256) = self.hashes.finalize();
         Ok(WriteResult {
@@ -444,12 +465,25 @@ impl AcquisitionWriter {
             },
         )?;
         segment.as_file().sync_all()?;
+        #[cfg(test)]
+        {
+            tests::crash_at("segment-synced", index);
+            if self.fail_seal {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "injected acquisition storage failure",
+                )
+                .into());
+            }
+        }
         let size = segment.as_file().metadata()?.len();
         let digest = file_digest(segment.path())?;
         segment
             .persist_noclobber(&target)
             .map_err(|error| error.error)?;
         sync_dir(&self.state)?;
+        #[cfg(test)]
+        tests::crash_at("segment-installed", index);
         let seal = Seal {
             end: self.offset - self.pending.len() as u64,
             size,
@@ -460,7 +494,11 @@ impl AcquisitionWriter {
             &checkpoint_path(&self.state, index),
             &seal.bytes(),
         )?;
+        #[cfg(test)]
+        tests::crash_at("record-installed", index);
         sync_dir(&self.state)?;
+        #[cfg(test)]
+        tests::crash_at("checkpoint-synced", index);
         self.sealed.push(seal);
         self.chunks.clear();
         spool.file.as_file_mut().set_len(0)?;

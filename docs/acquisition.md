@@ -8,28 +8,31 @@ resume.
 
 ```rust,no_run
 use std::fs::File;
-use std::io::{Seek, SeekFrom};
 use ewf_image::{AcquisitionOptions, AcquisitionWriter};
 
-# fn main() -> ewf_image::Result<()> {
-let mut source = File::open("disk.raw")?;
-let options = AcquisitionOptions::new(source.metadata()?.len());
-// Obtain this from the acquisition application's stable source identity.
-// It must change if the source snapshot changes; this is not a source hash check.
-let identity = [0x51; 32];
-let mut writer = AcquisitionWriter::create("case.E01", &options, identity)?;
-std::io::copy(&mut source, &mut writer)?;
-writer.finish()?;
+fn main() -> ewf_image::Result<()> {
+    let mut source = File::open("disk.raw")?;
+    let options = AcquisitionOptions::new(source.metadata()?.len());
+    // Obtain this from the acquisition application's stable source identity.
+    // It must change if the source snapshot changes; this is not a source hash check.
+    let identity = [0x51; 32];
+    let mut writer = AcquisitionWriter::create("case.E01", &options, identity)?;
+    std::io::copy(&mut source, &mut writer)?;
+    writer.finish()?;
 
-// After an interruption, use the same options and identity instead of create:
-# if false {
+    Ok(())
+}
+```
+
+After an interruption, reopen the source and reconstruct the same options and
+identity, then use:
+
+```rust
+use std::io::{Seek, SeekFrom};
 let mut writer = AcquisitionWriter::resume("case.E01", &options, identity)?;
 source.seek(SeekFrom::Start(writer.checkpoint_offset()))?;
 std::io::copy(&mut source, &mut writer)?;
 writer.finish()?;
-# }
-# Ok(())
-# }
 ```
 
 ## Checkpoints and resource use

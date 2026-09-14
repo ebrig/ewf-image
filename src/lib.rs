@@ -104,6 +104,30 @@
 //! }
 //! ```
 //!
+//! # Streaming acquisition
+//!
+//! [`AcquisitionWriter`] seals physical E01 segments as input arrives and can
+//! resume sealed checkpoints without rewriting them. It requires a known,
+//! sector-aligned source size and a filesystem supporting hard links.
+//!
+//! ```no_run
+//! use std::fs::File;
+//! use std::io::{Seek, SeekFrom};
+//! use ewf_image::{AcquisitionOptions, AcquisitionWriter};
+//!
+//! fn continue_acquisition(source_identity: [u8; 32]) -> ewf_image::Result<()> {
+//!     let mut input = File::open("disk.raw")?;
+//!     let options = AcquisitionOptions::new(input.metadata()?.len());
+//!     // Use create instead of resume for the first acquisition session.
+//!     // The caller must bind source_identity to a stable source snapshot.
+//!     let mut writer = AcquisitionWriter::resume("case.E01", &options, source_identity)?;
+//!     input.seek(SeekFrom::Start(writer.checkpoint_offset()))?;
+//!     std::io::copy(&mut input, &mut writer)?;
+//!     writer.finish()?;
+//!     Ok(())
+//! }
+//! ```
+//!
 //! # Feature flags
 //!
 //! - `verify` is enabled by default and adds `Image::verify()` plus

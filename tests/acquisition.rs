@@ -49,6 +49,27 @@ fn check_image(path: &Path, expected: &[u8]) {
 }
 
 #[test]
+fn streaming_segment_names_cross_the_numeric_extension_boundary() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("case.E01");
+    let bytes = data(104 * 512);
+    let mut options = AcquisitionOptions::new(bytes.len() as u64);
+    options.sectors_per_chunk = 1;
+    options.chunks_per_segment = 1;
+    let mut writer = AcquisitionWriter::create(&path, &options, IDENTITY).unwrap();
+    writer.write_all(&bytes[..100 * 512]).unwrap();
+    drop(writer);
+    let mut writer = AcquisitionWriter::resume(&path, &options, IDENTITY).unwrap();
+    writer.write_all(&bytes[100 * 512..]).unwrap();
+    let result = writer.finish().unwrap();
+    assert_eq!(result.segment_paths.len(), 104);
+    assert_eq!(result.segment_paths[98].extension().unwrap(), "E99");
+    assert_eq!(result.segment_paths[99].extension().unwrap(), "EAA");
+    assert_eq!(result.segment_paths[103].extension().unwrap(), "EAE");
+    check_image(&path, &bytes);
+}
+
+#[test]
 fn streaming_boundaries_and_final_short_chunk() {
     for compression in [WriteCompression::None, WriteCompression::Zlib] {
         for size in [512, 1024, 3072, 3584, 12 * 1024] {

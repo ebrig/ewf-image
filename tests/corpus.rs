@@ -416,6 +416,42 @@ fn external_writer_range_sections_match_ewfinfo() -> Result<(), Box<dyn Error>> 
 
 #[test]
 #[ignore = "requires ewfexport, ewfinfo, and ewfverify"]
+fn external_streaming_acquisition_matches_ewf_tools() -> Result<(), Box<dyn Error>> {
+    let tools = EwfToolchain::from_env();
+    let data = patterned_data(11 * 32_768 + 512);
+    for compression in [
+        ewf_image::WriteCompression::None,
+        ewf_image::WriteCompression::Zlib,
+    ] {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("acquired.E01");
+        let mut options = ewf_image::AcquisitionOptions::new(data.len() as u64);
+        options.chunks_per_segment = 3;
+        options.compression = compression;
+        options
+            .metadata
+            .set_header_value("case_number", "streamed-resume-oracle");
+        let identity = [0x35; 32];
+        let mut writer = ewf_image::AcquisitionWriter::create(&path, &options, identity)?;
+        writer.write_all(&data[..4 * 32_768 + 137])?;
+        assert_eq!(writer.checkpoint()?, 4 * 32_768);
+        drop(writer);
+        let mut writer = ewf_image::AcquisitionWriter::resume(&path, &options, identity)?;
+        writer.write_all(&data[writer.checkpoint_offset() as usize..])?;
+        let result = writer.finish()?;
+        assert_eq!(
+            result.computed_sha256,
+            <[u8; 32]>::from(Sha256::digest(&data))
+        );
+        compare_ewfexport_bytes(&tools.ewfexport, &path, &data)?;
+        compare_with_ewfinfo(&tools.ewfinfo, &path)?;
+        verify_with_ewfverify(&tools.ewfverify, &path)?;
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires ewfexport, ewfinfo, and ewfverify"]
 fn external_writer_resumed_output_matches_ewf_tools() -> Result<(), Box<dyn Error>> {
     let ewfexport = env::var_os("EWFEXPORT").unwrap_or_else(|| OsString::from("ewfexport"));
     let ewfinfo = env::var_os("EWFINFO").unwrap_or_else(|| OsString::from("ewfinfo"));
