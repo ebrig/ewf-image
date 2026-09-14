@@ -112,8 +112,8 @@
 //!
 //! ```no_run
 //! use std::fs::File;
-//! use std::io::{Seek, SeekFrom};
-//! use ewf_image::{AcquisitionOptions, AcquisitionWriter};
+//! use std::ops::ControlFlow;
+//! use ewf_image::{AcquisitionOptions, AcquisitionReadOptions, AcquisitionStatus, AcquisitionWriter};
 //!
 //! fn continue_acquisition(source_identity: [u8; 32]) -> ewf_image::Result<()> {
 //!     let mut input = File::open("disk.raw")?;
@@ -121,9 +121,16 @@
 //!     // Use create instead of resume for the first acquisition session.
 //!     // The caller must bind source_identity to a stable source snapshot.
 //!     let mut writer = AcquisitionWriter::resume("case.E01", &options, source_identity)?;
-//!     input.seek(SeekFrom::Start(writer.checkpoint_offset()))?;
-//!     std::io::copy(&mut input, &mut writer)?;
-//!     writer.finish()?;
+//!     let outcome = writer.acquire_with_progress(
+//!         &mut input, &AcquisitionReadOptions::default(), |progress| {
+//!             println!("{} accepted; {} checkpointed", progress.bytes_written, progress.checkpoint_bytes);
+//!             // Return Break(()) when the application's cancellation flag is set.
+//!             ControlFlow::Continue(())
+//!         }
+//!     )?;
+//!     if outcome.status == AcquisitionStatus::Complete {
+//!         writer.finish()?;
+//!     }
 //!     Ok(())
 //! }
 //! ```

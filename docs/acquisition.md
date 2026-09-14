@@ -35,6 +35,105 @@ std::io::copy(&mut source, &mut writer)?;
 writer.finish()?;
 ```
 
+## Source reads, progress, and cancellation
+
+For a caller-opened file or seekable device handle, use `acquire_from` or
+`acquire_with_progress`. These methods seek to the writer's accepted offset on
+every read attempt, including after resume; callers do not need to position the
+source themselves. Device opening, privileges, source-size discovery, and stable
+source identification remain the application's responsibility.
+
+```rust
+use std::ops::ControlFlow;
+use ewf_image::{AcquisitionReadOptions, AcquisitionStatus, UnreadableSectorPolicy};
+
+let read_options = AcquisitionReadOptions {
+    retries: 2,
+    unreadable_sector_policy: UnreadableSectorPolicy::Stop,
+    checkpoint_interval: Some(64 * 1024 * 1024),
+    ..AcquisitionReadOptions::default()
+};
+let outcome = writer.acquire_with_progress(&mut source, &read_options, |progress| {
+    eprintln!("{} accepted; {} checkpointed; {} substituted sectors",
+        progress.bytes_written, progress.checkpoint_bytes,
+        progress.substituted_sectors);
+    // Return ControlFlow::Break(()) when the application's stop flag is set.
+    ControlFlow::Continue(())
+})?;
+if outcome.status == AcquisitionStatus::Complete {
+    writer.finish()?;
+}
+```
+
+Normal reads are chunk-sized. A failed bulk read is discarded, then retried one
+sector at a time to isolate damaged sectors. `retries` is the number of additional
+attempts per sector (0 through 100); the initial bulk failure does not consume that
+allowance. Short successful reads are completed before any bytes from the attempt
+enter the image. Progress includes read/retry counts for the current call, the
+current read offset and error kind, total accepted/checkpointed bytes, and the
+cumulative substituted-sector count.
+
+The default policy stops on an unreadable sector. `ZeroFill` must be selected
+explicitly: it substitutes exactly one sector and records its location. EOF,
+failed seeks, permission/configuration failures, and interrupted or nonblocking
+reads always stop; these conditions are never padded to the declared source
+size. Error-range storage is bounded by `maximum_error_ranges` (65,536 by
+default); reaching the limit stops before another disjoint substitution. Adjacent
+substitutions share a range. EWF1 error tables use 32-bit sector addresses;
+substitution stops if a failed sector cannot be represented.
+
+`Complete` means the declared output range is filled, possibly with substitutions.
+It does not mean every source sector was successfully read. `acquisition_errors()`
+exposes those ranges, including accepted but unsealed substitutions. Each sealed
+segment carries a cumulative native EWF `error2` table; the final table describes
+all substituted sectors and is compatible with libewf. Resume restores only the
+sealed ranges. Media hashes describe the bytes actually written, including zeros;
+a successful hash verification does not prove that substituted source data was
+recovered. Per-attempt error messages and retry counts are not persisted.
+
+A callback returning `Break(())` stops between source I/O operations, checkpoints
+complete accepted chunks, and returns `Cancelled`. A partial chunk remains in the
+live writer; continue with it, or drop it and resume from `checkpoint_offset()`.
+Source failures similarly checkpoint full chunks and leave the writer usable.
+Destination failures poison it. Callbacks run on the calling thread; an in-flight
+OS read, seek, or native segment seal cannot be interrupted by the callback.
+Applications can check an atomic stop flag or forward progress to their own UI.
+
+`checkpoint_interval` can force earlier seals. It must be a positive multiple of
+the chunk size and must fit the native segment-number namespace. The interval is
+measured in accepted bytes since the last checkpoint; regular segment boundaries
+still apply. Changing read policy after resume affects only new input.
+
+## Inspecting and validating a checkpoint
+
+Close the writer before calling these functions so inspection can acquire the
+output lock. Supply the original acquisition options and source identity:
+
+```rust
+let checkpoint = AcquisitionWriter::inspect_checkpoint("case.E01", &options, identity)?;
+// Metadata-only: records, segment lengths, geometry, and recorded bad-sector ranges.
+assert!(!checkpoint.segment_hashes_validated);
+let checkpoint = AcquisitionWriter::validate_checkpoint(
+    "case.E01", &options, identity, |_| std::ops::ControlFlow::Continue(())
+)?;
+assert!(checkpoint.segment_hashes_validated);
+```
+
+Inspection reports the resumable offset, sealed count/size, readiness to finish,
+whether publication started, and normalized substituted-sector ranges. It never
+cleans scratch, rewrites checkpoints, reads the source, or publishes output.
+Metadata-only inspection does not scan media payloads or certify their contents.
+Validation additionally compares each entire sealed file with its checkpointed
+SHA256; it does not decode and rehash logical media.
+
+`resume_with_progress` reports container validation and logical-media rehash
+phases. `finish_with_progress` reports validation and publication. Their callbacks
+receive `AcquisitionOperationProgress`; byte units and totals belong to the
+reported phase. Returning `Break(())` returns `EwfError::Aborted` and leaves the
+journal resumable. Even cancellation after output links have been installed is
+recoverable through resume and finish. Journal retirement is the publication
+commit point; final cleanup after that point is not cancellable.
+
 ## Checkpoints and resource use
 
 Writes encode one chunk at a time into a segment-sized scratch file. A full
@@ -50,8 +149,8 @@ eventual image; the source is never spooled in full.
 successfully sealed input. `checkpoint()` and `Write::flush()` seal complete
 chunks early, but retain a partial chunk in memory. The last chunk is sealed
 automatically when the exact source size is reached. `finish()` rejects short
-input, and writes reject excess input. Errors poison the writer; drop it and
-resume before supplying more data.
+input, and writes reject excess input. Errors from the low-level `Write` API
+poison the writer; drop it and resume before supplying more data.
 
 Resume checks the configuration, caller-supplied source identity, checkpoint
 records, and the full SHA256 of every sealed container segment. It then decodes
@@ -81,6 +180,6 @@ inert `.ewf-acquisition-init-*` directories.
 
 Files are flushed before checkpoints are acknowledged. Unix also flushes
 directory entries. Windows power-loss durability, network filesystems, and
-devices that disregard flushes are not certified. This API does not acquire
-devices itself, retry bad sectors, add error ranges, seek, replace an existing
+devices that disregard flushes are not certified. This API does not open
+device handles itself, perform positioned output writes, replace an existing
 image, mirror targets, or resume arbitrary E01 files from other producers.
