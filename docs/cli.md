@@ -21,7 +21,7 @@ Existing images and CLI session manifests are never overwritten.
 Windows physical disks (`\\.\PhysicalDriveN`) and Linux block devices (`/dev/sdX`,
 partitions, or device-mapper paths) can also be opened read-only. Geometry is
 discovered; an explicit sector size must agree with it. The source must expose a
-stable hardware identifier. Device IDs and geometry are checked before resume,
+stable hardware or loop-backing identifier. Device IDs and geometry are checked before resume,
 after opening, after a failed read, and after acquisition. The CLI does not
 elevate privileges, lock/dismount volumes, or freeze a live filesystem. Use a
 stable, appropriately write-protected source.
@@ -47,9 +47,10 @@ virtual-storage relationships are outside that check. Network destinations and
 unresolved storage layouts are unsupported for device acquisition. File sources
 can use any destination supported by the writer.
 
-Platform discovery and conflict logic have fixture tests; physical-device,
-hot-unplug, and hardware write-blocker behavior still need hardware acceptance
-testing. The CLI does not make a power-loss durability claim.
+Linux loop/DM acquisition, isolated kernel read errors, and real filesystem-full
+recovery have passed the [virtual-device suite](device-acceptance.md). Windows
+VHDX execution, physical hot-unplug, and hardware write-blocker behavior remain
+acceptance gaps. The CLI does not make a power-loss durability claim.
 
 `acquire` automatically reopens the published image, decodes all media, and
 compares its hashes with embedded references and the acquisition SHA256.
