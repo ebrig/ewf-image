@@ -12,6 +12,59 @@ use tempfile::tempdir;
 
 const IDENTITY: [u8; 32] = [0x51; 32];
 
+#[test]
+fn zlib_writers_bound_incompressible_chunks_and_resume_mixed_encodings() {
+    let mut bytes = Vec::new();
+    for counter in 0_u32..8192 {
+        bytes.extend_from_slice(&Sha256::digest(counter.to_le_bytes()));
+    }
+    bytes.resize(524_288, 0);
+    bytes.extend_from_within(..4096);
+    for streaming in [false, true] {
+        let root = tempdir().unwrap();
+        let path = root.path().join("mixed.E01");
+        if streaming {
+            let options = AcquisitionOptions {
+                bytes_per_sector: 4096,
+                sectors_per_chunk: 64,
+                chunks_per_segment: 1,
+                compression: WriteCompression::Zlib,
+                ..AcquisitionOptions::new(bytes.len() as u64)
+            };
+            let mut writer = AcquisitionWriter::create(&path, &options, IDENTITY).unwrap();
+            writer.write_all(&bytes[..262_144]).unwrap();
+            drop(writer);
+            let mut writer = AcquisitionWriter::resume(&path, &options, IDENTITY).unwrap();
+            writer.write_all(&bytes[262_144..]).unwrap();
+            writer.finish().unwrap();
+        } else {
+            let options = WriteOptions {
+                bytes_per_sector: 4096,
+                sectors_per_chunk: 64,
+                compression: WriteCompression::Zlib,
+                ..WriteOptions::default()
+            };
+            let mut writer = EwfWriter::create(&path, options).unwrap();
+            writer.write_all(&bytes).unwrap();
+            writer.finish().unwrap();
+        }
+        check_image(&path, &bytes);
+        let image = Image::open(&path).unwrap();
+        for (index, encoding) in [
+            ewf_image::DataChunkEncoding::Raw,
+            ewf_image::DataChunkEncoding::Zlib,
+            ewf_image::DataChunkEncoding::Raw,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let chunk = image.read_data_chunk(index as u64).unwrap();
+            assert_eq!(chunk.encoding, encoding);
+            assert!(chunk.encoded_size <= chunk.logical_size as u64 + 4);
+        }
+    }
+}
+
 fn options(size: usize, compression: WriteCompression) -> AcquisitionOptions {
     AcquisitionOptions {
         sectors_per_chunk: 2,

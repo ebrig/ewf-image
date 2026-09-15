@@ -4432,8 +4432,22 @@ fn encode_chunk(
             let mut encoder =
                 ZlibEncoder::new(Vec::new(), zlib_compression(compression_values.level));
             encoder.write_all(&chunk)?;
+            let bytes = encoder.finish()?;
+            // EWF consumers allocate roughly one media chunk plus its checksum.
+            // Deflate can expand incompressible data, especially with large
+            // chunks. Store those chunks raw with the ordinary Adler checksum.
+            if bytes.len() >= chunk.len() {
+                return encode_chunk(
+                    chunk,
+                    WriteCompression::None,
+                    compression_values,
+                    chunk_size,
+                    false,
+                    false,
+                );
+            }
             Ok(EncodedChunk {
-                bytes: encoder.finish()?,
+                bytes,
                 compressed: true,
                 has_checksum: false,
                 pattern_fill: None,

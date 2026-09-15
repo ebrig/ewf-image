@@ -350,9 +350,22 @@ fn cli_handles_real_interrupt_and_termination_signals() {
 fn external_cli_resumed_acquisition_matches_libewf() {
     let export = std::env::var_os("EWFEXPORT").expect("set EWFEXPORT to pinned ewfexport");
     let verify = std::env::var_os("EWFVERIFY").expect("set EWFVERIFY to pinned ewfverify");
-    for compression in ["raw", "zlib"] {
+    for (compression, sector_size) in [
+        ("raw", "512"),
+        ("zlib", "512"),
+        ("raw", "4096"),
+        ("zlib", "4096"),
+    ] {
         let dir = tempfile::tempdir().unwrap();
-        let bytes = source(dir.path());
+        // Include incompressible full chunks, compressible chunks and a short
+        // final chunk. Repetitive fixtures alone miss expanding zlib frames.
+        let mut bytes = Vec::new();
+        for counter in 0_u32..8192 {
+            bytes.extend_from_slice(&Sha256::digest(counter.to_le_bytes()));
+        }
+        bytes.resize(524_288, 0);
+        bytes.extend_from_within(..4096);
+        fs::write(dir.path().join("source.raw"), &bytes).unwrap();
         result(
             dir.path(),
             &[
@@ -361,8 +374,10 @@ fn external_cli_resumed_acquisition_matches_libewf() {
                 "case.E01",
                 "--compression",
                 compression,
+                "--sector-size",
+                sector_size,
                 "--sectors-per-chunk",
-                "2",
+                "64",
                 "--chunks-per-segment",
                 "3",
                 "--stop-after",
