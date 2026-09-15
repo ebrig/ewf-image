@@ -145,6 +145,9 @@ impl Read for Source {
                 // Disconnection is not an unreadable sector. Recheck device
                 // presence/identity before allowing the sector substitution policy.
                 if self.identity.kind == SourceKind::Device {
+                    if disconnected(&error) {
+                        return Err(io::Error::new(io::ErrorKind::NotConnected, error));
+                    }
                     self.check_unchanged()
                         .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e.to_string()))?;
                 }
@@ -153,6 +156,18 @@ impl Read for Source {
             result => result,
         }
     }
+}
+
+fn disconnected(error: &io::Error) -> bool {
+    #[cfg(windows)]
+    return matches!(error.raw_os_error(), Some(6 | 21 | 55 | 1110 | 1112 | 1167));
+    #[cfg(target_os = "linux")]
+    return matches!(error.raw_os_error(), Some(6 | 19)); // ENXIO / ENODEV
+    #[cfg(not(any(windows, target_os = "linux")))]
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotConnected | io::ErrorKind::NotFound
+    )
 }
 
 impl Seek for Source {
@@ -204,4 +219,26 @@ fn metadata_identity(metadata: &fs::Metadata) -> Result<String> {
     // The digest is a metadata identity token, not a hash of source content.
     identity = super::hex(&Sha256::digest(identity.as_bytes()));
     Ok(identity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unplug_errors_are_distinct_from_media_errors() {
+        #[cfg(windows)]
+        {
+            for code in [6, 21, 55, 1110, 1112, 1167] {
+                assert!(disconnected(&io::Error::from_raw_os_error(code)));
+            }
+            assert!(!disconnected(&io::Error::from_raw_os_error(23))); // ERROR_CRC
+        }
+        #[cfg(target_os = "linux")]
+        {
+            assert!(disconnected(&io::Error::from_raw_os_error(6)));
+            assert!(disconnected(&io::Error::from_raw_os_error(19)));
+            assert!(!disconnected(&io::Error::from_raw_os_error(5))); // EIO
+        }
+    }
 }

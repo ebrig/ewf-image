@@ -283,13 +283,7 @@ fn acquire(
     report["accepted_bytes"] = json!(writer.position());
     report["checkpoint_bytes"] = json!(writer.checkpoint_offset());
     report["acquisition_errors"] = error_ranges(writer.acquisition_errors());
-    report["substituted_sectors"] = json!(
-        writer
-            .acquisition_errors()
-            .iter()
-            .map(|r| r.sector_count)
-            .sum::<u64>()
-    );
+    report["substituted_sectors"] = json!(substituted_sectors(writer.acquisition_errors())?);
     let outcome = result?;
     source.check_unchanged()?;
     if outcome.status == AcquisitionStatus::Cancelled {
@@ -336,11 +330,7 @@ fn verify(
         "sha256": hex(&verified.hashes.sha256), "references_match": verified.references_match(),
         "comparisons": verified.comparisons});
     report["acquisition_errors"] = error_ranges(image.acquisition_errors());
-    let substituted = image
-        .acquisition_errors()
-        .iter()
-        .map(|r| r.sector_count)
-        .sum::<u64>();
+    let substituted = substituted_sectors(image.acquisition_errors())?;
     report["substituted_sectors"] = json!(substituted);
     if verified.references_match() != Some(true) {
         return Err(invalid(
@@ -357,6 +347,14 @@ fn verify(
 
 fn error_ranges(errors: &[ewf_image::AcquisitionError]) -> Value {
     json!(errors.iter().map(|range| json!({"first_sector": range.first_sector, "sector_count": range.sector_count})).collect::<Vec<_>>())
+}
+
+fn substituted_sectors(errors: &[ewf_image::AcquisitionError]) -> Result<u64> {
+    errors.iter().try_fold(0u64, |total, range| {
+        total
+            .checked_add(range.sector_count)
+            .ok_or_else(|| invalid("acquisition-error sector count overflow"))
+    })
 }
 
 fn sidecar(output: &Path, suffix: &str) -> PathBuf {
