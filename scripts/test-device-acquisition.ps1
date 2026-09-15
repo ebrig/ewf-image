@@ -70,7 +70,9 @@ function Get-OwnedDisk([string]$Image) {
     $vhd = Get-VHD -Path $Image
     if (-not $vhd.Attached -or $vhd.DiskNumber -eq $null) { throw 'Owned image is not attached' }
     $disk = Get-Disk -Number $vhd.DiskNumber
-    if ($disk.Size -ne $size -or [uint16]$disk.BusType -ne 15 -or $disk.IsBoot -or $disk.IsSystem) {
+    # PowerShell 7's Windows compatibility session can deserialize BusType as
+    # its display name; native Storage CIM objects may expose the numeric value.
+    if ($disk.Size -ne $size -or [string]$disk.BusType -notin @('File Backed Virtual', '15') -or $disk.IsBoot -or $disk.IsSystem) {
         throw 'Refusing operation on a disk that is not the expected owned VHD'
     }
     return $disk
