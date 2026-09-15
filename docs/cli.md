@@ -28,12 +28,20 @@ stable, appropriately write-protected source.
 
 Windows uses the installed PowerShell Storage cmdlets (`Get-Disk`, `Get-Volume`,
 and `Get-Partition`) with a static script and separately passed path values.
-Linux uses sysfs geometry and WWID/serial/DM UUID metadata. Missing identifiers
+Linux uses sysfs geometry and WWID/serial/DM UUID metadata; loop devices use the
+backing file identity and mapping geometry. The opened Linux handle is checked
+against the named device and kernel-reported size/sector size. Missing identifiers
 or unresolved destination storage cause preflight failure. Source paths/device
 numbers must remain stable across resume.
 
+Device reads use a 4096-byte-aligned bounce buffer with Linux `O_DIRECT` or
+Windows `FILE_FLAG_NO_BUFFERING`. Sector-sized retries bypass buffered block
+reads that can spread a single bad-sector error to neighboring sectors.
+
 Device acquisition rejects destinations on the source disk. Linux also checks
-partition parents and stacked-device slaves for shared backing storage. Windows
+partition parents, stacked-device slaves, and loop backing-file aliases. A loop
+source can share a host filesystem with a separate output file; it does not
+represent every sector of that host disk. Windows
 checks the disk IDs exposed by Storage cmdlets; hidden controller, SAN, and
 virtual-storage relationships are outside that check. Network destinations and
 unresolved storage layouts are unsupported for device acquisition. File sources

@@ -39,7 +39,13 @@ pub(super) struct Source {
     file: File,
     pub identity: SourceIdentity,
     output: PathBuf,
+    device_buffer: Option<Box<DeviceBuffer>>,
 }
+
+// Safe aligned bounce storage for uncached device I/O. Do not reinterpret a
+// Vec allocation: its alignment is only guaranteed for its element type.
+#[repr(align(4096))]
+struct DeviceBuffer([u8; 16384]);
 
 impl Source {
     pub fn open(path: &Path, sector_size: Option<u32>, output: &Path) -> Result<Self> {
@@ -93,6 +99,7 @@ impl Source {
             file,
             identity,
             output: output.to_path_buf(),
+            device_buffer: None,
         })
     }
 
@@ -112,11 +119,12 @@ impl Source {
         {
             return Err(invalid("unsupported device geometry"));
         }
-        let file = File::open(path)?; // Read-only: never request source write access.
+        let file = open_device_file(path)?; // Read-only: never request source write access.
         let source = Self {
             file,
             identity,
             output: output.to_path_buf(),
+            device_buffer: Some(Box::new(DeviceBuffer([0; 16384]))),
         };
         source.check_unchanged()?;
         Ok(source)
@@ -124,6 +132,8 @@ impl Source {
 
     pub fn check_unchanged(&self) -> Result<()> {
         if self.identity.kind == SourceKind::Device {
+            #[cfg(target_os = "linux")]
+            linux::validate_handle(&self.file, &self.identity)?;
             if device_identity(&self.identity.path, &self.output)? != self.identity {
                 return Err(invalid("device identity or geometry changed"));
             }
@@ -140,7 +150,21 @@ impl Source {
 
 impl Read for Source {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        match self.file.read(buffer) {
+        let result = if let Some(aligned) = &mut self.device_buffer {
+            let length = buffer.len().min(aligned.0.len());
+            if !length.is_multiple_of(self.identity.sector_size as usize) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unaligned device read length",
+                ));
+            }
+            self.file.read(&mut aligned.0[..length]).inspect(|&count| {
+                buffer[..count].copy_from_slice(&aligned.0[..count]);
+            })
+        } else {
+            self.file.read(buffer)
+        };
+        match result {
             Err(error) => {
                 // Disconnection is not an unreadable sector. Recheck device
                 // presence/identity before allowing the sector substitution policy.
@@ -156,6 +180,23 @@ impl Read for Source {
             result => result,
         }
     }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn open_device_file(path: &Path) -> io::Result<File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(rustix::fs::OFlags::DIRECT.bits() as i32);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x2000_0000); // FILE_FLAG_NO_BUFFERING
+    }
+    options.open(path)
 }
 
 fn disconnected(error: &io::Error) -> bool {
@@ -224,6 +265,29 @@ fn metadata_identity(metadata: &fs::Metadata) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn uncached_reads_use_aligned_bounce_storage() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("source.raw");
+        fs::write(&path, vec![0x71; 32768]).unwrap();
+        let mut source = Source::open(&path, Some(512), &root.path().join("out.E01")).unwrap();
+        source.file = open_device_file(&path).unwrap();
+        source.device_buffer = Some(Box::new(DeviceBuffer([0; 16384])));
+        assert_eq!(
+            source.device_buffer.as_ref().unwrap().0.as_ptr() as usize % 4096,
+            0
+        );
+        // An unaligned caller buffer remains usable through the bounce buffer.
+        let mut caller = [0; 1025];
+        assert_eq!(source.read(&mut caller[1..]).unwrap(), 1024);
+        assert_eq!(&caller[1..], &[0x71; 1024]);
+        assert_eq!(
+            source.read(&mut caller).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
 
     #[test]
     fn unplug_errors_are_distinct_from_media_errors() {
