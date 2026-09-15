@@ -92,6 +92,8 @@ failure. Argument errors and help follow normal command-line conventions.
 The report has `schema_version: 1`; additive fields may appear in that version.
 It includes status, phase, elapsed time, accepted/checkpointed bytes when known,
 publication status, acquisition-error ranges, and verification results.
+Acquisition error ranges on a paused/failed run describe accepted input, which
+may include an unsealed tail; checkpoint inspection reports only sealed ranges.
 `published: false` means this invocation has not confirmed publication; a failed
 finish may still need recovery to resolve publication state.
 
