@@ -75,7 +75,7 @@ cumulative substituted-sector count.
 
 The default policy stops on an unreadable sector. `ZeroFill` must be selected
 explicitly: it substitutes exactly one sector and records its location. EOF,
-failed seeks, permission/configuration failures, and interrupted or nonblocking
+failed seeks, permission/configuration failures, timeouts, and interrupted or nonblocking
 reads always stop; these conditions are never padded to the declared source
 size. Error-range storage is bounded by `maximum_error_ranges` (65,536 by
 default); reaching the limit stops before another disjoint substitution. Adjacent

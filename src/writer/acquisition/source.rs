@@ -11,7 +11,7 @@ pub enum UnreadableSectorPolicy {
     #[default]
     Stop,
     /// Write a zero sector and record an acquisition-error range in the EWF.
-    /// EOF, seek, permission, configuration, and interrupted-operation errors
+    /// EOF, seek, permission, configuration, timeout, and interrupted-operation errors
     /// always stop; they are never converted to apparently acquired data.
     ZeroFill,
 }
@@ -364,6 +364,7 @@ fn recoverable(error: &io::Error) -> bool {
             | io::ErrorKind::Unsupported
             | io::ErrorKind::NotFound
             | io::ErrorKind::Interrupted
+            | io::ErrorKind::TimedOut
             | io::ErrorKind::WouldBlock
             | io::ErrorKind::NotConnected
             | io::ErrorKind::ConnectionAborted

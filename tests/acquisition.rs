@@ -729,6 +729,7 @@ fn fatal_source_errors_and_invalid_controls_never_substitute_data() {
         (false, std::io::ErrorKind::PermissionDenied),
         (false, std::io::ErrorKind::UnexpectedEof),
         (false, std::io::ErrorKind::Interrupted),
+        (false, std::io::ErrorKind::TimedOut),
         (false, std::io::ErrorKind::InvalidInput),
         (false, std::io::ErrorKind::Unsupported),
         (false, std::io::ErrorKind::NotFound),
