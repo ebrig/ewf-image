@@ -61,7 +61,7 @@ verify = []
 parallel = ["verify", "dep:rayon"]
 serde = ["dep:serde"]
 external-fixtures = []
-cli = ["verify", "serde", "dep:clap", "dep:ctrlc", "dep:serde_json", "dep:rustix"]
+cli = ["verify", "serde", "dep:clap", "dep:ctrlc", "dep:serde_json", "dep:rustix", "dep:windows-sys"]
 
 [dependencies]
 aes = "0.9"
@@ -87,6 +87,9 @@ zeroize = { version = "1.9", features = ["derive"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1", features = ["fs"], optional = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl"], optional = true }
+
 [dev-dependencies]
 serde_json = "1"
 
@@ -94,7 +97,7 @@ serde_json = "1"
 all-features = true
 
 [lints.rust]
-unsafe_code = { level = "forbid", priority = 1 }
+unsafe_code = { level = "deny", priority = 1 }
 warnings = "deny"
 missing_docs = "deny"
 future_incompatible = { level = "deny", priority = -1 }

@@ -26,13 +26,18 @@ after opening, after a failed read, and after acquisition. The CLI does not
 elevate privileges, lock/dismount volumes, or freeze a live filesystem. Use a
 stable, appropriately write-protected source.
 
-Windows uses the installed PowerShell Storage cmdlets (`Get-Disk`, `Get-Volume`,
-and `Get-Partition`) with a static script and separately passed path values.
+Windows queries the exact opened source handle for device number, size, sector
+size, and device-associated storage identifiers (falling back to a device serial).
+It uses native volume queries for destination disk extents; acquisition no longer
+requires PowerShell or the Storage module.
 Linux uses sysfs geometry and WWID/serial/DM UUID metadata; loop devices use the
 backing file identity and mapping geometry. The opened Linux handle is checked
 against the named device and kernel-reported size/sector size. Missing identifiers
 or unresolved destination storage cause preflight failure. Source paths/device
-numbers must remain stable across resume.
+numbers must remain stable across resume. Windows device checkpoints created by
+the earlier PowerShell adapter use a different identity token and are rejected
+by this adapter; complete those sessions with the original binary. File-source
+and Linux checkpoint identities are unchanged.
 
 Device reads use a 4096-byte-aligned bounce buffer with Linux `O_DIRECT` or
 Windows `FILE_FLAG_NO_BUFFERING`. Sector-sized retries bypass buffered block
@@ -41,16 +46,17 @@ reads that can spread a single bad-sector error to neighboring sectors.
 Device acquisition rejects destinations on the source disk. Linux also checks
 partition parents, stacked-device slaves, and loop backing-file aliases. A loop
 source can share a host filesystem with a separate output file; it does not
-represent every sector of that host disk. Windows
-checks the disk IDs exposed by Storage cmdlets; hidden controller, SAN, and
-virtual-storage relationships are outside that check. Network destinations and
+represent every sector of that host disk. Windows checks every disk extent
+reported for the destination volume; hidden controller, SAN, and virtual-storage
+relationships are outside that check. Network destinations and
 unresolved storage layouts are unsupported for device acquisition. File sources
 can use any destination supported by the writer.
 
 Linux loop/DM acquisition, isolated kernel read errors, and real filesystem-full
-recovery have passed the [virtual-device suite](device-acceptance.md). Windows
-VHDX execution, physical hot-unplug, and hardware write-blocker behavior remain
-acceptance gaps. The CLI does not make a power-loss durability claim.
+recovery have passed the [virtual-device suite](device-acceptance.md), as have
+Windows VHDX acquisition/resume and mounted-folder overlap checks. Physical
+hot-unplug and hardware write-blocker behavior remain acceptance gaps. The CLI
+does not make a power-loss durability claim.
 
 `acquire` automatically reopens the published image, decodes all media, and
 compares its hashes with embedded references and the acquisition SHA256.
@@ -120,7 +126,6 @@ report. Choose a new report path outside the source and image set: the shell
 opens redirections before the program can check them. Manifests and reports can
 contain case metadata and local source paths; handle them with the evidence.
 
-Platform references: [Windows Get-Disk](https://learn.microsoft.com/en-us/powershell/module/storage/get-disk),
-[Get-Volume](https://learn.microsoft.com/en-us/powershell/module/storage/get-volume),
-[Get-Partition](https://learn.microsoft.com/en-us/powershell/module/storage/get-partition),
+Platform references: [Windows storage properties](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_storage_query_property),
+[volume disk extents](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_volume_get_volume_disk_extents),
 and [Linux sysfs block ABI](https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-block).

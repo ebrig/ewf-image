@@ -105,7 +105,8 @@ impl Source {
 
     #[cfg(any(target_os = "linux", windows))]
     fn open_device(path: &Path, sector_size: Option<u32>, output: &Path) -> Result<Self> {
-        let identity = device_identity(path, output)?;
+        let file = open_device_file(path)?; // Read-only: never request source write access.
+        let identity = device_identity(&file, path, output)?;
         if sector_size.is_some_and(|size| size != identity.sector_size) {
             return Err(invalid(
                 "sector-size override disagrees with device geometry",
@@ -119,7 +120,6 @@ impl Source {
         {
             return Err(invalid("unsupported device geometry"));
         }
-        let file = open_device_file(path)?; // Read-only: never request source write access.
         let source = Self {
             file,
             identity,
@@ -134,7 +134,7 @@ impl Source {
         if self.identity.kind == SourceKind::Device {
             #[cfg(target_os = "linux")]
             linux::validate_handle(&self.file, &self.identity)?;
-            if device_identity(&self.identity.path, &self.output)? != self.identity {
+            if device_identity(&self.file, &self.identity.path, &self.output)? != self.identity {
                 return Err(invalid("device identity or geometry changed"));
             }
             return Ok(());
@@ -201,7 +201,10 @@ fn open_device_file(path: &Path) -> io::Result<File> {
 
 fn disconnected(error: &io::Error) -> bool {
     #[cfg(windows)]
-    return matches!(error.raw_os_error(), Some(6 | 21 | 55 | 1110 | 1112 | 1167));
+    return matches!(
+        error.raw_os_error(),
+        Some(6 | 21 | 55 | 433 | 1110 | 1112 | 1167)
+    );
     #[cfg(target_os = "linux")]
     return matches!(error.raw_os_error(), Some(6 | 19)); // ENXIO / ENODEV
     #[cfg(not(any(windows, target_os = "linux")))]
@@ -217,14 +220,17 @@ impl Seek for Source {
     }
 }
 
-fn device_identity(path: &Path, output: &Path) -> Result<SourceIdentity> {
+fn device_identity(file: &File, path: &Path, output: &Path) -> Result<SourceIdentity> {
     #[cfg(windows)]
-    return windows::identity(path, output);
+    return windows::identity(file, path, output);
     #[cfg(target_os = "linux")]
-    return linux::identity(path, output);
+    {
+        let _ = file;
+        linux::identity(path, output)
+    }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
-        let _ = (path, output);
+        let _ = (file, path, output);
         Err(invalid(
             "device acquisition is supported on Windows and Linux",
         ))
@@ -293,7 +299,7 @@ mod tests {
     fn unplug_errors_are_distinct_from_media_errors() {
         #[cfg(windows)]
         {
-            for code in [6, 21, 55, 1110, 1112, 1167] {
+            for code in [6, 21, 55, 433, 1110, 1112, 1167] {
                 assert!(disconnected(&io::Error::from_raw_os_error(code)));
             }
             assert!(!disconnected(&io::Error::from_raw_os_error(23))); // ERROR_CRC

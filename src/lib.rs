@@ -3,8 +3,8 @@
 //! `ewf_image` provides direct Rust APIs for working with Expert Witness Format
 //! images. It can open physical, logical, SMART, and EWF2 segment families,
 //! expose metadata and stored hashes, read the logical media stream, walk
-//! logical single-file catalogs, and create EWF output. CLI and mount layers
-//! are not currently implemented.
+//! logical single-file catalogs, and create EWF output. An optional acquisition
+//! CLI is available; a filesystem mount layer is not currently implemented.
 //!
 //! # Terminology
 //!
@@ -163,6 +163,8 @@
 //! detected and rejected, and encrypted writing is not implemented.
 //! Secondary/shadow target mirroring is supported by the file-backed writer.
 //! Base-plus-overlay delta/shadow images are not implemented.
+
+#![forbid(unsafe_code)]
 
 mod codepage;
 mod date_time;
