@@ -54,7 +54,8 @@ can use any destination supported by the writer.
 
 Linux loop/DM acquisition, isolated kernel read errors, and real filesystem-full
 recovery have passed the [virtual-device suite](device-acceptance.md), as have
-Windows VHDX acquisition/resume and mounted-folder overlap checks. Physical
+Windows VHDX acquisition/resume, active virtual-device removal without zero
+substitution, mounted-folder overlap checks, and real NTFS-full recovery. Physical
 hot-unplug and hardware write-blocker behavior remain acceptance gaps. The CLI
 does not make a power-loss durability claim.
 
