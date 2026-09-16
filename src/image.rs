@@ -521,7 +521,7 @@ impl Image {
                     .transpose()?;
                 let parsed = parse_segment(
                     file.as_mut(),
-                    path,
+                    &paths[0],
                     segment_index,
                     Ewf1SegmentContext {
                         first_chunk: next_ewf1_chunk,
@@ -2843,7 +2843,7 @@ fn ewf1_format_profile_hint_from_path(path: &Path) -> FormatProfile {
 
 fn parse_segment(
     file: &mut dyn SegmentReader,
-    path: &Path,
+    first_path: &Path,
     segment_index: usize,
     ewf1_context: Ewf1SegmentContext,
     strictness: OpenStrictness,
@@ -2859,7 +2859,10 @@ fn parse_segment(
             segment_index,
             ewf1_context.first_chunk,
             ewf1_context.inherited_media_geometry,
-            ewf1_format_profile_hint_from_path(path),
+            // Extensions advance EZZ -> FAA (and can eventually reach Sxx).
+            // Family hints belong to the first segment, never the continuation
+            // name. Explicit metadata in each segment is still checked below.
+            ewf1_format_profile_hint_from_path(first_path),
             header_codepage,
             statistics,
         )

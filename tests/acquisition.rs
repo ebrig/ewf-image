@@ -102,23 +102,25 @@ fn check_image(path: &Path, expected: &[u8]) {
 }
 
 #[test]
-fn streaming_segment_names_cross_the_numeric_extension_boundary() {
+fn streaming_segment_names_cross_numeric_and_prefix_boundaries() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("case.E01");
-    let bytes = data(104 * 512);
+    let bytes = data(780 * 512);
     let mut options = AcquisitionOptions::new(bytes.len() as u64);
     options.sectors_per_chunk = 1;
     options.chunks_per_segment = 1;
     let mut writer = AcquisitionWriter::create(&path, &options, IDENTITY).unwrap();
-    writer.write_all(&bytes[..100 * 512]).unwrap();
+    writer.write_all(&bytes[..776 * 512]).unwrap();
     drop(writer);
     let mut writer = AcquisitionWriter::resume(&path, &options, IDENTITY).unwrap();
-    writer.write_all(&bytes[100 * 512..]).unwrap();
+    writer.write_all(&bytes[776 * 512..]).unwrap();
     let result = writer.finish().unwrap();
-    assert_eq!(result.segment_paths.len(), 104);
+    assert_eq!(result.segment_paths.len(), 780);
     assert_eq!(result.segment_paths[98].extension().unwrap(), "E99");
     assert_eq!(result.segment_paths[99].extension().unwrap(), "EAA");
     assert_eq!(result.segment_paths[103].extension().unwrap(), "EAE");
+    assert_eq!(result.segment_paths[774].extension().unwrap(), "EZZ");
+    assert_eq!(result.segment_paths[775].extension().unwrap(), "FAA");
     check_image(&path, &bytes);
 }
 
