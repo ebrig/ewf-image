@@ -11,6 +11,7 @@ ewf-image checkpoint inspect case.E01
 ewf-image checkpoint validate case.E01
 ewf-image verify case.E01
 ewf-image info case.E01
+ewf-image analyze case.E01 --maximum-findings 1024
 ewf-image export case.E01 disk.raw
 ewf-image report case.E01
 ewf-image report case.E01 --write
@@ -26,6 +27,20 @@ is null, even when inspection succeeds. Use `verify` for a full media check.
 Legacy password headers and raw metadata sections are omitted. Encrypted images
 are detected, but the CLI currently has no password input; inspection exits 1
 with the encryption flag and open error when metadata cannot be opened.
+
+## Integrity analysis
+
+`analyze IMAGE` scans media and compares redundant tables, continuing after
+individual chunk failures. Its `analysis` object reports complete, incomplete,
+or unavailable coverage, findings, counts, and reference comparisons. Incomplete
+scans never report whole-media hashes. Structural open failures become a finding
+with unavailable coverage; analysis does not carve a broken descriptor chain.
+`--maximum-findings` bounds retained findings (default 1024, maximum 100000),
+while total and suppressed counts still cover the scan. Missing reference
+hashes and recorded acquisition errors are warnings. Exit 3 indicates error
+findings, exit 4 warnings only, and exit 0 no findings. Filesystem/operational
+errors exit 1. Cancellation exits 130 with progress but no completed analysis;
+opening and redundant-table inspection precede cancellable media progress.
 
 ## Strict raw export
 
@@ -231,8 +246,8 @@ finish may still need recovery to resolve publication state.
 | 0 | Acquisition/verification, inspection, history, checkpoint, or export succeeded |
 | 1 | Operational failure or result-output failure |
 | 2 | Invalid command-line arguments |
-| 3 | `verify` failed (including missing references), or export found a stored-digest mismatch |
-| 4 | Acquisition/verification/export succeeded with recorded substituted sectors |
+| 3 | `verify` failed, export found a stored-digest mismatch, or analysis found errors |
+| 4 | Acquisition/verification/export succeeded with substitutions, or analysis found only warnings |
 | 130 | Cancelled, including a requested `--stop-after` pause |
 
 For example, `ewf-image acquire disk.raw case.E01 > result.json` retains the

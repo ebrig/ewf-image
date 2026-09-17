@@ -226,7 +226,7 @@ pub use writer::{
 #[cfg(feature = "verify")]
 pub use integrity::{
     IntegrityFinding, IntegrityFindingKind, IntegrityReport, IntegritySeverity, MediaScanStatus,
-    analyze_path, analyze_path_with_password,
+    analyze_path, analyze_path_with_password, analyze_path_with_progress,
 };
 #[cfg(feature = "verify")]
 pub use types::VerifyResult;

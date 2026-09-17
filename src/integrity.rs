@@ -167,6 +167,26 @@ pub fn analyze_path(path: impl AsRef<Path>, options: &VerifyOptions) -> Result<I
     analyze_open_result(Image::open(path), options)
 }
 
+/// Opens strictly and analyzes with cooperative media-scan cancellation.
+///
+/// Opening and redundant-table inspection precede media progress. Retains at
+/// most 16 segment handles and disables the decoded chunk cache. Structural
+/// opening failures become findings, as with [`analyze_path`].
+pub fn analyze_path_with_progress(
+    path: impl AsRef<Path>,
+    options: &VerifyOptions,
+    progress: impl FnMut(VerifyProgress) -> ControlFlow<()>,
+) -> Result<IntegrityReport> {
+    options.validate()?;
+    let opened = Image::open_with_options(
+        path,
+        crate::OpenOptions::default()
+            .with_chunk_cache_size(0)
+            .with_maximum_open_handles(Some(16)),
+    );
+    analyze_open_with_progress(opened, options, progress)
+}
+
 /// Password-aware counterpart to [`analyze_path`]. Password failures are reported
 /// without exposing password or key material.
 pub fn analyze_path_with_password(
@@ -179,8 +199,16 @@ pub fn analyze_path_with_password(
 }
 
 fn analyze_open_result(opened: Result<Image>, options: &VerifyOptions) -> Result<IntegrityReport> {
+    analyze_open_with_progress(opened, options, |_| ControlFlow::Continue(()))
+}
+
+fn analyze_open_with_progress(
+    opened: Result<Image>,
+    options: &VerifyOptions,
+    progress: impl FnMut(VerifyProgress) -> ControlFlow<()>,
+) -> Result<IntegrityReport> {
     match opened {
-        Ok(image) => image.analyze(options),
+        Ok(image) => image.analyze_with_progress(options, progress),
         Err(error) => {
             let kind = match &error {
                 EwfError::Malformed(_) | EwfError::BufferTooShort { .. } => {
@@ -261,12 +289,15 @@ impl Image {
                 limit,
             );
         }
-        if self.md5_hash().is_none() && self.sha1_hash().is_none() {
+        if self.md5_hash().is_none()
+            && self.sha1_hash().is_none()
+            && self.hash_value("SHA256").is_none()
+        {
             report.push(
                 finding(
                     IntegrityFindingKind::MissingStoredHashes,
                     IntegritySeverity::Warning,
-                    "no embedded MD5 or SHA1 reference is available",
+                    "no embedded MD5, SHA1, or SHA256 reference is available",
                 ),
                 limit,
             );

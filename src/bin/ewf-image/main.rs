@@ -1,5 +1,6 @@
 //! Command-line acquisition, checkpoint inspection, and media verification.
 
+mod analyze;
 mod export;
 mod history;
 mod inspect;
@@ -42,6 +43,13 @@ struct Cli {
 enum Command {
     /// Inspect image metadata without verifying media contents.
     Info { image: PathBuf },
+    /// Scan integrity findings and media coverage, continuing after chunk errors.
+    Analyze {
+        image: PathBuf,
+        /// Maximum retained findings; all findings are still counted.
+        #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(0..=100000))]
+        maximum_findings: u32,
+    },
     /// Export the complete, strictly decoded media stream to a new raw file.
     Export { image: PathBuf, output: PathBuf },
     /// Acquire a source, publish its E01 segments, then reopen and verify them.
@@ -154,10 +162,12 @@ fn main() -> ExitCode {
     } else {
         match report["status"].as_str() {
             Some("cancelled") => 130,
+            Some("analysis_findings") => 3,
             Some(
                 "complete_with_substitutions"
                 | "verified_with_substitutions"
-                | "exported_with_substitutions",
+                | "exported_with_substitutions"
+                | "analysis_warnings",
             ) => 4,
             _ => 0,
         }
@@ -198,6 +208,10 @@ fn run(
     let mut progress = Progress::new(cli.quiet, stop);
     match &cli.command {
         Command::Info { image } => inspect::info(image, report),
+        Command::Analyze {
+            image,
+            maximum_findings,
+        } => analyze::run(image, *maximum_findings as usize, &mut progress, report),
         Command::Export { image, output } => export::run(image, output, &mut progress, report),
         Command::Acquire(args) => {
             let output = session::normalize_output(&args.output)?;

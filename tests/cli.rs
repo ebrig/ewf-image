@@ -126,6 +126,69 @@ fn assert_no_export_temporary(directory: &Path) {
 }
 
 #[test]
+fn cli_analysis_continues_after_corruption_and_bounds_findings() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = vec![0x57; 32768 * 3];
+    export_fixture(dir.path(), &bytes, ewf_image::WriteOptions::default());
+    let good = result(dir.path(), &["analyze", "case.E01"], 0);
+    assert_eq!(good["analysis"]["hashes"]["sha256"], hash(&bytes));
+    assert_eq!(good["analysis"]["references_match"], true);
+    let path = dir.path().join("case.E01");
+    let image = Image::open(&path).unwrap();
+    let offset = image
+        .sections()
+        .iter()
+        .find(|s| s.kind == ewf_image::SectionKind::Ewf1("sectors".into()))
+        .unwrap()
+        .data_offset as usize;
+    drop(image);
+    let mut encoded = fs::read(&path).unwrap();
+    encoded[offset] ^= 1;
+    encoded[offset + 32768 + 4] ^= 1;
+    fs::write(path, encoded).unwrap();
+    let report = result(
+        dir.path(),
+        &["analyze", "case.E01", "--maximum-findings", "1"],
+        3,
+    );
+    assert_eq!(report["status"], "analysis_findings");
+    assert_eq!(report["analysis"]["media_status"], "Incomplete");
+    assert_eq!(report["analysis"]["bytes_verified"], 32768);
+    assert_eq!(report["bytes_processed"], bytes.len());
+    assert_eq!(report["analysis"]["error_count"], 2);
+    assert_eq!(report["analysis"]["suppressed_findings"], 1);
+    assert_eq!(report["analysis"]["findings"].as_array().unwrap().len(), 1);
+    assert!(report["analysis"]["hashes"].is_null());
+    assert!(report["analysis"]["references_match"].is_null());
+    assert_eq!(report["media_verified"], false);
+}
+
+#[test]
+fn cli_analysis_reports_structural_failures_and_warnings_distinctly() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("bad.E01"), b"not an image").unwrap();
+    let bad = result(dir.path(), &["analyze", "bad.E01"], 3);
+    assert_eq!(bad["analysis"]["media_status"], "Unavailable");
+    assert_eq!(bad["analysis"]["error_count"], 1);
+    result(dir.path(), &["analyze", "missing.E01"], 1);
+    export_fixture(
+        dir.path(),
+        &[0; 1024],
+        ewf_image::WriteOptions {
+            acquisition_errors: vec![ewf_image::AcquisitionError {
+                first_sector: 0,
+                sector_count: 1,
+            }],
+            ..ewf_image::WriteOptions::default()
+        },
+    );
+    let report = result(dir.path(), &["analyze", "case.E01"], 4);
+    assert_eq!(report["status"], "analysis_warnings");
+    assert_eq!(report["analysis"]["warning_count"], 1);
+    assert_eq!(report["analysis"]["media_status"], "Complete");
+}
+
+#[test]
 fn cli_export_streams_formats_split_segments_and_partial_final_chunks() {
     use ewf_image::{WriteCompression as C, WriteFormat as F, WriteOptions};
     let bytes: Vec<_> = (0_u32..3073)

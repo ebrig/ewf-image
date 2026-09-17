@@ -206,6 +206,70 @@ fn no_reference_is_distinct_from_a_match() {
 }
 
 #[test]
+fn sha256_only_analysis_has_a_reference_and_path_progress_can_cancel() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sha256.E01");
+    let mut options = WriteOptions::default();
+    options
+        .hashes
+        .set_hash_value(
+            "SHA256",
+            Sha256::digest([0; 512])
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+        )
+        .unwrap();
+    let mut writer = EwfWriter::create(&path, options).unwrap();
+    writer.write_all(&[0; 512]).unwrap();
+    writer.finish().unwrap();
+    let image = Image::open(&path).unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    for section in image.sections().iter().filter(
+        |s| matches!(&s.kind, SectionKind::Ewf1(name) if name == "hash" || name == "digest"),
+    ) {
+        let offset = section.descriptor_offset as usize;
+        bytes[offset..offset + 16].fill(0);
+        bytes[offset..offset + 7].copy_from_slice(b"unknown");
+        bytes[offset + 72..offset + 76].fill(0);
+    }
+    let xhash = image
+        .sections()
+        .iter()
+        .find(|s| s.kind == SectionKind::Ewf1("xhash".into()))
+        .unwrap();
+    let xml = format!(
+        "<xhash><SHA256>{}</SHA256></xhash>",
+        image.hash_value("SHA256").unwrap()
+    );
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    encoder.write_all(xml.as_bytes()).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let start = xhash.data_offset as usize;
+    let end = start + xhash.data_size as usize;
+    assert!(compressed.len() <= end - start);
+    bytes[start..end].fill(0);
+    bytes[start..start + compressed.len()].copy_from_slice(&compressed);
+    drop(image);
+    std::fs::write(&path, bytes).unwrap();
+    let image = Image::open(&path).unwrap();
+    assert!(image.md5_hash().is_none() && image.sha1_hash().is_none());
+    let report = ewf_image::analyze_path_with_progress(&path, &VerifyOptions::default(), |_| {
+        ControlFlow::Continue(())
+    })
+    .unwrap();
+    assert_eq!(report.warning_count, 0);
+    assert_eq!(report.comparisons.len(), 1);
+    assert!(report.comparisons[0].matches);
+    assert!(matches!(
+        ewf_image::analyze_path_with_progress(path, &VerifyOptions::default(), |_| {
+            ControlFlow::Break(())
+        }),
+        Err(EwfError::Aborted)
+    ));
+}
+
+#[test]
 fn structural_failure_has_unavailable_coverage_even_when_findings_are_suppressed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bad.E01");
