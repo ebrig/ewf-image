@@ -1,5 +1,6 @@
 //! Command-line acquisition, checkpoint inspection, and media verification.
 
+mod history;
 mod session;
 mod source;
 
@@ -52,6 +53,13 @@ enum Command {
     },
     /// Reopen an image and verify all media bytes and supported stored hashes.
     Verify { image: PathBuf },
+    /// Read recorded acquisition history without opening or verifying the image.
+    Report {
+        output: PathBuf,
+        /// Rebuild the saved consolidated report from committed history records.
+        #[arg(long)]
+        write: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -112,13 +120,15 @@ fn main() -> ExitCode {
     let mut report = json!({"schema_version": 1, "tool_version": env!("CARGO_PKG_VERSION"),
         "status": "failed", "phase": "preflight", "published": false,
         "verification": null, "checkpoint_bytes": 0, "accepted_bytes": 0});
+    let mut history = None;
     let result = ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed))
         .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
-        .and_then(|()| run(&cli, &stop, &mut report));
-    let code = if let Err(error) = result {
+        .and_then(|()| run(&cli, &stop, &mut report, &mut history));
+    let mut code = if let Err(error) = result {
         let aborted = error
             .downcast_ref::<EwfError>()
-            .is_some_and(|e| matches!(e, EwfError::Aborted));
+            .is_some_and(|e| matches!(e, EwfError::Aborted))
+            && history.as_ref().is_none_or(|h| h.failure.is_none());
         let verification = report["phase"] == "verification";
         report["status"] = json!(if aborted {
             "cancelled"
@@ -144,6 +154,21 @@ fn main() -> ExitCode {
     };
     report["exit_code"] = json!(code);
     report["elapsed_seconds"] = json!(started.elapsed().as_secs_f64());
+    if let Some(history) = &mut history
+        && let Err(error) = history.finish(&report)
+    {
+        report["acquisition_status"] = report["status"].clone();
+        report["acquisition_exit_code"] = json!(code);
+        report["history_error"] = json!(error.to_string());
+        if report["error"].is_null() {
+            report["error"] = json!(format!(
+                "cannot persist acquisition history/report: {error}"
+            ));
+        }
+        report["status"] = json!("reporting_failed");
+        code = 1;
+        report["exit_code"] = json!(code);
+    }
     if let Err(error) = serde_json::to_writer_pretty(io::stdout().lock(), &report)
         .map_err(io::Error::other)
         .and_then(|()| writeln!(io::stdout().lock()))
@@ -154,7 +179,12 @@ fn main() -> ExitCode {
     ExitCode::from(code)
 }
 
-fn run(cli: &Cli, stop: &Arc<AtomicBool>, report: &mut Value) -> Result<()> {
+fn run(
+    cli: &Cli,
+    stop: &Arc<AtomicBool>,
+    report: &mut Value,
+    audit: &mut Option<history::History>,
+) -> Result<()> {
     let mut progress = Progress::new(cli.quiet, stop);
     match &cli.command {
         Command::Acquire(args) => {
@@ -164,13 +194,18 @@ fn run(cli: &Cli, stop: &Arc<AtomicBool>, report: &mut Value) -> Result<()> {
                 Arc::clone(stop),
                 args.read.read_timeout_ms.map(Duration::from_millis),
             )?;
-            let _lock = session::lock(&output)?;
+            let lock = session::lock(&output)?;
             let session = Session::new(output, source.identity.clone(), args);
             let options = session.options()?;
             let identity = session.source.fingerprint()?;
             // Persist the reconstruction contract before creating any journal.
             // A crash here leaves a manifest that resume can initialize safely.
             session.save()?;
+            *audit = Some(history::History::open(&session, lock, true)?);
+            let history = audit.as_mut().expect("history initialized");
+            history.start("acquire", &args.read)?;
+            report["history_path"] = json!(sidecar(&session.output, "ewf-history"));
+            report["report_path"] = json!(sidecar(&session.output, "ewf-report.json"));
             let writer = AcquisitionWriter::create(&session.output, &options, identity)?;
             acquire(
                 writer,
@@ -179,11 +214,18 @@ fn run(cli: &Cli, stop: &Arc<AtomicBool>, report: &mut Value) -> Result<()> {
                 &args.read,
                 &mut progress,
                 report,
+                history,
             )
         }
         Command::Resume { output, read } => {
             let output = session::normalize_output(output)?;
             let session = Session::load(&output)?;
+            let lock = session::lock(&output)?;
+            *audit = Some(history::History::open(&session, lock, false)?);
+            let history = audit.as_mut().expect("history initialized");
+            history.start("resume", read)?;
+            report["history_path"] = json!(sidecar(&output, "ewf-history"));
+            report["report_path"] = json!(sidecar(&output, "ewf-report.json"));
             let mut source = Source::open(
                 &session.source.path,
                 Some(session.source.sector_size),
@@ -198,12 +240,14 @@ fn run(cli: &Cli, stop: &Arc<AtomicBool>, report: &mut Value) -> Result<()> {
                     "source identity or geometry differs from the saved session",
                 ));
             }
-            let _lock = session::lock(&output)?;
             let options = session.options()?;
             let identity = session.source.fingerprint()?;
             report["phase"] = json!("resume");
             let writer = if sidecar(&output, "ewf-acquisition").try_exists()? {
                 AcquisitionWriter::resume_with_progress(&output, &options, identity, |p| {
+                    if history.phase(&format!("resume/{:?}", p.phase)).is_err() {
+                        return ControlFlow::Break(());
+                    }
                     progress.event(&format!("{:?}", p.phase), p.bytes_processed, p.bytes_total)
                 })?
             } else {
@@ -217,7 +261,15 @@ fn run(cli: &Cli, stop: &Arc<AtomicBool>, report: &mut Value) -> Result<()> {
                 }
                 AcquisitionWriter::create(&output, &options, identity)?
             };
-            acquire(writer, &mut source, &session, read, &mut progress, report)
+            acquire(
+                writer,
+                &mut source,
+                &session,
+                read,
+                &mut progress,
+                report,
+                history,
+            )
         }
         Command::Checkpoint { command } => {
             let (output, validate) = match command {
@@ -253,6 +305,15 @@ fn run(cli: &Cli, stop: &Arc<AtomicBool>, report: &mut Value) -> Result<()> {
             Ok(())
         }
         Command::Verify { image } => verify(image, None, &mut progress, report),
+        Command::Report { output, write } => {
+            let output = session::normalize_output(output)?;
+            let _lock = session::lock(&output)?;
+            let session = Session::load(&output)?;
+            report["phase"] = json!("report");
+            report["history"] = history::report(&session, *write)?;
+            report["status"] = json!("history_report");
+            Ok(())
+        }
     }
 }
 
@@ -263,6 +324,7 @@ fn acquire(
     args: &ReadArgs,
     progress: &mut Progress<'_>,
     report: &mut Value,
+    history: &mut history::History,
 ) -> Result<()> {
     report["source"] = serde_json::to_value(&session.source)?;
     report["output"] = json!(session.output);
@@ -277,11 +339,14 @@ fn acquire(
         checkpoint_interval: args.checkpoint_interval,
         ..AcquisitionReadOptions::default()
     };
-    report["read_policy"] = json!({"retries": args.retries, "zero_fill": args.zero_fill,
-        "checkpoint_interval": args.checkpoint_interval, "read_timeout_ms": args.read_timeout_ms});
+    report["read_policy"] = history::read_policy(args);
+    history.phase("acquisition")?;
     let result = writer.acquire_with_progress(source, &options, |p| {
         report["read_attempts"] = json!(p.read_attempts);
         report["retry_attempts"] = json!(p.retry_attempts);
+        if history.progress(p).is_err() {
+            return ControlFlow::Break(());
+        }
         if args
             .stop_after
             .is_some_and(|limit| p.bytes_written >= limit)
@@ -302,18 +367,41 @@ fn acquire(
             "cancelled"
         });
     }
+    // The library may seal a final checkpoint after the last callback (on a
+    // stop or source error). Record that actual offset before closing the run.
+    let _ = history.event("checkpoint", json!({
+        "accepted_bytes": report["accepted_bytes"], "checkpoint_bytes": report["checkpoint_bytes"],
+        "substituted_sectors": report["substituted_sectors"], "acquisition_errors": report["acquisition_errors"],
+        "read_attempts": report["read_attempts"], "retry_attempts": report["retry_attempts"],
+        "source_read_stop": report["source_read_stop"],
+    }));
     let outcome = result?;
+    if let Some(error) = &history.failure {
+        return Err(io::Error::other(format!("cannot record acquisition history: {error}")).into());
+    }
     if outcome.status == AcquisitionStatus::Cancelled {
         report["status"] = json!("cancelled");
         return Ok(());
     }
     source.check_unchanged()?;
     report["phase"] = json!("publication");
+    history.phase("publication")?;
     let finished = writer.finish_with_progress(|p| {
+        if history
+            .phase(&format!("publication/{:?}", p.phase))
+            .is_err()
+        {
+            return ControlFlow::Break(());
+        }
         progress.event(&format!("{:?}", p.phase), p.bytes_processed, p.bytes_total)
     })?;
     report["published"] = json!(true);
     report["segments"] = json!(finished.segment_paths);
+    history.event(
+        "published",
+        json!({"segments": report["segments"], "sha256": hex(&finished.computed_sha256)}),
+    )?;
+    history.phase("verification")?;
     verify(
         &session.output,
         Some(finished.computed_sha256),

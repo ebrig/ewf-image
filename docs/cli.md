@@ -10,6 +10,8 @@ ewf-image resume case.E01
 ewf-image checkpoint inspect case.E01
 ewf-image checkpoint validate case.E01
 ewf-image verify case.E01
+ewf-image report case.E01
+ewf-image report case.E01 --write
 ```
 
 Regular-file sources must be nonempty and sector aligned. The default
@@ -122,6 +124,50 @@ The report includes `read_policy.read_timeout_ms`; a worker stop additionally
 sets `source_read_stop` to `timeout` or `cancelled`.
 
 ## Results
+
+Acquisition and resume automatically keep `.case.E01.ewf-history/` and write
+`.case.E01.ewf-report.json`. Preserve these alongside the session manifest and
+image. History contains a session binding and immutable, sequential JSON records
+for each run's start time (Unix milliseconds), tool version, read policy, phases,
+checkpoints, read-error kinds and offsets, substituted ranges, publication, and
+closing result. Closing results include hashes and verification when available.
+Read-error records describe attempts; an error does not itself imply substitution.
+The log stores error kinds, not every driver's diagnostic message; a fatal error's
+message is included in the closing result. Failures before a new session can be
+established are reported only on stdout.
+
+Each record is written to a temporary file, flushed, and installed exclusively.
+Unix also flushes directories; this does not certify Windows power-loss durability.
+An unfinished temporary record is retained and reported as pending. A run without
+a closing record is `interrupted`, even if its last recorded phase was publication.
+Malformed, truncated committed records, gaps, and session mismatches are rejected
+without modifying image checkpoints. History is not authenticated and cannot prove
+that records were never edited or removed. Older sessions resumed without history
+explicitly report `prior_history_unavailable`.
+
+The consolidated report lists all runs and their individual results, with a
+`latest_run` convenience field. Read/retry counters sum the recorded attempts
+across runs, including repeated reads after resume; they do not represent unique
+sectors. `counters_complete: false` identifies missing prior history, interrupted
+runs, or pending records. Accepted bytes can include an unsealed tail; only
+checkpoint bytes are resumable. Per-run substitution totals are cumulative and
+must not be summed across runs.
+
+`report` rebuilds this summary in memory without opening the source or verifying
+the image. `report --write` also atomically refreshes the saved report under the
+session lock. A stale or missing report can therefore be regenerated after a
+crash. It refuses to replace an unrelated file. Its `recorded_only: true` field
+distinguishes logged verification from a fresh `verify` operation. Standalone
+`verify` does not append to acquisition history.
+
+If logging fails, acquisition stops through checkpoint handling; a destination
+failure can still prevent a new checkpoint, leaving the last valid one usable.
+Exit 1 with `status: reporting_failed` reports persistence failure and preserves
+the acquisition status, exit code, and publication/verification fields separately.
+In particular, a failed report write does not undo a successfully verified image.
+Free disk space before resuming or regenerating the report. History is bounded
+to 100,000 records and 64 MiB of committed records; each record and saved report
+is limited to 16 MiB. Reaching a limit stops logging rather than dropping events.
 
 Progress is written to stderr at most once per second; `--quiet` suppresses it.
 One JSON object is written to stdout on completion, cancellation, or operational

@@ -60,10 +60,13 @@ impl Source {
             return Self::open_device(path, sector_size, output);
         }
         let path = fs::canonicalize(path)?;
-        if path == output || path.starts_with(super::sidecar(output, "ewf-acquisition")) {
+        if path == output
+            || path.starts_with(super::sidecar(output, "ewf-acquisition"))
+            || path.starts_with(super::sidecar(output, "ewf-history"))
+        {
             return Err(invalid("source overlaps the output or acquisition journal"));
         }
-        for suffix in ["ewf-session.json", "ewf-cli.lock"] {
+        for suffix in ["ewf-session.json", "ewf-cli.lock", "ewf-report.json"] {
             if path == super::sidecar(output, suffix) {
                 return Err(invalid("source overlaps a CLI control file"));
             }

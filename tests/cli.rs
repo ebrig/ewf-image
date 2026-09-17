@@ -41,6 +41,123 @@ fn source(directory: &Path) -> Vec<u8> {
     bytes
 }
 
+fn history_records(directory: &Path) -> Vec<std::path::PathBuf> {
+    let mut paths: Vec<_> = fs::read_dir(directory.join(".case.E01.ewf-history"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    paths.sort();
+    paths
+}
+
+#[test]
+fn cli_history_recovers_unclosed_runs_and_rebuilds_a_stale_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = source(dir.path());
+    result(
+        dir.path(),
+        &[
+            "acquire",
+            "source.raw",
+            "case.E01",
+            "--sectors-per-chunk",
+            "1",
+            "--stop-after",
+            "1024",
+        ],
+        130,
+    );
+    let saved = dir.path().join(".case.E01.ewf-report.json");
+    let previous_report = fs::read(&saved).unwrap();
+    let records = history_records(dir.path());
+    let last = records.last().unwrap();
+    let record: Value = serde_json::from_slice(&fs::read(last).unwrap()).unwrap();
+    assert_eq!(record["event"], "run_end");
+    // Model death immediately before the closing record becomes visible, with
+    // a partial unpublished temporary record left behind.
+    fs::remove_file(last).unwrap();
+    fs::write(
+        dir.path()
+            .join(".case.E01.ewf-history/.pending-history-crash"),
+        b"{\"schema_version\":",
+    )
+    .unwrap();
+    let read = result(dir.path(), &["report", "case.E01"], 0);
+    assert_eq!(read["history"]["latest_run"]["status"], "interrupted");
+    assert_eq!(read["history"]["pending_records"], 1);
+    assert_eq!(read["history"]["counters_complete"], false);
+    assert_eq!(fs::read(&saved).unwrap(), previous_report);
+    result(dir.path(), &["report", "case.E01", "--write"], 0);
+    assert_ne!(fs::read(&saved).unwrap(), previous_report);
+    let completed = result(dir.path(), &["resume", "case.E01", "--retries", "0"], 0);
+    assert_eq!(completed["verification"]["sha256"], hash(&bytes));
+    fs::remove_file(dir.path().join("source.raw")).unwrap();
+    let summary = result(dir.path(), &["report", "case.E01"], 0);
+    assert_eq!(summary["history"]["runs"][0]["status"], "interrupted");
+    assert_eq!(
+        summary["history"]["runs"][1]["start"]["read_policy"]["retries"],
+        0
+    );
+    assert_eq!(summary["history"]["latest_run"]["status"], "complete");
+}
+
+#[test]
+fn cli_rejects_truncated_committed_history_without_changing_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    source(dir.path());
+    result(
+        dir.path(),
+        &[
+            "acquire",
+            "source.raw",
+            "case.E01",
+            "--sectors-per-chunk",
+            "1",
+            "--stop-after",
+            "1024",
+        ],
+        130,
+    );
+    let before = result(dir.path(), &["checkpoint", "validate", "case.E01"], 0);
+    let records = history_records(dir.path());
+    let path = records.last().unwrap();
+    let mut damaged = fs::read(path).unwrap();
+    damaged.pop();
+    fs::write(path, &damaged).unwrap();
+    let failed = result(dir.path(), &["resume", "case.E01"], 1);
+    assert!(failed["error"].as_str().unwrap().contains("truncated"));
+    result(dir.path(), &["report", "case.E01", "--write"], 1);
+    assert_eq!(fs::read(path).unwrap(), damaged);
+    assert_eq!(history_records(dir.path()), records);
+    let after = result(dir.path(), &["checkpoint", "validate", "case.E01"], 0);
+    assert_eq!(before["checkpoint"], after["checkpoint"]);
+}
+
+#[test]
+fn cli_report_publication_failure_preserves_image_and_committed_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = source(dir.path());
+    let saved = dir.path().join(".case.E01.ewf-report.json");
+    fs::create_dir(&saved).unwrap();
+    let failed = result(dir.path(), &["acquire", "source.raw", "case.E01"], 1);
+    assert_eq!(failed["status"], "reporting_failed");
+    assert_eq!(failed["acquisition_status"], "complete");
+    assert_eq!(failed["published"], true);
+    assert_eq!(failed["verification"]["sha256"], hash(&bytes));
+    let records = history_records(dir.path());
+    let recorded = result(dir.path(), &["report", "case.E01"], 0);
+    assert_eq!(recorded["history"]["latest_run"]["status"], "complete");
+    fs::remove_dir(&saved).unwrap();
+    result(dir.path(), &["report", "case.E01", "--write"], 0);
+    assert_eq!(history_records(dir.path()), records);
+    result(dir.path(), &["verify", "case.E01"], 0);
+    // An unrelated existing file is never truncated/replaced.
+    fs::write(&saved, b"unrelated").unwrap();
+    result(dir.path(), &["report", "case.E01", "--write"], 1);
+    assert_eq!(fs::read(&saved).unwrap(), b"unrelated");
+}
+
 #[test]
 fn cli_acquires_reopens_and_verifies_raw_and_zlib() {
     for compression in ["raw", "zlib"] {
@@ -129,6 +246,24 @@ fn cli_repeated_pause_inspect_validate_resume_preserves_bytes() {
     let done = result(dir.path(), &["resume", "case.E01"], 0);
     assert_eq!(done["accepted_bytes"], bytes.len());
     assert_eq!(done["verification"]["sha256"], hash(&bytes));
+    let summary = result(dir.path(), &["report", "case.E01"], 0);
+    let history = &summary["history"];
+    assert_eq!(history["runs"].as_array().unwrap().len(), 3);
+    assert_eq!(history["runs"][0]["status"], "cancelled");
+    assert_eq!(
+        history["runs"][1]["start"]["read_policy"]["read_timeout_ms"],
+        10000
+    );
+    assert!(history["runs"][2]["start"]["read_policy"]["read_timeout_ms"].is_null());
+    assert_eq!(
+        history["latest_run"]["result"]["verification"]["sha256"],
+        hash(&bytes)
+    );
+    assert_eq!(history["counters_complete"], true);
+    let saved: Value =
+        serde_json::from_slice(&fs::read(dir.path().join(".case.E01.ewf-report.json")).unwrap())
+            .unwrap();
+    assert_eq!(history, &saved);
 }
 
 #[test]

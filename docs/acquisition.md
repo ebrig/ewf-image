@@ -89,7 +89,9 @@ segment carries a cumulative native EWF `error2` table; the final table describe
 all substituted sectors and is compatible with libewf. Resume restores only the
 sealed ranges. Media hashes describe the bytes actually written, including zeros;
 a successful hash verification does not prove that substituted source data was
-recovered. Per-attempt error messages and retry counts are not persisted.
+recovered. The library does not persist per-attempt diagnostics or retry counts.
+The optional CLI records read-error kinds, offsets, retry counters, and run results
+in separate [acquisition history](cli.md#results); those records are not EWF metadata.
 
 A callback returning `Break(())` stops between source I/O operations, checkpoints
 complete accepted chunks, and returns `Cancelled`. A partial chunk remains in the
