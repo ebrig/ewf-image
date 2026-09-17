@@ -11,9 +11,11 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 
@@ -70,6 +72,14 @@ class Devices:
         command("mount", *options, source, target)
         self.mounts.append((str(source), str(target)))
 
+    def mapper_action(self, mapped, action):
+        name = Path(mapped).name
+        identifier = self.mappers[name]
+        actual = command("dmsetup", "info", "--columns", "--noheadings", "--options", "uuid", name)
+        if actual != identifier:
+            raise RuntimeError("mapper ownership changed; refusing suspend/resume")
+        command("dmsetup", action, "--noflush", name)
+
     def close(self):
         # Never remove backing images if detachment fails. The caller retains
         # the workspace and reports its exact location for operator recovery.
@@ -104,6 +114,80 @@ def oracle(args, output, expected):
     if hashlib.sha256(exported.stdout).hexdigest() != expected:
         raise AssertionError("libewf export differs from independent source digest")
     command(args.ewfverify, "-q", output)
+
+
+def stalled_device(args, root, devices, mapped, expected, cancel):
+    """Suspend only our mapper after a real checkpoint, holding kernel reads."""
+    label = "cancel" if cancel else "timeout"
+    output = root / f"stalled-{label}.E01"
+    checkpoint = root / f".stalled-{label}.E01.ewf-acquisition" / "checkpoint-00001"
+    stdout = root / f"stalled-{label}.json"
+    stderr = root / f"stalled-{label}.stderr"
+    arguments = [str(args.binary), "--quiet", "acquire", mapped, str(output),
+                 "--compression", "raw", "--sectors-per-chunk", "1",
+                 "--chunks-per-segment", "128", "--zero-fill", "--retries", "100"]
+    if not cancel:
+        arguments += ["--read-timeout-ms", "1000"]
+    suspended = False
+    report = None
+    with stdout.open("w") as out, stderr.open("w") as err:
+        process = subprocess.Popen(arguments, cwd=root, stdout=out, stderr=err)
+        try:
+            deadline = time.monotonic() + 30
+            while not checkpoint.exists():
+                if process.poll() is not None or time.monotonic() > deadline:
+                    raise AssertionError("acquisition did not reach a live checkpoint")
+                time.sleep(0.005)
+            suspended = True
+            devices.mapper_action(mapped, "suspend")
+            # Confirm the dedicated reader is actually blocked in the kernel,
+            # rather than signalling between operations or during a seal.
+            deadline = time.monotonic() + 5
+            while True:
+                blocked = False
+                for task in Path(f"/proc/{process.pid}/task").glob("*"):
+                    try:
+                        blocked |= (task.joinpath("comm").read_text().strip() == "ewf-source-read"
+                                    and "State:\tD" in task.joinpath("status").read_text())
+                    except FileNotFoundError:
+                        pass
+                if blocked:
+                    break
+                if process.poll() is not None or time.monotonic() > deadline:
+                    raise AssertionError("source worker did not enter a blocked kernel read")
+                time.sleep(0.005)
+            if cancel:
+                process.send_signal(signal.SIGINT)
+            # Linux teardown can itself wait for uninterruptible I/O. Require
+            # the completed CLI report while stalled, then release the mapper.
+            deadline = time.monotonic() + 10
+            while report is None:
+                try:
+                    report = json.loads(stdout.read_text())
+                except json.JSONDecodeError:
+                    if time.monotonic() > deadline:
+                        raise AssertionError("CLI did not report while its source read was stalled") from None
+                    time.sleep(0.01)
+        finally:
+            try:
+                if suspended:
+                    devices.mapper_action(mapped, "resume")
+            finally:
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+                    raise
+    code = 130 if cancel else 1
+    assert process.returncode == code and report["exit_code"] == code, report
+    assert report["source_read_stop"] == ("cancelled" if cancel else "timeout"), report
+    assert report["substituted_sectors"] == 0 and not report["published"], report
+    assert 0 < report["checkpoint_bytes"] <= report["accepted_bytes"] < report["source"]["size"], report
+    cli(args.binary, root, ["checkpoint", "validate", output])
+    done = cli(args.binary, root, ["resume", output, "--read-timeout-ms", "10000"])
+    assert done["verification"]["sha256"] == expected, done
+    oracle(args, output, expected)
 
 
 def main():
@@ -186,6 +270,12 @@ def main():
         oracle(args, output, hashlib.sha256(actual).hexdigest())
         assert digest(source) == expected
         completed.append("kernel bad-sector I/O: default stop, explicit substitution, native range, libewf")
+
+        stalled = devices.mapper(f"0 {sectors} linear {loop} 0\n")
+        for cancel in [False, True]:
+            stalled_device(args, root, devices, stalled, expected, cancel)
+        assert digest(source) == expected
+        completed.append("suspended kernel reads: timeout and SIGINT, no substitution, checkpoint validation, verified resume, libewf")
 
         # Mount only a newly created filesystem image to test overlap rejection.
         filesystem = root / "filesystem.raw"
