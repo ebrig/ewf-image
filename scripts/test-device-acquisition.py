@@ -309,10 +309,24 @@ def main():
         full = root / "full"
         full.mkdir()
         devices.mount("tmpfs", full, "-t", "tmpfs", "-o", "size=4m")
+        export_image = root / "export-source.E01"
+        cli(args.binary, root, ["acquire", source, export_image])
+        export_target = full / "export.raw"
+        failed_export = cli(args.binary, root, ["export", export_image, export_target], 1)
+        assert failed_export["phase"] == "export", failed_export
+        assert not failed_export["published"]
+        assert failed_export["verification"] is None
+        assert not export_target.exists()
+        assert not list(full.glob(".ewf-export-*"))
+        cli(args.binary, root, ["verify", export_image])
+        completed.append("strict raw export: real filesystem ENOSPC, no published partial, temporary cleanup, preserved source")
         output = full / "full.E01"
         failed = cli(args.binary, root, ["acquire", source, output, "--compression", "raw", "--chunks-per-segment", 16], 1)
         assert 0 < failed["checkpoint_bytes"] < source.stat().st_size
         command("mount", "-o", "remount,size=64m", full)
+        exported = cli(args.binary, root, ["export", export_image, export_target])
+        assert exported["verification"]["sha256"] == expected
+        assert digest(export_target) == expected
         done = cli(args.binary, root, ["resume", output])
         assert done["verification"]["sha256"] == expected
         oracle(args, output, expected)

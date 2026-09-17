@@ -14,84 +14,6 @@ use super::{Progress, Result, error_ranges, hex, inspect, invalid, substituted_s
 
 const BUFFER_BYTES: usize = 1024 * 1024;
 
-#[cfg(test)]
-mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    use super::*;
-
-    struct Sink<'a> {
-        stop: &'a AtomicBool,
-        fault: &'static str,
-        accepted: usize,
-    }
-
-    impl Write for Sink<'_> {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            let count = if self.fault == "short" {
-                if self.accepted == 17 {
-                    return Err(io::ErrorKind::StorageFull.into());
-                }
-                17.min(bytes.len())
-            } else {
-                bytes.len()
-            };
-            self.accepted += count;
-            if self.fault == "cancel" {
-                self.stop.store(true, Ordering::Relaxed);
-            }
-            Ok(count)
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            if self.fault == "flush" {
-                Err(io::ErrorKind::StorageFull.into())
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    #[test]
-    fn interrupted_copies_never_report_complete_hashes() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("case.E01");
-        let mut writer =
-            ewf_image::EwfWriter::create(&path, ewf_image::WriteOptions::default()).unwrap();
-        writer.write_all(&vec![0; 65536]).unwrap();
-        writer.finish().unwrap();
-        let image = Image::open(path).unwrap();
-        for fault in ["short", "flush", "cancel"] {
-            let stop = AtomicBool::new(false);
-            let mut sink = Sink {
-                stop: &stop,
-                fault,
-                accepted: 0,
-            };
-            let mut report = json!({"verification": null});
-            let error = copy_media(
-                &image,
-                &mut sink,
-                &mut Progress::new(true, &stop),
-                &mut report,
-            )
-            .unwrap_err();
-            assert!(report["verification"].is_null());
-            match fault {
-                "cancel" => {
-                    assert!(matches!(
-                        error.downcast_ref::<EwfError>(),
-                        Some(EwfError::Aborted)
-                    ));
-                    assert_eq!(sink.accepted, 32768);
-                }
-                "short" => assert_eq!(sink.accepted, 17),
-                _ => assert_eq!(sink.accepted, 65536),
-            }
-        }
-    }
-}
-
 pub fn run(
     input: &Path,
     output: &Path,
@@ -249,4 +171,82 @@ fn copy_media(
     }
     report["media_verified"] = json!(matches == Some(true));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    struct Sink<'a> {
+        stop: &'a AtomicBool,
+        fault: &'static str,
+        accepted: usize,
+    }
+
+    impl Write for Sink<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let count = if self.fault == "short" {
+                if self.accepted == 17 {
+                    return Err(io::ErrorKind::StorageFull.into());
+                }
+                17.min(bytes.len())
+            } else {
+                bytes.len()
+            };
+            self.accepted += count;
+            if self.fault == "cancel" {
+                self.stop.store(true, Ordering::Relaxed);
+            }
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if self.fault == "flush" {
+                Err(io::ErrorKind::StorageFull.into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn interrupted_copies_never_report_complete_hashes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("case.E01");
+        let mut writer =
+            ewf_image::EwfWriter::create(&path, ewf_image::WriteOptions::default()).unwrap();
+        writer.write_all(&vec![0; 65536]).unwrap();
+        writer.finish().unwrap();
+        let image = Image::open(path).unwrap();
+        for fault in ["short", "flush", "cancel"] {
+            let stop = AtomicBool::new(false);
+            let mut sink = Sink {
+                stop: &stop,
+                fault,
+                accepted: 0,
+            };
+            let mut report = json!({"verification": null});
+            let error = copy_media(
+                &image,
+                &mut sink,
+                &mut Progress::new(true, &stop),
+                &mut report,
+            )
+            .unwrap_err();
+            assert!(report["verification"].is_null());
+            match fault {
+                "cancel" => {
+                    assert!(matches!(
+                        error.downcast_ref::<EwfError>(),
+                        Some(EwfError::Aborted)
+                    ));
+                    assert_eq!(sink.accepted, 32768);
+                }
+                "short" => assert_eq!(sink.accepted, 17),
+                _ => assert_eq!(sink.accepted, 65536),
+            }
+        }
+    }
 }
