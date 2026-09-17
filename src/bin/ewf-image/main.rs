@@ -1,5 +1,6 @@
 //! Command-line acquisition, checkpoint inspection, and media verification.
 
+mod export;
 mod history;
 mod inspect;
 mod session;
@@ -25,7 +26,10 @@ use source::Source;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Parser)]
-#[command(version, about = "Acquire, inspect, and verify EWF forensic images")]
+#[command(
+    version,
+    about = "Acquire, inspect, export, and verify EWF forensic images"
+)]
 struct Cli {
     /// Suppress progress on stderr (JSON results are always written to stdout).
     #[arg(long, global = true)]
@@ -38,6 +42,8 @@ struct Cli {
 enum Command {
     /// Inspect image metadata without verifying media contents.
     Info { image: PathBuf },
+    /// Export the complete, strictly decoded media stream to a new raw file.
+    Export { image: PathBuf, output: PathBuf },
     /// Acquire a source, publish its E01 segments, then reopen and verify them.
     Acquire(Acquire),
     /// Resume using the original source and options from the session manifest.
@@ -148,7 +154,11 @@ fn main() -> ExitCode {
     } else {
         match report["status"].as_str() {
             Some("cancelled") => 130,
-            Some("complete_with_substitutions" | "verified_with_substitutions") => 4,
+            Some(
+                "complete_with_substitutions"
+                | "verified_with_substitutions"
+                | "exported_with_substitutions",
+            ) => 4,
             _ => 0,
         }
     };
@@ -188,6 +198,7 @@ fn run(
     let mut progress = Progress::new(cli.quiet, stop);
     match &cli.command {
         Command::Info { image } => inspect::info(image, report),
+        Command::Export { image, output } => export::run(image, output, &mut progress, report),
         Command::Acquire(args) => {
             let output = session::normalize_output(&args.output)?;
             let mut source = Source::open(&args.source, args.sector_size, &output)?;

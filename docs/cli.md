@@ -11,6 +11,7 @@ ewf-image checkpoint inspect case.E01
 ewf-image checkpoint validate case.E01
 ewf-image verify case.E01
 ewf-image info case.E01
+ewf-image export case.E01 disk.raw
 ewf-image report case.E01
 ewf-image report case.E01 --write
 ```
@@ -25,6 +26,37 @@ is null, even when inspection succeeds. Use `verify` for a full media check.
 Legacy password headers and raw metadata sections are omitted. Encrypted images
 are detected, but the CLI currently has no password input; inspection exits 1
 with the encryption flag and open error when metadata cannot be opened.
+
+## Strict raw export
+
+`export IMAGE OUTPUT` copies the complete decoded media stream into a new raw
+file. It supports the reader's unencrypted physical, SMART, and logical-image
+formats. For logical images this is the flat media stream, not extraction of
+individual files. Incomplete acquisitions are rejected. No damaged chunks are
+silently zero-filled; use the separate recovery library for explicit recovery.
+
+The command computes MD5, SHA1, and SHA256 while writing and compares every
+supported stored digest. A mismatch exits 3 without publishing the destination.
+Without reference digests, export can succeed, but `references_match` is null
+and `media_verified` remains false. Hashes describe the decoded stream accepted
+by the output writer; the raw file is not reread. Recorded acquisition errors
+are preserved in the JSON report; a successful export with substitutions exits 4.
+
+Existing destinations, including source segments, hard links, and symlinks,
+are refused. Image control paths are also protected. A temporary file beside
+the destination is flushed and installed without overwriting, even if another
+process creates the destination during export. Unix also flushes the parent
+directory. A directory-flush failure can report failure with `published: true`.
+Use stable input segments and a stable destination directory throughout export.
+
+Handled failures and cancellation remove the owned temporary file. A forced
+termination can leave an unpublished `.ewf-export-*` file; export is not resumable.
+Ctrl+C (also SIGTERM/SIGHUP on Unix) is checked between chunks and writes of at
+most 1 MiB, and before publication. Opening, decoding one chunk, synchronous I/O,
+and filesystem flushes must return before cancellation can complete. Buffering
+retains one decoded chunk plus encoded data/decoder scratch space and the bounded
+table cache, rather than the full media stream; at most 16 segment handles remain
+open. Memory therefore also depends on the image's chunk size and metadata.
 
 ## Acquisition
 
@@ -196,11 +228,11 @@ finish may still need recovery to resolve publication state.
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | Completed and verified, or checkpoint operation succeeded |
+| 0 | Acquisition/verification, inspection, history, checkpoint, or export succeeded |
 | 1 | Operational failure or result-output failure |
 | 2 | Invalid command-line arguments |
-| 3 | Verification failure, missing reference digests, or unreadable image |
-| 4 | Completed/verified with recorded substituted sectors |
+| 3 | `verify` failed (including missing references), or export found a stored-digest mismatch |
+| 4 | Acquisition/verification/export succeeded with recorded substituted sectors |
 | 130 | Cancelled, including a requested `--stop-after` pause |
 
 For example, `ewf-image acquire disk.raw case.E01 > result.json` retains the

@@ -110,6 +110,327 @@ fn history_records(directory: &Path) -> Vec<std::path::PathBuf> {
     paths
 }
 
+fn export_fixture(directory: &Path, bytes: &[u8], options: ewf_image::WriteOptions) {
+    let mut writer = ewf_image::EwfWriter::create(directory.join("case.E01"), options).unwrap();
+    writer.write_all(bytes).unwrap();
+    writer.finish().unwrap();
+}
+
+fn assert_no_export_temporary(directory: &Path) {
+    assert!(fs::read_dir(directory).unwrap().all(|e| {
+        !e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".ewf-export-")
+    }));
+}
+
+#[test]
+fn cli_export_streams_formats_split_segments_and_partial_final_chunks() {
+    use ewf_image::{WriteCompression as C, WriteFormat as F, WriteOptions};
+    let bytes: Vec<_> = (0_u32..3073)
+        .flat_map(|v| Sha256::digest(v.to_le_bytes()))
+        .collect();
+    for (format, compression) in [
+        (F::Ewf1Physical, C::None),
+        (F::Ewf1Physical, C::Zlib),
+        (F::Ewf1Smart, C::None),
+        (F::Ewf1Smart, C::Zlib),
+        (F::Ewf1Logical, C::Zlib),
+        (F::Ewf2Physical, C::None),
+        (F::Ewf2Physical, C::Zlib),
+        (F::Ewf2Physical, C::Bzip2),
+        (F::Ewf2Logical, C::Zlib),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let name = match format {
+            F::Ewf1Physical => "case.E01",
+            F::Ewf1Smart => "case.S01",
+            F::Ewf1Logical => "case.L01",
+            F::Ewf2Physical => "case.Ex01",
+            F::Ewf2Logical => "case.Lx01",
+        };
+        let mut writer = ewf_image::EwfWriter::create(
+            dir.path().join(name),
+            WriteOptions {
+                format,
+                compression,
+                bytes_per_sector: 1,
+                sectors_per_chunk: 32768,
+                maximum_segment_size: Some(45_000),
+                ..WriteOptions::default()
+            },
+        )
+        .unwrap();
+        writer.write_all(&bytes).unwrap();
+        writer.finish().unwrap();
+        let report = result(dir.path(), &["--quiet", "export", name, "case.raw"], 0);
+        assert_eq!(report["status"], "exported");
+        assert_eq!(report["published"], true);
+        assert_eq!(report["exported_bytes"], bytes.len());
+        assert_eq!(report["verification"]["references_match"], true);
+        assert_eq!(report["verification"]["sha256"], hash(&bytes));
+        assert_eq!(fs::read(dir.path().join("case.raw")).unwrap(), bytes);
+        assert_no_export_temporary(dir.path());
+        assert!(
+            result(dir.path(), &["info", name], 0)["segments"]["count"]
+                .as_u64()
+                .unwrap()
+                > 1
+        );
+    }
+}
+
+#[test]
+fn cli_export_reports_substitutions_and_handles_chunks_larger_than_write_buffer() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = vec![0; 2 * 1024 * 1024 + 512];
+    export_fixture(
+        dir.path(),
+        &bytes,
+        ewf_image::WriteOptions {
+            sectors_per_chunk: 4096,
+            compression: ewf_image::WriteCompression::Zlib,
+            acquisition_errors: vec![ewf_image::AcquisitionError {
+                first_sector: 2,
+                sector_count: 3,
+            }],
+            ..ewf_image::WriteOptions::default()
+        },
+    );
+    let report = result(dir.path(), &["export", "case.E01", "disk.raw"], 4);
+    assert_eq!(report["status"], "exported_with_substitutions");
+    assert_eq!(report["substituted_sectors"], 3);
+    assert_eq!(report["verification"]["sha256"], hash(&bytes));
+    assert_eq!(fs::read(dir.path().join("disk.raw")).unwrap(), bytes);
+}
+
+#[test]
+fn cli_export_refuses_existing_destinations_aliases_and_control_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = source(dir.path());
+    export_fixture(dir.path(), &bytes, ewf_image::WriteOptions::default());
+    let original = fs::read(dir.path().join("case.E01")).unwrap();
+    fs::hard_link(dir.path().join("case.E01"), dir.path().join("alias.raw")).unwrap();
+    fs::create_dir(dir.path().join(".case.E01.ewf-history")).unwrap();
+    for output in [
+        "case.E01",
+        "alias.raw",
+        "source.raw",
+        ".case.E01.ewf-publication",
+        ".case.E01.ewf-session.json",
+        ".case.E01.ewf-history/export.raw",
+    ] {
+        let report = result(dir.path(), &["export", "case.E01", output], 1);
+        assert_eq!(report["published"], false);
+    }
+    assert_eq!(fs::read(dir.path().join("case.E01")).unwrap(), original);
+    assert_eq!(fs::read(dir.path().join("source.raw")).unwrap(), bytes);
+    assert_no_export_temporary(dir.path());
+}
+
+#[test]
+fn cli_export_never_publishes_corrupt_media_or_digest_mismatches() {
+    for algorithm in ["corrupt", "MD5", "SHA1", "SHA256"] {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = source(dir.path());
+        let mut options = ewf_image::WriteOptions::default();
+        if algorithm != "corrupt" {
+            let len = match algorithm {
+                "MD5" => 16,
+                "SHA1" => 20,
+                _ => 32,
+            };
+            options
+                .hashes
+                .set_hash_value(algorithm, "00".repeat(len))
+                .unwrap();
+        }
+        export_fixture(dir.path(), &bytes, options);
+        if algorithm == "corrupt" {
+            let path = dir.path().join("case.E01");
+            let mut data = fs::read(&path).unwrap();
+            let offset = data.windows(bytes.len()).position(|v| v == bytes).unwrap();
+            data[offset] ^= 1;
+            fs::write(&path, data).unwrap();
+        }
+        let report = result(
+            dir.path(),
+            &["export", "case.E01", "disk.raw"],
+            if algorithm == "corrupt" { 1 } else { 3 },
+        );
+        assert_eq!(report["published"], false);
+        assert_eq!(report["media_verified"], false);
+        assert!(!dir.path().join("disk.raw").exists());
+        assert_no_export_temporary(dir.path());
+        if algorithm != "corrupt" {
+            assert_eq!(report["verification"]["references_match"], false);
+        }
+    }
+}
+
+#[test]
+fn cli_export_distinguishes_absent_references_from_verified_media() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = source(dir.path());
+    export_fixture(dir.path(), &bytes, ewf_image::WriteOptions::default());
+    let path = dir.path().join("case.E01");
+    let image = Image::open(&path).unwrap();
+    let mut data = fs::read(&path).unwrap();
+    for section in image.sections().iter().filter(|s| matches!(&s.kind, ewf_image::SectionKind::Ewf1(name) if name == "hash" || name == "digest" || name == "xhash")) {
+        let offset = section.descriptor_offset as usize;
+        data[offset..offset + 16].fill(0);
+        data[offset..offset + 7].copy_from_slice(b"unknown");
+        data[offset + 72..offset + 76].fill(0);
+    }
+    drop(image);
+    fs::write(path, data).unwrap();
+    let report = result(dir.path(), &["export", "case.E01", "disk.raw"], 0);
+    assert!(report["verification"]["references_match"].is_null());
+    assert_eq!(report["media_verified"], false);
+    assert_eq!(report["verification"]["sha256"], hash(&bytes));
+    assert_eq!(fs::read(dir.path().join("disk.raw")).unwrap(), bytes);
+}
+
+fn running_export(directory: &Path) -> std::process::Child {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ewf-image"))
+        .current_dir(directory)
+        .args(["export", "case.E01", "disk.raw"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The first progress event occurs after preflight and before copying.
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    stderr.read_line(&mut line).unwrap();
+    assert!(line.starts_with("export:"), "{line}");
+    child.stderr = Some(stderr.into_inner());
+    child
+}
+
+#[test]
+fn cli_export_preserves_a_destination_created_after_preflight() {
+    let dir = tempfile::tempdir().unwrap();
+    export_fixture(
+        dir.path(),
+        &vec![0; 32 * 1024 * 1024],
+        ewf_image::WriteOptions {
+            compression: ewf_image::WriteCompression::Zlib,
+            ..ewf_image::WriteOptions::default()
+        },
+    );
+    let child = running_export(dir.path());
+    // create_new also makes unexpected early publication fail the test.
+    let mut existing = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(dir.path().join("disk.raw"))
+        .unwrap();
+    existing.write_all(b"unrelated destination").unwrap();
+    drop(existing);
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["phase"], "publication");
+    assert_eq!(report["published"], false);
+    assert_eq!(
+        fs::read(dir.path().join("disk.raw")).unwrap(),
+        b"unrelated destination"
+    );
+    assert_no_export_temporary(dir.path());
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_export_cancellation_removes_partial_output() {
+    let dir = tempfile::tempdir().unwrap();
+    export_fixture(
+        dir.path(),
+        &vec![0; 32 * 1024 * 1024],
+        ewf_image::WriteOptions {
+            compression: ewf_image::WriteCompression::Zlib,
+            ..ewf_image::WriteOptions::default()
+        },
+    );
+    for signal in ["-INT", "-TERM"] {
+        let child = running_export(dir.path());
+        assert!(
+            Command::new("kill")
+                .args([signal, &child.id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(130),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["status"], "cancelled");
+        assert_eq!(report["published"], false);
+        assert!(report["verification"].is_null());
+        assert!(!dir.path().join("disk.raw").exists());
+        assert_no_export_temporary(dir.path());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_export_refuses_dangling_symlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    export_fixture(dir.path(), &[0; 512], ewf_image::WriteOptions::default());
+    std::os::unix::fs::symlink("missing.raw", dir.path().join("link.raw")).unwrap();
+    result(dir.path(), &["export", "case.E01", "link.raw"], 1);
+    assert!(!dir.path().join("missing.raw").exists());
+    assert!(
+        fs::symlink_metadata(dir.path().join("link.raw"))
+            .unwrap()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn cli_export_refuses_incomplete_and_encrypted_images() {
+    let dir = tempfile::tempdir().unwrap();
+    source(dir.path());
+    result(
+        dir.path(),
+        &[
+            "acquire",
+            "source.raw",
+            "case.E01",
+            "--stop-after",
+            "1",
+            "--sectors-per-chunk",
+            "1",
+        ],
+        130,
+    );
+    result(dir.path(), &["export", "case.E01", "disk.raw"], 1);
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/xways-encrypted/aes128-compatible.E01"),
+        dir.path().join("encrypted.E01"),
+    )
+    .unwrap();
+    let report = result(dir.path(), &["export", "encrypted.E01", "disk.raw"], 1);
+    assert_eq!(report["encryption_detected"], true);
+    assert!(!dir.path().join("disk.raw").exists());
+    assert_no_export_temporary(dir.path());
+}
+
 #[test]
 fn cli_history_recovers_unclosed_runs_and_rebuilds_a_stale_report() {
     let dir = tempfile::tempdir().unwrap();
