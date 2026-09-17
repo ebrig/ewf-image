@@ -1,4 +1,4 @@
-# Acquisition command line
+# EWF command line
 
 Build with `cargo build --release --features cli`, or install with
 `cargo install --path . --features cli --locked`. The optional CLI dependencies
@@ -10,9 +10,23 @@ ewf-image resume case.E01
 ewf-image checkpoint inspect case.E01
 ewf-image checkpoint validate case.E01
 ewf-image verify case.E01
+ewf-image info case.E01
 ewf-image report case.E01
 ewf-image report case.E01 --write
 ```
+
+## Metadata inspection
+
+`info IMAGE` reports the format/profile, segment paths and sizes, media geometry,
+case metadata, stored hashes, encryption detection, acquisition error ranges,
+and whether a logical file catalog is present. It opens with strict structural
+checks but does not scan media bytes: `media_verified` is false and `verification`
+is null, even when inspection succeeds. Use `verify` for a full media check.
+Legacy password headers and raw metadata sections are omitted. Encrypted images
+are detected, but the CLI currently has no password input; inspection exits 1
+with the encryption flag and open error when metadata cannot be opened.
+
+## Acquisition
 
 Regular-file sources must be nonempty and sector aligned. The default
 sector size is 512; `--sector-size` accepts 512, 1024, 2048, or 4096. Output is

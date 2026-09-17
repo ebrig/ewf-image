@@ -41,6 +41,65 @@ fn source(directory: &Path) -> Vec<u8> {
     bytes
 }
 
+#[test]
+fn cli_info_inspects_metadata_without_certifying_corrupt_media() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = source(dir.path());
+    let path = dir.path().join("case.E01");
+    let options = ewf_image::WriteOptions {
+        metadata: ewf_image::EwfMetadata {
+            case_number: Some("CASE-123".into()),
+            examiner: Some("Examiner".into()),
+            password: Some("do-not-print".into()),
+            ..ewf_image::EwfMetadata::default()
+        },
+        acquisition_errors: vec![ewf_image::AcquisitionError {
+            first_sector: 1,
+            sector_count: 2,
+        }],
+        ..ewf_image::WriteOptions::default()
+    };
+    let mut writer = ewf_image::EwfWriter::create(&path, options).unwrap();
+    writer.write_all(&bytes).unwrap();
+    writer.finish().unwrap();
+    let mut encoded = fs::read(&path).unwrap();
+    let offset = encoded
+        .windows(bytes.len())
+        .position(|v| v == bytes)
+        .unwrap();
+    encoded[offset] ^= 1;
+    fs::write(&path, encoded).unwrap();
+    let report = result(dir.path(), &["info", "case.E01"], 0);
+    assert_eq!(report["status"], "inspected");
+    assert_eq!(report["media_verified"], false);
+    assert!(report["verification"].is_null());
+    assert_eq!(report["encryption_detected"], false);
+    assert_eq!(report["format"], "Ewf1");
+    assert_eq!(report["segments"]["count"], 1);
+    assert_eq!(report["media"]["logical_bytes"], bytes.len());
+    assert_eq!(report["media"]["bytes_per_sector"], 512);
+    assert_eq!(report["metadata"]["case_number"], "CASE-123");
+    assert_eq!(report["metadata"]["examiner"], "Examiner");
+    assert_eq!(report["substituted_sectors"], 2);
+    assert!(!report["stored_hashes"]["md5"].is_null());
+    assert!(!report.to_string().contains("do-not-print"));
+    result(dir.path(), &["verify", "case.E01"], 3);
+}
+
+#[test]
+fn cli_info_reports_encryption_when_metadata_cannot_be_opened() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let report = result(
+        root,
+        &["info", "tests/data/xways-encrypted/aes128-compatible.E01"],
+        1,
+    );
+    assert_eq!(report["encryption_detected"], true);
+    assert_eq!(report["media_verified"], false);
+    assert!(report["metadata"].is_null());
+    assert!(report["error"].as_str().unwrap().contains("password"));
+}
+
 fn history_records(directory: &Path) -> Vec<std::path::PathBuf> {
     let mut paths: Vec<_> = fs::read_dir(directory.join(".case.E01.ewf-history"))
         .unwrap()

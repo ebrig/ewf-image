@@ -1,6 +1,7 @@
 //! Command-line acquisition, checkpoint inspection, and media verification.
 
 mod history;
+mod inspect;
 mod session;
 mod source;
 
@@ -24,10 +25,7 @@ use source::Source;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Parser)]
-#[command(
-    version,
-    about = "Acquire resumable physical E01 images and verify their media"
-)]
+#[command(version, about = "Acquire, inspect, and verify EWF forensic images")]
 struct Cli {
     /// Suppress progress on stderr (JSON results are always written to stdout).
     #[arg(long, global = true)]
@@ -38,6 +36,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect image metadata without verifying media contents.
+    Info { image: PathBuf },
     /// Acquire a source, publish its E01 segments, then reopen and verify them.
     Acquire(Acquire),
     /// Resume using the original source and options from the session manifest.
@@ -187,6 +187,7 @@ fn run(
 ) -> Result<()> {
     let mut progress = Progress::new(cli.quiet, stop);
     match &cli.command {
+        Command::Info { image } => inspect::info(image, report),
         Command::Acquire(args) => {
             let output = session::normalize_output(&args.output)?;
             let mut source = Source::open(&args.source, args.sector_size, &output)?;
