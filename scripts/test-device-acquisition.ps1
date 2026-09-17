@@ -153,6 +153,20 @@ function Assert-Oracle([string]$Output, [string]$Expected) {
     if ($LASTEXITCODE -ne 0) { throw "ewfverify failed: $($oracleLog -join ' ')" }
 }
 
+function Assert-History([string]$Output, [string]$Expected) {
+    $recorded = Invoke-Cli @('report', $Output)
+    $latest = $recorded.history.latest_run.result
+    if ($latest.status -ne 'complete' -or $latest.verification.sha256 -ne $Expected) {
+        throw 'Recorded acquisition result differs from independently hashed source'
+    }
+    $saved = Join-Path ([IO.Path]::GetDirectoryName($Output)) ('.' + [IO.Path]::GetFileName($Output) + '.ewf-report.json')
+    $summary = Get-Content -LiteralPath $saved -Raw | ConvertFrom-Json
+    if ($summary.record_count -ne $recorded.history.record_count -or
+        $summary.latest_run.result.verification.sha256 -ne $Expected) {
+        throw 'Saved consolidated report is stale or incorrect'
+    }
+}
+
 function Test-ActiveRemoval([string]$Image, [string]$Expected) {
     $disk = Attach-OwnedImage $Image
     $number = $disk.Number
@@ -190,6 +204,7 @@ function Test-ActiveRemoval([string]$Image, [string]$Expected) {
     $done = Invoke-Cli @('resume', $output)
     if ($done.verification.sha256 -ne $Expected) { throw 'Active-removal resume changed media' }
     Assert-Oracle $output $Expected
+    Assert-History $output $Expected
     Dismount-VHD -Path $Image
     $checks.Add('active VHDX removal: no zero substitution, retained checkpoint, verified resume')
 }
@@ -225,6 +240,7 @@ try {
             throw 'Resumed media does not match independent synthetic-source digest and geometry'
         }
         Assert-Oracle $output $expected
+        Assert-History $output $expected
         # A second fresh acquisition checks that all source logical bytes are unchanged.
         $again = Invoke-Cli @('acquire', $device, (Join-Path $workRoot "unchanged-$sector.E01"))
         if ($again.verification.sha256 -ne $expected) { throw 'Source media changed' }
@@ -297,6 +313,8 @@ try {
         Assert-Oracle (Join-Path $oracleDirectory 'full.E01') $expected
     }
     $checks.Add('actual NTFS disk full, retained checkpoint, capacity restoration, verified resume')
+    Assert-History $output $expected
+    $checks.Add('persistent history and consolidated reports across device failures and disk-full resume')
 } finally {
     # Cleanup uses only recorded images, and validates all paths before deletion.
     # Any cleanup failure retains the workspace instead of deleting attached files.

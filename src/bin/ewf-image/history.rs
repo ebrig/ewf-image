@@ -93,13 +93,25 @@ fn publish(path: &Path, bytes: &[u8], replace: bool) -> Result<()> {
     let mut temporary = tempfile::Builder::new()
         .prefix(".pending-history-")
         .tempfile_in(parent)?;
+    #[cfg(test)]
+    {
+        let split = bytes.len() / 2;
+        temporary.write_all(&bytes[..split])?;
+        tests::crash_at("partial", path);
+        temporary.write_all(&bytes[split..])?;
+    }
+    #[cfg(not(test))]
     temporary.write_all(bytes)?;
     temporary.as_file().sync_all()?;
+    #[cfg(test)]
+    tests::crash_at("synced", path);
     if replace {
         temporary.persist(path)?;
     } else {
         temporary.persist_noclobber(path)?;
     }
+    #[cfg(test)]
+    tests::crash_at("installed", path);
     sync_directory(parent)?;
     Ok(())
 }

@@ -369,6 +369,51 @@ fn cli_refuses_output_source_aliases_and_invalid_arguments() {
         Some(2)
     );
     assert!(!dir.path().join(".case.E01.ewf-session.json").exists());
+    for name in [
+        ".case.E01.ewf-report.json",
+        ".case.E01.ewf-history/source.raw",
+    ] {
+        let path = dir.path().join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        result(dir.path(), &["acquire", name, "case.E01"], 1);
+        assert_eq!(fs::read(path).unwrap(), bytes);
+        assert!(!dir.path().join(".case.E01.ewf-session.json").exists());
+    }
+}
+
+#[test]
+fn cli_resume_without_older_history_marks_the_gap() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = source(dir.path());
+    result(
+        dir.path(),
+        &[
+            "acquire",
+            "source.raw",
+            "case.E01",
+            "--sectors-per-chunk",
+            "1",
+            "--stop-after",
+            "1024",
+        ],
+        130,
+    );
+    // An earlier binary's checkpoint and manifest have no history directory.
+    fs::rename(
+        dir.path().join(".case.E01.ewf-history"),
+        dir.path().join("retained-history"),
+    )
+    .unwrap();
+    result(dir.path(), &["resume", "case.E01"], 0);
+    let summary = result(dir.path(), &["report", "case.E01"], 0);
+    assert_eq!(summary["history"]["prior_history_unavailable"], true);
+    assert_eq!(summary["history"]["counters_complete"], false);
+    assert_eq!(summary["history"]["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        summary["history"]["latest_run"]["result"]["verification"]["sha256"],
+        hash(&bytes)
+    );
 }
 
 fn hash(bytes: &[u8]) -> String {

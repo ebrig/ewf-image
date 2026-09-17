@@ -1,5 +1,120 @@
 use super::*;
 use ewf_image::{AcquisitionReadOptions, AcquisitionWriter, UnreadableSectorPolicy};
+
+pub(super) fn crash_at(point: &str, path: &Path) {
+    if std::env::var("EWF_HISTORY_CRASH_POINT").is_ok_and(|value| {
+        value == format!("{point}:{}", path.file_name().unwrap().to_string_lossy())
+    }) {
+        std::process::exit(77);
+    }
+}
+
+fn read_args() -> ReadArgs {
+    ReadArgs {
+        read_timeout_ms: None,
+        retries: 1,
+        zero_fill: true,
+        checkpoint_interval: None,
+        stop_after: None,
+    }
+}
+
+#[test]
+fn history_crash_worker() {
+    let Some(output) = std::env::var_os("EWF_HISTORY_CRASH_OUTPUT") else {
+        return;
+    };
+    let session = Session::load(Path::new(&output)).unwrap();
+    let mut history = History::open(
+        &session,
+        super::super::session::lock(&session.output).unwrap(),
+        false,
+    )
+    .unwrap();
+    history.start("resume", &read_args()).unwrap();
+    history
+        .finish(&json!({"status": "failed", "exit_code": 1}))
+        .unwrap();
+    panic!("crash point was not reached");
+}
+
+#[test]
+fn process_exit_during_record_and_report_publication_preserves_prior_records() {
+    for file in [
+        "00000000000000000004.json",
+        "00000000000000000005.json",
+        ".case.E01.ewf-report.json",
+    ] {
+        for point in ["partial", "synced", "installed"] {
+            let (_dir, session, args) = fixture();
+            let mut history = History::open(
+                &session,
+                super::super::session::lock(&session.output).unwrap(),
+                true,
+            )
+            .unwrap();
+            history.start("acquire", &args).unwrap();
+            history
+                .finish(&json!({"status": "cancelled", "exit_code": 130}))
+                .unwrap();
+            let originals: Vec<_> = (1..=3)
+                .map(|sequence| {
+                    let path = history.directory.join(format!("{sequence:020}.json"));
+                    let bytes = fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .collect();
+            drop(history);
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "history::tests::history_crash_worker",
+                    "--nocapture",
+                ])
+                .env("EWF_HISTORY_CRASH_OUTPUT", &session.output)
+                .env("EWF_HISTORY_CRASH_POINT", format!("{point}:{file}"))
+                .output()
+                .unwrap();
+            assert_eq!(
+                result.status.code(),
+                Some(77),
+                "{point}:{file}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            for (path, bytes) in originals {
+                assert_eq!(fs::read(path).unwrap(), bytes);
+            }
+            let lock = super::super::session::lock(&session.output).unwrap();
+            let summary = report(&session, false).unwrap();
+            let expected = if file == "00000000000000000004.json" && point != "installed" {
+                "cancelled"
+            } else if file == "00000000000000000004.json"
+                || (file == "00000000000000000005.json" && point != "installed")
+            {
+                "interrupted"
+            } else {
+                "failed"
+            };
+            assert_eq!(summary["latest_run"]["status"], expected, "{point}:{file}");
+            let saved = sidecar(&session.output, "ewf-report.json");
+            let _: Value = serde_json::from_slice(&fs::read(&saved).unwrap()).unwrap();
+            report(&session, true).unwrap();
+            let repaired: Value = serde_json::from_slice(&fs::read(&saved).unwrap()).unwrap();
+            assert_eq!(repaired, summary);
+            drop(lock);
+            let mut resumed = History::open(
+                &session,
+                super::super::session::lock(&session.output).unwrap(),
+                false,
+            )
+            .unwrap();
+            resumed.start("resume", &args).unwrap();
+            resumed
+                .finish(&json!({"status": "cancelled", "exit_code": 130}))
+                .unwrap();
+        }
+    }
+}
 use std::io::{Cursor, Seek, SeekFrom};
 use std::ops::ControlFlow;
 

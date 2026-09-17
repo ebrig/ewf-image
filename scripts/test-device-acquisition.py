@@ -116,6 +116,16 @@ def oracle(args, output, expected):
     command(args.ewfverify, "-q", output)
 
 
+def history_report(args, root, output, expected):
+    history = cli(args.binary, root, ["report", output])["history"]
+    latest = history["latest_run"]["result"]
+    assert latest["verification"]["sha256"] == expected, history
+    assert latest["status"] in ("complete", "complete_with_substitutions"), history
+    saved = output.parent / ("." + output.name + ".ewf-report.json")
+    assert json.loads(saved.read_text()) == history
+    return history
+
+
 def stalled_device(args, root, devices, mapped, expected, cancel):
     """Suspend only our mapper after a real checkpoint, holding kernel reads."""
     label = "cancel" if cancel else "timeout"
@@ -188,6 +198,8 @@ def stalled_device(args, root, devices, mapped, expected, cancel):
     done = cli(args.binary, root, ["resume", output, "--read-timeout-ms", "10000"])
     assert done["verification"]["sha256"] == expected, done
     oracle(args, output, expected)
+    history = history_report(args, root, output, expected)
+    assert history["runs"][0]["result"]["source_read_stop"] == ("cancelled" if cancel else "timeout"), history
 
 
 def main():
@@ -247,6 +259,7 @@ def main():
             assert done["verification"]["sha256"] == expected
             assert done["source"]["sector_size"] == sector
             oracle(args, output, expected)
+            history_report(args, root, output, expected)
             assert digest(source) == expected
             completed.append(f"{sector}-byte device: geometry, pause, removal, replacement rejection, resume, source preservation, libewf")
             # A real permission failure must not be substituted or create state.
@@ -268,6 +281,7 @@ def main():
         actual = bytearray(source.read_bytes())
         actual[512:1024] = bytes(512)
         oracle(args, output, hashlib.sha256(actual).hexdigest())
+        history_report(args, root, output, hashlib.sha256(actual).hexdigest())
         assert digest(source) == expected
         completed.append("kernel bad-sector I/O: default stop, explicit substitution, native range, libewf")
 
@@ -302,6 +316,10 @@ def main():
         done = cli(args.binary, root, ["resume", output])
         assert done["verification"]["sha256"] == expected
         oracle(args, output, expected)
+        history = history_report(args, root, output, expected)
+        assert len(history["runs"]) == 2, history
+        assert history["runs"][0]["status"] in ("failed", "interrupted"), history
+        completed.append("persistent history: stops, policy changes, disk-full interruption, consolidated verified report")
         completed.append("real filesystem ENOSPC, retained checkpoint, capacity expansion, verified resume")
     finally:
         try:
