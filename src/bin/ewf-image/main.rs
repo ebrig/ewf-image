@@ -87,6 +87,9 @@ struct Acquire {
 
 #[derive(Args)]
 struct ReadArgs {
+    /// Maximum wait for each source seek/read, in milliseconds; no deadline by default.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    read_timeout_ms: Option<u64>,
     /// Additional attempts per failed sector.
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(0..=100))]
     retries: u32,
@@ -151,12 +154,16 @@ fn main() -> ExitCode {
     ExitCode::from(code)
 }
 
-fn run(cli: &Cli, stop: &AtomicBool, report: &mut Value) -> Result<()> {
+fn run(cli: &Cli, stop: &Arc<AtomicBool>, report: &mut Value) -> Result<()> {
     let mut progress = Progress::new(cli.quiet, stop);
     match &cli.command {
         Command::Acquire(args) => {
             let output = session::normalize_output(&args.output)?;
             let mut source = Source::open(&args.source, args.sector_size, &output)?;
+            source.configure_reads(
+                Arc::clone(stop),
+                args.read.read_timeout_ms.map(Duration::from_millis),
+            )?;
             let _lock = session::lock(&output)?;
             let session = Session::new(output, source.identity.clone(), args);
             let options = session.options()?;
@@ -181,6 +188,10 @@ fn run(cli: &Cli, stop: &AtomicBool, report: &mut Value) -> Result<()> {
                 &session.source.path,
                 Some(session.source.sector_size),
                 &output,
+            )?;
+            source.configure_reads(
+                Arc::clone(stop),
+                read.read_timeout_ms.map(Duration::from_millis),
             )?;
             if source.identity != session.source {
                 return Err(invalid(
@@ -267,7 +278,7 @@ fn acquire(
         ..AcquisitionReadOptions::default()
     };
     report["read_policy"] = json!({"retries": args.retries, "zero_fill": args.zero_fill,
-        "checkpoint_interval": args.checkpoint_interval});
+        "checkpoint_interval": args.checkpoint_interval, "read_timeout_ms": args.read_timeout_ms});
     let result = writer.acquire_with_progress(source, &options, |p| {
         report["read_attempts"] = json!(p.read_attempts);
         report["retry_attempts"] = json!(p.retry_attempts);
@@ -284,12 +295,19 @@ fn acquire(
     report["checkpoint_bytes"] = json!(writer.checkpoint_offset());
     report["acquisition_errors"] = error_ranges(writer.acquisition_errors());
     report["substituted_sectors"] = json!(substituted_sectors(writer.acquisition_errors())?);
+    if let Some(kind) = source.read_failure() {
+        report["source_read_stop"] = json!(if kind == io::ErrorKind::TimedOut {
+            "timeout"
+        } else {
+            "cancelled"
+        });
+    }
     let outcome = result?;
-    source.check_unchanged()?;
     if outcome.status == AcquisitionStatus::Cancelled {
         report["status"] = json!("cancelled");
         return Ok(());
     }
+    source.check_unchanged()?;
     report["phase"] = json!("publication");
     let finished = writer.finish_with_progress(|p| {
         progress.event(&format!("{:?}", p.phase), p.bytes_processed, p.bytes_total)

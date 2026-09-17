@@ -1,4 +1,4 @@
-//! The CLI's only unsafe boundary: synchronous, read-only Windows queries.
+//! The CLI's only unsafe boundary: read-only Windows queries and I/O cancellation.
 //!
 //! No arbitrary control codes, caller-provided pointers, struct casts, or handle
 //! ownership transfers cross this boundary. Response decoding stays in safe Rust.
@@ -19,6 +19,15 @@ use windows_sys::Win32::System::Ioctl::{
     IOCTL_DISK_GET_DRIVE_GEOMETRY, IOCTL_DISK_GET_LENGTH_INFO, IOCTL_STORAGE_GET_DEVICE_NUMBER,
     IOCTL_STORAGE_QUERY_PROPERTY,
 };
+
+pub(super) fn cancel_read(thread: &std::thread::JoinHandle<()>) {
+    // SAFETY: JoinHandle owns a live thread handle for this call. This dedicated
+    // worker performs only source seeks/reads, never output I/O. No memory is
+    // released on cancellation; the worker retains its handle and buffers until
+    // the synchronous operation actually returns. Failure (including a race
+    // with completion or issuance) does not affect the caller's stop decision.
+    let _ = unsafe { windows_sys::Win32::System::IO::CancelSynchronousIo(thread.as_raw_handle()) };
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum Query {

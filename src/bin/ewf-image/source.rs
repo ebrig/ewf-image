@@ -1,11 +1,15 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, atomic::AtomicBool};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{Result, invalid};
+
+mod reader;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -40,6 +44,8 @@ pub(super) struct Source {
     pub identity: SourceIdentity,
     output: PathBuf,
     device_buffer: Option<Box<DeviceBuffer>>,
+    reader: Option<reader::Reader>,
+    position: u64,
 }
 
 // Safe aligned bounce storage for uncached device I/O. Do not reinterpret a
@@ -100,6 +106,8 @@ impl Source {
             identity,
             output: output.to_path_buf(),
             device_buffer: None,
+            reader: None,
+            position: 0,
         })
     }
 
@@ -125,9 +133,24 @@ impl Source {
             identity,
             output: output.to_path_buf(),
             device_buffer: Some(Box::new(DeviceBuffer([0; 16384]))),
+            reader: None,
+            position: 0,
         };
         source.check_unchanged()?;
         Ok(source)
+    }
+
+    pub fn configure_reads(
+        &mut self,
+        stop: Arc<AtomicBool>,
+        timeout: Option<Duration>,
+    ) -> io::Result<()> {
+        self.reader = Some(reader::Reader::new(self.file.try_clone()?, stop, timeout)?);
+        Ok(())
+    }
+
+    pub fn read_failure(&self) -> Option<io::ErrorKind> {
+        self.reader.as_ref().and_then(reader::Reader::failure)
     }
 
     pub fn check_unchanged(&self) -> Result<()> {
@@ -150,7 +173,22 @@ impl Source {
 
 impl Read for Source {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let result = if let Some(aligned) = &mut self.device_buffer {
+        if self.device_buffer.is_some()
+            && !buffer
+                .len()
+                .min(16384)
+                .is_multiple_of(self.identity.sector_size as usize)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unaligned device read length",
+            ));
+        }
+        let result = if let Some(reader) = &mut self.reader {
+            reader
+                .read_at(self.position, buffer)
+                .inspect(|&count| self.position += count as u64)
+        } else if let Some(aligned) = &mut self.device_buffer {
             let length = buffer.len().min(aligned.0.len());
             if !length.is_multiple_of(self.identity.sector_size as usize) {
                 return Err(io::Error::new(
@@ -166,6 +204,14 @@ impl Read for Source {
         };
         match result {
             Err(error) => {
+                // Do not issue another possibly blocking query after a deadline
+                // or cancellation. Neither condition is a media-sector error.
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+                ) {
+                    return Err(error);
+                }
                 // Disconnection is not an unreadable sector. Recheck device
                 // presence/identity before allowing the sector substitution policy.
                 if self.identity.kind == SourceKind::Device {
@@ -216,6 +262,16 @@ fn disconnected(error: &io::Error) -> bool {
 
 impl Seek for Source {
     fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        if self.reader.is_some() {
+            let offset = match position {
+                SeekFrom::Start(offset) => i128::from(offset),
+                SeekFrom::Current(delta) => i128::from(self.position) + i128::from(delta),
+                SeekFrom::End(delta) => i128::from(self.identity.size) + i128::from(delta),
+            };
+            self.position =
+                u64::try_from(offset).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+            return Ok(self.position);
+        }
         self.file.seek(position)
     }
 }
@@ -289,6 +345,20 @@ mod tests {
         let mut caller = [0; 1025];
         assert_eq!(source.read(&mut caller[1..]).unwrap(), 1024);
         assert_eq!(&caller[1..], &[0x71; 1024]);
+        assert_eq!(
+            source.read(&mut caller).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        source
+            .configure_reads(
+                Arc::new(AtomicBool::new(false)),
+                Some(Duration::from_secs(5)),
+            )
+            .unwrap();
+        source.seek(SeekFrom::Start(512)).unwrap();
+        assert_eq!(source.read(&mut caller[1..]).unwrap(), 1024);
+        assert_eq!(&caller[1..], &[0x71; 1024]);
+        assert_eq!(source.stream_position().unwrap(), 1536);
         assert_eq!(
             source.read(&mut caller).unwrap_err().kind(),
             io::ErrorKind::InvalidInput

@@ -61,10 +61,13 @@ fn cli_acquires_reopens_and_verifies_raw_and_zlib() {
                 "2",
                 "--case-number",
                 "case 123",
+                "--read-timeout-ms",
+                "10000",
             ],
             0,
         );
         assert_eq!(report["status"], "complete");
+        assert_eq!(report["read_policy"]["read_timeout_ms"], 10000);
         assert_eq!(report["published"], true);
         assert_eq!(report["verification"]["references_match"], true);
         assert_eq!(report["verification"]["sha256"], hash(&bytes));
@@ -111,10 +114,18 @@ fn cli_repeated_pause_inspect_validate_resume_preserves_bytes() {
     assert_eq!(validated["checkpoint"]["segment_hashes_validated"], true);
     let paused_again = result(
         dir.path(),
-        &["resume", "case.E01", "--stop-after", "9216"],
+        &[
+            "resume",
+            "case.E01",
+            "--stop-after",
+            "9216",
+            "--read-timeout-ms",
+            "10000",
+        ],
         130,
     );
     assert_eq!(paused_again["checkpoint_bytes"], 9216);
+    assert_eq!(paused_again["read_policy"]["read_timeout_ms"], 10000);
     let done = result(dir.path(), &["resume", "case.E01"], 0);
     assert_eq!(done["accepted_bytes"], bytes.len());
     assert_eq!(done["verification"]["sha256"], hash(&bytes));

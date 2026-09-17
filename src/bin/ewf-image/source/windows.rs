@@ -9,6 +9,10 @@ use windows_sys::Win32::System::Ioctl::{DISK_EXTENT, VOLUME_DISK_EXTENTS};
 use super::{Result, SourceIdentity, SourceKind, invalid};
 
 mod native;
+
+pub(super) fn cancel_read(thread: &std::thread::JoinHandle<()>) {
+    native::cancel_read(thread);
+}
 use native::Query;
 
 pub(super) fn disk_number(path: &Path) -> Option<u32> {

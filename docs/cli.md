@@ -67,8 +67,19 @@ cover zero substitutions too and do not establish recovery of unreadable data.
 
 ## Cancellation and resume
 
-Ctrl+C requests cooperative cancellation. On Unix, SIGTERM and SIGHUP use the
-same handler. The current OS operation or native segment seal must finish first.
+Ctrl+C requests cancellation. On Unix, SIGTERM and SIGHUP use the same handler.
+Source seeks/reads run in one dedicated worker with owned buffers. The acquisition
+thread checks its stop flag while waiting (every 20 ms), discards any late result,
+and checkpoints complete accepted chunks. Windows also requests cancellation of
+the worker's synchronous I/O. The stopped worker cannot write output or receive
+another read request; it retains its handle and buffer until the OS call returns.
+
+This does not bound total shutdown time: opening and identifying a source,
+identity checks after media errors, destination writes/flushes, segment sealing,
+and verification still use synchronous operations. Drivers may ignore native
+cancellation, and OS process teardown may wait for outstanding I/O. Linux does
+not forcibly cancel the worker's kernel read. The library's caller-supplied
+`Read + Seek` API retains cooperative cancellation between operations.
 `--stop-after BYTES` also pauses at an absolute accepted-byte offset, at chunk
 granularity; it is useful for scheduled acquisition windows and reproducible
 recovery testing. On resume, use a larger offset or omit it to finish.
@@ -96,9 +107,19 @@ Filesystem and power-loss limitations are described in [acquisition](acquisition
 `--retries N` allows 0 through 100 additional attempts per failed sector (default
 2). The default stops on an unreadable sector. `--zero-fill` explicitly enables
 zero substitution and native bad-sector records. EOF, permission, seek, and
-configuration/disconnection errors remain fatal. `--checkpoint-interval BYTES` must be a
+configuration/disconnection errors and timeouts remain fatal. `--checkpoint-interval BYTES` must be a
 positive chunk-size multiple within the segment namespace limit. Read policies
 can change on resume and apply only to future reads.
+
+`--read-timeout-ms N` sets a positive deadline for each worker request (a seek
+followed by a read of at most 16 KiB), including worker scheduling time. It applies
+to files and devices; there is no deadline by default. Expiry stops acquisition
+with exit 1, without retries or zero substitution, and preserves the last valid
+checkpoint. Supply the desired timeout again on `resume`; it is a per-invocation
+read policy, not part of source identity. Cancellation uses exit 130. A stop or
+deadline observed before a completed read is accepted takes precedence over it.
+The report includes `read_policy.read_timeout_ms`; a worker stop additionally
+sets `source_read_stop` to `timeout` or `cancelled`.
 
 ## Results
 
