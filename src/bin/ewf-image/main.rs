@@ -4,6 +4,7 @@ mod analyze;
 mod export;
 mod history;
 mod inspect;
+mod logical;
 mod recover;
 mod session;
 mod source;
@@ -44,6 +45,22 @@ struct Cli {
 enum Command {
     /// Inspect image metadata without verifying media contents.
     Info { image: PathBuf },
+    /// List logical catalog entries with stable preorder indices (root is 0).
+    Files {
+        image: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..=100000))]
+        limit: u32,
+    },
+    /// Strictly verify one logical file selected by its catalog index.
+    VerifyFile { image: PathBuf, entry: usize },
+    /// Extract one logical file to a NEW caller-selected filename.
+    ExtractFile {
+        image: PathBuf,
+        entry: usize,
+        output: PathBuf,
+    },
     /// Scan integrity findings and media coverage, continuing after chunk errors.
     Analyze {
         image: PathBuf,
@@ -181,7 +198,9 @@ fn main() -> ExitCode {
                 | "verified_with_substitutions"
                 | "exported_with_substitutions"
                 | "analysis_warnings"
-                | "recovered_with_findings",
+                | "recovered_with_findings"
+                | "file_hashes_missing"
+                | "extracted_without_reference",
             ) => 4,
             _ => 0,
         }
@@ -234,6 +253,19 @@ fn run(
     let mut progress = Progress::new(cli.quiet, stop);
     match &cli.command {
         Command::Info { image } => inspect::info(image, report),
+        Command::Files {
+            image,
+            offset,
+            limit,
+        } => logical::list(image, *offset, *limit as usize, &mut progress, report),
+        Command::VerifyFile { image, entry } => {
+            logical::read(image, *entry, None, &mut progress, report)
+        }
+        Command::ExtractFile {
+            image,
+            entry,
+            output,
+        } => logical::read(image, *entry, Some(output), &mut progress, report),
         Command::Analyze {
             image,
             maximum_findings,

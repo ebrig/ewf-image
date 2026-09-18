@@ -11,12 +11,41 @@ ewf-image checkpoint inspect case.E01
 ewf-image checkpoint validate case.E01
 ewf-image verify case.E01
 ewf-image info case.E01
+ewf-image files case.L01 --limit 1000
+ewf-image verify-file case.L01 1
+ewf-image extract-file case.L01 1 selected.bin
 ewf-image analyze case.E01 --maximum-findings 1024
 ewf-image recover damaged.E01 recovered-case --maximum-output-bytes 107374182400
 ewf-image export case.E01 disk.raw
 ewf-image report case.E01
 ewf-image report case.E01 --write
 ```
+
+## Logical file operations
+
+`files IMAGE` lists L01/Lx01 catalog entries in preorder, with root index 0.
+Use `--offset` and `--limit` to page through the catalog; `next_offset` is null
+on the last page. Indices select entries even when names collide or contain
+characters that cannot be represented as destination filenames. They remain
+stable only for the same unchanged image. Listing does not verify file data.
+
+`verify-file IMAGE INDEX` strictly reads that regular file, computes MD5, SHA1,
+and SHA256, and compares available file MD5/SHA1 references. Container hashes
+are not file references. Missing file hashes return `file_hashes_missing`
+(exit 4); mismatches, invalid references, and unreadable data fail (exit 3).
+Directories and unknown entry types cannot be verified as regular files.
+
+`extract-file IMAGE INDEX OUTPUT` streams the file into a temporary file beside
+OUTPUT, checks its stored file hashes, synchronizes it, and publishes without
+overwriting an existing destination. Cancellation, corruption, and hash mismatch
+leave no final output. Missing references permit extraction but return
+`extracted_without_reference` (exit 4), with computed digests for independent
+comparison. Successful extraction with matching references returns exit 0.
+The caller chooses OUTPUT; catalog names are never interpreted as destination
+paths. Extraction copies content only, without restoring timestamps, ACLs,
+links, extended attributes, or alternate streams. Both commands bypass decoded
+caches and zero-on-error recovery. They verify only the selected file, not all
+container media, and report `media_verified: false`.
 
 ## Metadata inspection
 

@@ -177,6 +177,8 @@ mod image;
 mod index;
 #[cfg(feature = "verify")]
 mod integrity;
+#[cfg(feature = "verify")]
+mod logical_verify;
 mod metadata;
 mod publication;
 mod reader_cache;
@@ -198,6 +200,8 @@ pub use image::recovery::{
     RecoveryStatus,
 };
 pub use image::{Image, ImageCursor, SegmentReader, SingleFileCursor};
+#[cfg(feature = "verify")]
+pub use logical_verify::{SingleFileProgress, SingleFileVerification};
 pub use reader_statistics::{ReaderCacheInfo, ReaderStatistics};
 pub use sections::{SectionInfo, SectionKind};
 pub use signature::{

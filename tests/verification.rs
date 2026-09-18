@@ -10,6 +10,96 @@ use ewf_image::{
 };
 use sha2::{Digest, Sha256};
 
+#[test]
+fn logical_verification_handles_sparse_duplicates_references_and_cancellation() {
+    use ewf_image::{SingleFileEntry, SingleFileEntryType, SingleFileExtent};
+    let (_dir, path) = fixture(b"abc", WriteFormat::Ewf1Physical, WriteCompression::None);
+    let image = Image::open(path).unwrap();
+    let mut entry = SingleFileEntry {
+        file_entry_type: Some(SingleFileEntryType::File),
+        size: Some(3),
+        duplicate_data_offset: Some(0),
+        md5: Some("900150983CD24FB0D6963F7D28E17F72".into()),
+        sha1: Some("a9993e364706816aba3e25717850c26c9cd0d89d".into()),
+        ..SingleFileEntry::default()
+    };
+    let verified = image.verify_single_file(&entry).unwrap();
+    assert_eq!(verified.references_match(), Some(true));
+    assert_eq!(verified.bytes_verified, 3);
+    assert!(matches!(
+        image.verify_single_file_with_progress(&entry, |_| ControlFlow::Break(())),
+        Err(EwfError::Aborted)
+    ));
+    entry.md5 = Some("00".repeat(16));
+    assert_eq!(
+        image.verify_single_file(&entry).unwrap().references_match(),
+        Some(false)
+    );
+    entry.md5 = Some("malformed".into());
+    assert!(image.verify_single_file(&entry).is_err());
+    entry.md5 = None;
+    entry.sha1 = None;
+    entry.size = Some(5);
+    entry.extents = vec![
+        SingleFileExtent {
+            data_offset: 0,
+            data_size: 3,
+            sparse: false,
+        },
+        SingleFileExtent {
+            data_offset: u64::MAX,
+            data_size: 2,
+            sparse: true,
+        },
+    ];
+    let mut output = Vec::new();
+    let verified = image
+        .copy_single_file_with_progress(&entry, &mut output, |_| ControlFlow::Continue(()))
+        .unwrap();
+    assert_eq!(output, b"abc\0\0");
+    assert_eq!(verified.references_match(), None);
+    assert_eq!(
+        verified.hashes.sha256.as_slice(),
+        Sha256::digest(&output).as_slice()
+    );
+    entry.size = Some(6);
+    assert!(image.verify_single_file(&entry).is_err());
+    entry.size = Some(0);
+    assert_eq!(image.verify_single_file(&entry).unwrap().bytes_verified, 0);
+    entry.file_entry_type = Some(SingleFileEntryType::Directory);
+    assert!(image.verify_single_file(&entry).is_err());
+}
+
+#[test]
+fn logical_verification_bypasses_cached_and_substituted_chunks() {
+    use ewf_image::{SingleFileEntry, SingleFileEntryType};
+    let (_dir, path) = fixture(b"abc", WriteFormat::Ewf1Physical, WriteCompression::None);
+    let image = Image::open(&path).unwrap();
+    let entry = SingleFileEntry {
+        file_entry_type: Some(SingleFileEntryType::File),
+        size: Some(3),
+        duplicate_data_offset: Some(0),
+        ..SingleFileEntry::default()
+    };
+    image.read_single_file_at(&entry, &mut [0; 3], 0).unwrap();
+    let offset = image
+        .sections()
+        .iter()
+        .find(|s| s.kind == SectionKind::Ewf1("sectors".into()))
+        .unwrap()
+        .data_offset;
+    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.write_all(b"z").unwrap();
+    file.sync_all().unwrap();
+    image.set_read_zero_chunk_on_error(true);
+    assert!(image.verify_single_file(&entry).is_err());
+    let image = Image::open(&path).unwrap();
+    image.set_read_zero_chunk_on_error(true);
+    image.read_single_file_at(&entry, &mut [0; 3], 0).unwrap();
+    assert!(image.verify_single_file(&entry).is_err());
+}
+
 fn fixture(
     data: &[u8],
     format: WriteFormat,

@@ -1149,6 +1149,10 @@ impl Image {
     /// Returns an error if chunk lookup, decoding, checksum validation, or
     /// segment I/O fails, or if [`Image::signal_abort`] has been called.
     pub fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
+        self.read_at_impl(buf, offset, false)
+    }
+
+    fn read_at_impl(&self, buf: &mut [u8], offset: u64, strict: bool) -> Result<usize> {
         self.ensure_not_aborted()?;
         if buf.is_empty() || offset >= self.inner.info.logical_size {
             return Ok(0);
@@ -1171,7 +1175,11 @@ impl Image {
             let chunk_id = current / chunk_size;
             let page_offset = usize::try_from(current % chunk_size)
                 .map_err(|_| EwfError::Malformed("page offset does not fit usize".into()))?;
-            let decoded = self.read_chunk(chunk_id)?;
+            let decoded = if strict {
+                Arc::new(self.verification_chunk(chunk_id)?)
+            } else {
+                self.read_chunk(chunk_id)?
+            };
             let remaining =
                 usize::try_from(to_read - u64::try_from(copied).unwrap()).map_err(|_| {
                     EwfError::Malformed("remaining read size does not fit usize".into())
@@ -1215,6 +1223,28 @@ impl Image {
         buf: &mut [u8],
         offset: u64,
     ) -> Result<usize> {
+        self.read_single_file_at_impl(entry, buf, offset, false)
+    }
+
+    /// Reads a logical file with strict chunk validation, bypassing decoded
+    /// caches and the zero-on-error policy. Sparse extents still read as zeroes.
+    /// Does not verify stored file hashes; use `verify_single_file` for that.
+    pub fn read_single_file_at_strict(
+        &self,
+        entry: &SingleFileEntry,
+        buf: &mut [u8],
+        offset: u64,
+    ) -> Result<usize> {
+        self.read_single_file_at_impl(entry, buf, offset, true)
+    }
+
+    fn read_single_file_at_impl(
+        &self,
+        entry: &SingleFileEntry,
+        buf: &mut [u8],
+        offset: u64,
+        strict: bool,
+    ) -> Result<usize> {
         self.ensure_not_aborted()?;
         if buf.is_empty() {
             return Ok(0);
@@ -1245,7 +1275,7 @@ impl Image {
                 EwfError::Malformed("single file duplicate read size does not fit usize".into())
             })?;
             let out = &mut buf[..read_size];
-            let read = self.read_at(out, image_offset)?;
+            let read = self.read_at_impl(out, image_offset, strict)?;
             if read != read_size {
                 return Err(EwfError::Malformed(
                     "single file duplicate data read was truncated".into(),
@@ -1290,7 +1320,7 @@ impl Image {
                 .ok_or_else(|| {
                     EwfError::Malformed("single file extent data offset overflow".into())
                 })?;
-            let read = self.read_at(out, image_offset)?;
+            let read = self.read_at_impl(out, image_offset, strict)?;
             if read != read_size {
                 return Err(EwfError::Malformed(
                     "single file extent read was truncated".into(),
@@ -1927,7 +1957,6 @@ impl Image {
         Ok(decoded)
     }
 
-    #[cfg(feature = "verify")]
     pub(crate) fn verification_chunk(&self, chunk_id: u64) -> Result<Vec<u8>> {
         self.ensure_not_aborted()?;
         let chunk = self.lookup_chunk(chunk_id)?;
@@ -2414,7 +2443,7 @@ impl Seek for SingleFileCursor {
     }
 }
 
-fn single_file_size(entry: &SingleFileEntry) -> Result<u64> {
+pub(crate) fn single_file_size(entry: &SingleFileEntry) -> Result<u64> {
     if let Some(size) = entry.size {
         return Ok(size);
     }

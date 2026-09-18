@@ -10,6 +10,90 @@ use ewf_image::Image;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+#[test]
+fn cli_logical_listing_verification_and_safe_selective_extraction() {
+    use ewf_image::{
+        EwfWriter, SingleFileEntry, SingleFileEntryType, SingleFileExtent, SingleFilesInfo,
+        WriteFormat, WriteOptions,
+    };
+    for (name, format) in [
+        ("case.L01", WriteFormat::Ewf1Logical),
+        ("case.Lx01", WriteFormat::Ewf2Logical),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = SingleFileEntry {
+            identifier: Some(2),
+            name: Some("../untrusted:stream".into()),
+            file_entry_type: Some(SingleFileEntryType::File),
+            size: Some(3),
+            md5: Some("900150983cd24fb0d6963f7d28e17f72".into()),
+            extents: vec![SingleFileExtent {
+                data_offset: 0,
+                data_size: 3,
+                sparse: false,
+            }],
+            ..SingleFileEntry::default()
+        };
+        let mut missing = entry.clone();
+        missing.identifier = Some(3);
+        missing.md5 = None;
+        let mut mismatch = entry.clone();
+        mismatch.identifier = Some(4);
+        mismatch.md5 = Some("11".repeat(16));
+        let options = WriteOptions {
+            format,
+            single_files: Some(SingleFilesInfo {
+                root: SingleFileEntry {
+                    identifier: Some(1),
+                    name: Some("root".into()),
+                    file_entry_type: Some(SingleFileEntryType::Directory),
+                    children: vec![entry, missing, mismatch],
+                    ..SingleFileEntry::default()
+                },
+                ..SingleFilesInfo::default()
+            }),
+            ..WriteOptions::default()
+        };
+        let mut writer = EwfWriter::create(dir.path().join(name), options).unwrap();
+        writer.write_all(b"abc").unwrap();
+        writer.finish().unwrap();
+        let page = result(dir.path(), &["files", name, "--limit", "2"], 0);
+        assert_eq!(page["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(page["next_offset"], 2);
+        assert_eq!(page["media_verified"], false);
+        let next = result(dir.path(), &["files", name, "--offset", "2"], 0);
+        assert_eq!(next["entries"][0]["index"], 2);
+        let verified = result(dir.path(), &["verify-file", name, "1"], 0);
+        assert_eq!(verified["verification"]["references_match"], true);
+        assert_eq!(verified["verification"]["bytes_verified"], 3);
+        result(dir.path(), &["extract-file", name, "1", "selected.bin"], 0);
+        assert_eq!(fs::read(dir.path().join("selected.bin")).unwrap(), b"abc");
+        result(dir.path(), &["extract-file", name, "1", "selected.bin"], 1);
+        result(dir.path(), &["extract-file", name, "1", name], 1);
+        result(
+            dir.path(),
+            &["extract-file", name, "1", &format!(".{name}.ewf-journal")],
+            1,
+        );
+        assert_eq!(
+            result(dir.path(), &["verify-file", name, "2"], 4)["verification"]["references_match"],
+            Value::Null
+        );
+        result(dir.path(), &["extract-file", name, "2", "missing.bin"], 4);
+        result(dir.path(), &["verify-file", name, "3"], 3);
+        result(dir.path(), &["extract-file", name, "3", "mismatch.bin"], 3);
+        assert!(!dir.path().join("mismatch.bin").exists());
+        result(dir.path(), &["verify-file", name, "0"], 3);
+        result(dir.path(), &["verify-file", name, "999"], 1);
+        assert!(fs::read_dir(dir.path()).unwrap().all(|e| {
+            !e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".ewf-logical-")
+        }));
+    }
+}
+
 fn cli(directory: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_ewf-image"))
         .current_dir(directory)
