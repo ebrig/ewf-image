@@ -1,6 +1,7 @@
 //! AFF4 evidence streams, separate from the EWF format implementation.
 //!
-//! Supports ZIP AFF4 v1 physical ImageStreams and Maps. Reads never extract
+//! Supports ZIP AFF4 v1 physical ImageStreams and Maps, legacy AFF4-L 1.1,
+//! and a documented subset of the AFF4-L 2.1 draft. Reads never extract
 //! archive paths onto the host filesystem. Verification covers selected stream
 //! bytes and available linear hashes, not block-map or metadata authenticity.
 #![forbid(unsafe_code)]

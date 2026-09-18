@@ -13,9 +13,13 @@ use sha2::Sha256;
 use zip::ZipArchive;
 
 use crate::{Error, Result, malformed};
+use base64::Engine;
 
 const NS: &str = "http://aff4.org/Schema#";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+const LOGICAL_NS: &str = "https://aff4.org/Schema/2022/#";
+const LEGACY_LOGICAL_NS: &str = "http://aff4.org/Schema/2022/#";
+const BASE64: &str = "http://www.w3.org/2001/XMLSchema#base64Binary";
 
 /// Limits on retained metadata, map/index members, and decoded chunks.
 #[derive(Debug, Clone)]
@@ -90,6 +94,7 @@ pub struct Container {
     limits: Limits,
     cache: Option<(String, Vec<u8>)>,
     maps: BTreeMap<String, Arc<Map>>,
+    version: (u32, u32),
 }
 
 #[derive(Clone)]
@@ -132,9 +137,19 @@ impl Container {
                 return Err(malformed("duplicate version field"));
             }
         }
-        if fields.get("major") != Some(&"1") || fields.get("minor") != Some(&"0") {
+        let version = (
+            fields
+                .get("major")
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0),
+            fields
+                .get("minor")
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0),
+        );
+        if !matches!(version, (1, 0) | (1, 1) | (2, 1)) {
             return Err(Error::Unsupported(
-                "container version (supported: 1.0)".into(),
+                "container version (supported: 1.0, legacy logical 1.1, draft logical 2.1)".into(),
             ));
         }
         let comment = std::str::from_utf8(archive.comment())
@@ -154,35 +169,49 @@ impl Container {
         if !comment.is_empty() && comment != volume {
             return Err(malformed("conflicting volume identifiers"));
         }
-        let turtle = member(&mut archive, "information.turtle", limits.metadata_bytes)?;
         let mut graph: BTreeMap<String, Vec<Property>> = BTreeMap::new();
-        for (count, triple) in TurtleParser::new()
-            .for_reader(turtle.as_slice())
-            .enumerate()
-        {
-            if count >= limits.triples {
-                return Err(malformed("RDF triple limit exceeded"));
+        let mut pending = vec!["information.turtle".to_owned()];
+        let mut seen = BTreeSet::new();
+        let mut remaining = limits.metadata_bytes;
+        let mut count = 0;
+        while let Some(name) = pending.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
             }
-            let triple = triple.map_err(|error| malformed(format!("Turtle: {error}")))?;
-            let subject = match triple.subject {
-                NamedOrBlankNode::NamedNode(n) => n.into_string(),
-                NamedOrBlankNode::BlankNode(n) => format!("_:{n}"),
-            };
-            let (value, datatype, language) = match triple.object {
-                Term::NamedNode(n) => (n.into_string(), None, None),
-                Term::BlankNode(n) => (format!("_:{n}"), None, None),
-                Term::Literal(l) => (
-                    l.value().to_owned(),
-                    Some(l.datatype().as_str().to_owned()),
-                    l.language().map(str::to_owned),
-                ),
-            };
-            graph.entry(subject).or_default().push(Property {
-                predicate: triple.predicate.into_string(),
-                value,
-                datatype,
-                language,
-            });
+            let turtle = member(&mut archive, &name, remaining)?;
+            remaining -= turtle.len() as u64;
+            for triple in TurtleParser::new().for_reader(turtle.as_slice()) {
+                if count >= limits.triples {
+                    return Err(malformed("RDF triple limit exceeded"));
+                }
+                let triple = triple.map_err(|error| malformed(format!("Turtle: {error}")))?;
+                count += 1;
+                let subject = match triple.subject {
+                    NamedOrBlankNode::NamedNode(n) => n.into_string(),
+                    NamedOrBlankNode::BlankNode(n) => format!("_:{n}"),
+                };
+                let (value, datatype, language) = match triple.object {
+                    Term::NamedNode(n) => (n.into_string(), None, None),
+                    Term::BlankNode(n) => (format!("_:{n}"), None, None),
+                    Term::Literal(l) => (
+                        l.value().to_owned(),
+                        Some(l.datatype().as_str().to_owned()),
+                        l.language().map(str::to_owned),
+                    ),
+                };
+                if is_property(triple.predicate.as_str(), "imports") {
+                    if datatype.is_some() {
+                        return Err(malformed("metadata import must be an IRI"));
+                    }
+                    pending.push(storage_name(&archive, &volume, &value, version)?);
+                }
+                graph.entry(subject).or_default().push(Property {
+                    predicate: triple.predicate.into_string(),
+                    value,
+                    datatype,
+                    language,
+                });
+            }
         }
         Ok(Self {
             archive,
@@ -191,6 +220,7 @@ impl Container {
             limits,
             cache: None,
             maps: BTreeMap::new(),
+            version,
         })
     }
 
@@ -204,14 +234,26 @@ impl Container {
         &self.volume
     }
 
+    /// Declared container version; 2.1 refers to the evolving AFF4-L draft.
+    pub fn version(&self) -> (u32, u32) {
+        self.version
+    }
+
     /// Enumerates image resources and storage streams. Selection is never implicit.
     pub fn streams(&self) -> Result<Vec<StreamInfo>> {
         self.graph
             .keys()
             .filter(|id| {
-                ["Image", "DiskImage", "ImageStream", "Map"]
-                    .iter()
-                    .any(|t| self.has_type(id, t))
+                [
+                    "Image",
+                    "DiskImage",
+                    "ImageStream",
+                    "Map",
+                    "FileImage",
+                    "FileSubStream",
+                ]
+                .iter()
+                .any(|t| self.has_type(id, t))
             })
             .map(|id| {
                 Ok(StreamInfo {
@@ -252,6 +294,9 @@ impl Container {
         mut progress: impl FnMut(u64, u64) -> ControlFlow<()>,
     ) -> Result<Verification> {
         let size = self.size(id)?;
+        self.cache = None;
+        self.maps.clear();
+        self.read_inner(id, &mut [], 0, &mut Vec::new())?;
         let mut offset = 0;
         let mut buffer = vec![0; 1024 * 1024];
         let mut md5 = Md5::new();
@@ -283,7 +328,7 @@ impl Container {
         };
         for reference in self
             .properties(id)
-            .filter(|p| p.predicate == format!("{NS}hash"))
+            .filter(|p| is_property(&p.predicate, "hash"))
         {
             let datatype = reference.datatype.as_deref().unwrap_or("");
             let expected = match datatype.strip_prefix(NS) {
@@ -313,12 +358,12 @@ impl Container {
     }
     fn has_type(&self, id: &str, kind: &str) -> bool {
         self.properties(id)
-            .any(|p| p.predicate == RDF_TYPE && p.value == format!("{NS}{kind}"))
+            .any(|p| p.predicate == RDF_TYPE && is_property(&p.value, kind))
     }
     fn value(&self, id: &str, key: &str) -> Result<Option<String>> {
         let values: BTreeSet<_> = self
             .properties(id)
-            .filter(|p| p.predicate == format!("{NS}{key}"))
+            .filter(|p| is_property(&p.predicate, key))
             .map(|p| p.value.clone())
             .collect();
         if values.len() > 1 {
@@ -334,6 +379,9 @@ impl Container {
     }
     fn stream_size(&self, id: &str, visited: &mut Vec<String>) -> Result<u64> {
         enter(id, visited)?;
+        if self.inline_data(id)?.is_some() {
+            return self.number(id, "size");
+        }
         if let Some(target) = self.value(id, "dataStream")? {
             let size = self.stream_size(&target, visited)?;
             if self.value(id, "size")?.is_some() && self.number(id, "size")? != size {
@@ -345,16 +393,35 @@ impl Container {
         }
     }
     fn path(&self, id: &str) -> Result<String> {
-        if let Some(path) = self.value(id, "fileName")? {
+        if !self.has_type(id, "FileImage")
+            && let Some(path) = self.value(id, "fileName")?
+        {
             return Ok(path);
         }
-        if let Some(path) = id.strip_prefix(&format!("{}/", self.volume)) {
-            return Ok(escape(path));
+        storage_name(&self.archive, &self.volume, id, self.version)
+    }
+
+    fn inline_data(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        let mut result = None;
+        for p in self.properties(id).filter(|p| {
+            (is_property(&p.predicate, "dataStream") || is_property(&p.predicate, "dataSteam"))
+                && p.datatype.as_deref() == Some(BASE64)
+        }) {
+            if p.value.len() > 1400 {
+                return Err(malformed("inline data exceeds 1 KiB limit"));
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&p.value)
+                .map_err(|_| malformed("invalid inline base64"))?;
+            if bytes.len() > 1024 || bytes.len() as u64 != self.number(id, "size")? {
+                return Err(malformed("inline data size mismatch"));
+            }
+            if result.as_ref().is_some_and(|old| old != &bytes) {
+                return Err(malformed("conflicting inline data"));
+            }
+            result = Some(bytes);
         }
-        let rest = id
-            .strip_prefix("aff4://")
-            .ok_or_else(|| Error::Unsupported("non-AFF4 storage reference".into()))?;
-        Ok(format!("aff4%3A%2F%2F{}", escape(rest)))
+        Ok(result)
     }
     fn load_map(&mut self, id: &str) -> Result<()> {
         if self.maps.contains_key(id) {
@@ -460,8 +527,30 @@ impl Container {
         {
             return Err(malformed("target range exceeds stream"));
         }
+        if let Some(data) = self.inline_data(id)? {
+            buffer.copy_from_slice(&data[offset as usize..offset as usize + buffer.len()]);
+            return Ok(());
+        }
         if let Some(target) = self.value(id, "dataStream")? {
             return self.read_inner(&target, buffer, offset, visited);
+        }
+        if self.has_type(id, "ZipSegment") || self.has_type(id, "zip_segment") {
+            let path = self.path(id)?;
+            let mut file = self.archive.by_name(&path)?;
+            if file.size() != size {
+                return Err(malformed("ZIP segment size mismatch"));
+            }
+            if std::io::copy(&mut file.by_ref().take(offset), &mut std::io::sink())? != offset {
+                return Err(malformed("truncated ZIP segment"));
+            }
+            file.read_exact(buffer)?;
+            if offset + buffer.len() as u64 == size {
+                let mut eof = [0];
+                if file.read(&mut eof)? != 0 {
+                    return Err(malformed("oversized ZIP segment"));
+                }
+            }
+            return Ok(());
         }
         if self.has_type(id, "Map") {
             self.load_map(id)?;
@@ -566,6 +655,38 @@ fn enter(id: &str, visited: &mut Vec<String>) -> Result<()> {
     }
     visited.push(id.to_owned());
     Ok(())
+}
+
+fn is_property(predicate: &str, local: &str) -> bool {
+    [NS, LOGICAL_NS, LEGACY_LOGICAL_NS]
+        .iter()
+        .any(|ns| predicate.strip_prefix(ns) == Some(local))
+}
+
+fn storage_name(
+    archive: &ZipArchive<File>,
+    volume: &str,
+    id: &str,
+    version: (u32, u32),
+) -> Result<String> {
+    if version != (1, 0) && archive.index_for_name(id).is_some() {
+        return Ok(id.to_owned());
+    }
+    if let Some(path) = id.strip_prefix(&format!("{volume}/")) {
+        return Ok(if version == (1, 0) {
+            escape(path)
+        } else {
+            path.to_owned()
+        });
+    }
+    let rest = id
+        .strip_prefix("aff4://")
+        .ok_or_else(|| Error::Unsupported("non-AFF4 storage reference".into()))?;
+    Ok(if version == (1, 0) {
+        format!("aff4%3A%2F%2F{}", escape(rest))
+    } else {
+        id.to_owned()
+    })
 }
 fn member(archive: &mut ZipArchive<File>, name: &str, limit: u64) -> Result<Vec<u8>> {
     let file = archive.by_name(name)?;

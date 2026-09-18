@@ -6,6 +6,14 @@ use std::ops::ControlFlow;
 use zip::{ZipWriter, write::SimpleFileOptions};
 
 fn fixture(turtle: &str, members: &[(&str, &[u8])]) -> tempfile::NamedTempFile {
+    fixture_version(turtle, members, b"major=1\nminor=0\n")
+}
+
+fn fixture_version(
+    turtle: &str,
+    members: &[(&str, &[u8])],
+    version: &[u8],
+) -> tempfile::NamedTempFile {
     let file = tempfile::NamedTempFile::new().unwrap();
     let mut zip = ZipWriter::new(File::create(file.path()).unwrap());
     let options = SimpleFileOptions::default()
@@ -13,7 +21,7 @@ fn fixture(turtle: &str, members: &[(&str, &[u8])]) -> tempfile::NamedTempFile {
         .large_file(true);
     zip.set_comment("aff4://volume").unwrap();
     for (name, data) in [
-        ("version.txt", b"major=1\nminor=0\n".as_slice()),
+        ("version.txt", version),
         ("information.turtle", turtle.as_bytes()),
     ]
     .into_iter()
@@ -194,4 +202,75 @@ fn canonical_reference_matches_producer_hashes() {
         )
         .unwrap();
     assert_eq!(&header[510..], &[0x55, 0xaa]);
+}
+
+#[test]
+fn logical_zip_inline_imports_and_metadata() {
+    let meta = r#"@prefix a: <http://aff4.org/Schema#> . @prefix l: <https://aff4.org/Schema/2022/#> .
+    <aff4://volume> l:imports <aff4://volume/extra.turtle> .
+    <aff4://file> a l:FileImage, a:Image, a:ZipSegment; a:size 3; l:fileName "../source:stream";
+      a:hash "900150983cd24fb0d6963f7d28e17f72"^^a:MD5 ."#;
+    let extra = r#"@prefix a: <http://aff4.org/Schema#> . @prefix l: <https://aff4.org/Schema/2022/#> .
+    <aff4://inline> a l:FileSubStream, a:Image; a:size 3; a:dataStream "YWJj"^^<http://www.w3.org/2001/XMLSchema#base64Binary> ."#;
+    let file = fixture_version(
+        meta,
+        &[("extra.turtle", extra.as_bytes()), ("aff4://file", b"abc")],
+        b"major=2\nminor=1\n",
+    );
+    let mut image = Container::open(file.path()).unwrap();
+    assert_eq!(image.version(), (2, 1));
+    assert_eq!(image.streams().unwrap().len(), 2);
+    assert_eq!(
+        image
+            .verify("aff4://file", |_, _| ControlFlow::Continue(()))
+            .unwrap()
+            .references_match,
+        Some(true)
+    );
+    let mut buffer = [0; 3];
+    image.read_at("aff4://inline", &mut buffer, 0).unwrap();
+    assert_eq!(&buffer, b"abc");
+    assert!(
+        image.metadata()["aff4://file"]
+            .iter()
+            .any(|p| p.value == "../source:stream")
+    );
+    assert!(
+        Container::open_with_limits(
+            file.path(),
+            Limits {
+                metadata_bytes: meta.len() as u64,
+                ..Limits::default()
+            }
+        )
+        .is_err()
+    );
+    let bad = fixture_version(
+        &extra.replace("a:size 3", "a:size 4"),
+        &[],
+        b"major=2\nminor=1\n",
+    );
+    assert!(
+        Container::open(bad.path())
+            .unwrap()
+            .size("aff4://inline")
+            .is_err()
+    );
+}
+
+#[test]
+#[ignore = "requires the pinned legacy AFF4-L canonical dream image"]
+fn canonical_logical_reference_matches_producer_hashes() {
+    let path = std::env::var_os("AFF4_LOGICAL_REFERENCE_IMAGE")
+        .expect("AFF4_LOGICAL_REFERENCE_IMAGE required");
+    let mut image = Container::open(path).unwrap();
+    let streams = image.streams().unwrap();
+    assert_eq!(streams.len(), 1);
+    let result = image
+        .verify(&streams[0].id, |_, _| ControlFlow::Continue(()))
+        .unwrap();
+    assert_eq!(result.bytes_verified, 8688);
+    assert_eq!(result.md5, "75d83773f8d431a3ca91bfb8859e486d");
+    assert_eq!(result.sha1, "9ae1b46bead70c322eef7ac8bc36a8ea2055595c");
+    assert_eq!(result.references_match, Some(true));
 }
