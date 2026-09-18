@@ -12,6 +12,7 @@ ewf-image checkpoint validate case.E01
 ewf-image verify case.E01
 ewf-image info case.E01
 ewf-image analyze case.E01 --maximum-findings 1024
+ewf-image recover damaged.E01 recovered-case --maximum-output-bytes 107374182400
 ewf-image export case.E01 disk.raw
 ewf-image report case.E01
 ewf-image report case.E01 --write
@@ -48,7 +49,7 @@ opening and redundant-table inspection precede cancellable media progress.
 file. It supports the reader's unencrypted physical, SMART, and logical-image
 formats. For logical images this is the flat media stream, not extraction of
 individual files. Incomplete acquisitions are rejected. No damaged chunks are
-silently zero-filled; use the separate recovery library for explicit recovery.
+silently zero-filled; use `recover` for explicit damaged-image recovery.
 
 The command computes MD5, SHA1, and SHA256 while writing and compares every
 supported stored digest. A mismatch exits 3 without publishing the destination.
@@ -73,7 +74,59 @@ retains one decoded chunk plus encoded data/decoder scratch space and the bounde
 table cache, rather than the full media stream; at most 16 segment handles remain
 open. Memory therefore also depends on the image's chunk size and metadata.
 
+## Damaged-image recovery
+
+`recover IMAGE OUTPUT_DIRECTORY` creates a new directory containing a raw image,
+a JSON-lines provenance map, and a result report. It currently supports physical,
+unencrypted raw/zlib EWF1 with reliable geometry and separate sectors sections.
+It can use validated redundant tables and intact descriptor-chain prefixes;
+it does not carve missing descriptors or recover ambiguous missing middle segments.
+Logical/SMART, EWF2, encrypted, and Zstandard recovery are rejected.
+
+Unrecoverable chunks become zeros. `--preserve-checksum-suspect` explicitly allows
+decodable bytes with suspect checksums when no validated alternate exists.
+`--maximum-output-bytes` rejects excessive declared media size before creating
+the directory. Existing output directories/files, source aliases, and source
+control paths are refused. Output files are created and published exclusively.
+
+During recovery, `image.raw.partial` contains emitted bytes and
+`map.jsonl.partial` starts with a header identifying source paths and policy.
+Every fully emitted chunk receives a record with its index, logical offset,
+length, and `Primary`, `Redundant`, `SuspectPrimary`, `SuspectRedundant`, or
+`ZeroFilled` status. This on-disk map is not subject to the bounded in-memory
+summary's record limit. Map-write failure stops recovery. Successful completion
+synchronizes both files, installs `image.raw` and `map.jsonl`, and writes
+`result.json` with `recovery_complete: true` and output/map SHA256 values.
+All three artifacts are required for a completed bundle. The hashes identify
+the resulting artifacts; `media_verified` remains false and no authenticity or
+recovery of substituted data is implied.
+
+Cancellation exits 130 and retains partial files with a result report when the
+filesystem permits. Output/map failures exit 1 and also preserve available
+partial evidence. `raw_bytes_written` includes short writes; `mapped_bytes`
+covers only chunks with fully written provenance records. Bytes beyond that
+coverage have no completed provenance record. Prefix hashes describe bytes
+accepted by each file writer. A disk-full or crash may leave a truncated final
+map line; do not treat that line as a record. Neither recovery nor its map is
+resumable, and source segments must remain stable throughout the operation.
+
+Absence of `result.json`, or `recovery_complete: false`, means incomplete work,
+even if publication had already installed one or both final filenames. The CLI
+never infers completion from filenames alone. Report-save failure exits 1 with
+`status: reporting_failed`; stdout retains the recovery result and artifact
+paths. Cancellation is cooperative at chunk boundaries; opening, chunk decoding,
+synchronous reads/writes and synchronization must return first. Unix synchronizes
+directories; power-loss durability and Windows directory synchronization are not
+certified. Keep partial bundles for inspection and choose a fresh directory to retry.
+
+Exit 0 means recovery completed without reported recovery findings. Exit 4 means
+it completed using redundant or suspect data, zero substitution, or with structural
+notices. Neither status is a successful verification verdict. Detailed summaries
+retain up to 1024 ranges and notices each and explicitly count omitted records;
+the map still records every emitted chunk.
+
 ## Acquisition
+
 
 Regular-file sources must be nonempty and sector aligned. The default
 sector size is 512; `--sector-size` accepts 512, 1024, 2048, or 4096. Output is
@@ -243,11 +296,11 @@ finish may still need recovery to resolve publication state.
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | Acquisition/verification, inspection, history, checkpoint, or export succeeded |
+| 0 | Operation succeeded; analysis/recovery reported no findings |
 | 1 | Operational failure or result-output failure |
 | 2 | Invalid command-line arguments |
 | 3 | `verify` failed, export found a stored-digest mismatch, or analysis found errors |
-| 4 | Acquisition/verification/export succeeded with substitutions, or analysis found only warnings |
+| 4 | Acquisition/verification/export succeeded with substitutions, analysis found only warnings, or recovery completed with findings |
 | 130 | Cancelled, including a requested `--stop-after` pause |
 
 For example, `ewf-image acquire disk.raw case.E01 > result.json` retains the

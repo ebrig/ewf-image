@@ -188,6 +188,258 @@ fn cli_analysis_reports_structural_failures_and_warnings_distinctly() {
     assert_eq!(report["analysis"]["media_status"], "Complete");
 }
 
+fn recovery_map(directory: &Path, filename: &str) -> Vec<Value> {
+    fs::read_to_string(directory.join(filename))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn assert_complete_recovery(directory: &Path, report: &Value, bytes: &[u8]) {
+    assert_eq!(report["recovery_complete"], true);
+    assert_eq!(report["media_verified"], false);
+    assert_eq!(report["output_sha256"], hash(bytes));
+    assert_eq!(fs::read(directory.join("image.raw")).unwrap(), bytes);
+    let saved: Value =
+        serde_json::from_slice(&fs::read(directory.join("result.json")).unwrap()).unwrap();
+    assert_eq!(&saved, report);
+    let map = fs::read(directory.join("map.jsonl")).unwrap();
+    assert_eq!(report["map_prefix_sha256"], hash(&map));
+    let records = recovery_map(directory, "map.jsonl");
+    assert_eq!(records[0]["record"], "header");
+    let mut offset = 0;
+    for (index, item) in records[1..].iter().enumerate() {
+        assert_eq!(item["chunk_index"], index);
+        assert_eq!(item["logical_offset"], offset);
+        offset += item["byte_count"].as_u64().unwrap();
+    }
+    assert_eq!(offset, bytes.len() as u64);
+    assert_eq!(report["mapped_bytes"], offset);
+    assert!(!directory.join("image.raw.partial").exists());
+    assert!(!directory.join("map.jsonl.partial").exists());
+}
+
+#[test]
+fn cli_recovery_handles_truncation_and_preserves_complete_provenance() {
+    for compression in [
+        ewf_image::WriteCompression::None,
+        ewf_image::WriteCompression::Zlib,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = vec![0x57; 32768 * 3 + 512];
+        export_fixture(
+            dir.path(),
+            &bytes,
+            ewf_image::WriteOptions {
+                compression,
+                ..ewf_image::WriteOptions::default()
+            },
+        );
+        let report = result(dir.path(), &["recover", "case.E01", "healthy"], 0);
+        assert_complete_recovery(&dir.path().join("healthy"), &report, &bytes);
+        let image = Image::open(dir.path().join("case.E01")).unwrap();
+        let end = image.sections().last().unwrap().descriptor_offset;
+        drop(image);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(dir.path().join("case.E01"))
+            .unwrap()
+            .set_len(end + 10)
+            .unwrap();
+        let original = fs::read(dir.path().join("case.E01")).unwrap();
+        let report = result(dir.path(), &["recover", "case.E01", "truncated"], 4);
+        assert_complete_recovery(&dir.path().join("truncated"), &report, &bytes);
+        assert!(!report["recovery"]["notices"].as_array().unwrap().is_empty());
+        assert_eq!(fs::read(dir.path().join("case.E01")).unwrap(), original);
+    }
+}
+
+#[test]
+fn cli_recovery_requires_explicit_suspect_data_and_reports_substitutions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut bytes = vec![0x57; 65536];
+    export_fixture(dir.path(), &bytes, ewf_image::WriteOptions::default());
+    let path = dir.path().join("case.E01");
+    let image = Image::open(&path).unwrap();
+    let offset = image
+        .sections()
+        .iter()
+        .find(|s| s.kind == ewf_image::SectionKind::Ewf1("sectors".into()))
+        .unwrap()
+        .data_offset as usize;
+    drop(image);
+    let mut encoded = fs::read(&path).unwrap();
+    encoded[offset] ^= 1;
+    fs::write(&path, encoded).unwrap();
+    let report = result(dir.path(), &["recover", "case.E01", "zeroed"], 4);
+    let mut zeroed = bytes.clone();
+    zeroed[..32768].fill(0);
+    assert_complete_recovery(&dir.path().join("zeroed"), &report, &zeroed);
+    assert_eq!(report["recovery"]["bytes_zero_filled"], 32768);
+    assert_eq!(
+        recovery_map(&dir.path().join("zeroed"), "map.jsonl")[1]["status"],
+        "ZeroFilled"
+    );
+    bytes[0] ^= 1;
+    let report = result(
+        dir.path(),
+        &[
+            "recover",
+            "case.E01",
+            "suspect",
+            "--preserve-checksum-suspect",
+        ],
+        4,
+    );
+    assert_complete_recovery(&dir.path().join("suspect"), &report, &bytes);
+    assert_eq!(report["recovery"]["chunks_checksum_suspect"], 1);
+    assert_eq!(
+        recovery_map(&dir.path().join("suspect"), "map.jsonl")[1]["status"],
+        "SuspectPrimary"
+    );
+}
+
+#[test]
+fn cli_recovery_rejects_limits_aliases_and_unsupported_formats_before_output() {
+    let dir = tempfile::tempdir().unwrap();
+    export_fixture(dir.path(), &[0; 512], ewf_image::WriteOptions::default());
+    let original = fs::read(dir.path().join("case.E01")).unwrap();
+    fs::hard_link(dir.path().join("case.E01"), dir.path().join("alias")).unwrap();
+    fs::create_dir(dir.path().join("existing")).unwrap();
+    for output in [
+        "case.E01",
+        "alias",
+        "existing",
+        ".case.E01.ewf-publication",
+        ".case.E01.ewf-history",
+    ] {
+        result(dir.path(), &["recover", "case.E01", output], 1);
+    }
+    result(
+        dir.path(),
+        &[
+            "recover",
+            "case.E01",
+            "limited",
+            "--maximum-output-bytes",
+            "511",
+        ],
+        1,
+    );
+    assert!(!dir.path().join("limited").exists());
+    assert!(!dir.path().join(".case.E01.ewf-publication").exists());
+    assert_eq!(fs::read(dir.path().join("case.E01")).unwrap(), original);
+    let other = tempfile::tempdir().unwrap();
+    export_fixture(
+        other.path(),
+        &[0; 512],
+        ewf_image::WriteOptions {
+            format: ewf_image::WriteFormat::Ewf2Physical,
+            ..ewf_image::WriteOptions::default()
+        },
+    );
+    result(other.path(), &["recover", "case.E01", "unsupported"], 1);
+    assert!(!other.path().join("unsupported").exists());
+}
+
+fn running_recovery(directory: &Path) -> std::process::Child {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ewf-image"))
+        .current_dir(directory)
+        .args(["recover", "case.E01", "recovered"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    stderr.read_line(&mut line).unwrap();
+    assert!(line.starts_with("recovery:"), "{line}");
+    child.stderr = Some(stderr.into_inner());
+    child
+}
+
+#[test]
+fn cli_recovery_never_replaces_a_late_raw_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    export_fixture(
+        dir.path(),
+        &vec![0; 32 * 1024 * 1024],
+        ewf_image::WriteOptions {
+            compression: ewf_image::WriteCompression::Zlib,
+            ..ewf_image::WriteOptions::default()
+        },
+    );
+    let child = running_recovery(dir.path());
+    let existing = dir.path().join("recovered/image.raw");
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&existing)
+        .unwrap()
+        .write_all(b"unrelated")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(fs::read(existing).unwrap(), b"unrelated");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["recovery_complete"], false);
+    assert_eq!(report["published"], false);
+    assert!(dir.path().join("recovered/image.raw.partial").exists());
+    assert!(dir.path().join("recovered/result.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_recovery_cancellation_retains_labeled_partial_output_and_map() {
+    for signal in ["-INT", "-TERM"] {
+        let dir = tempfile::tempdir().unwrap();
+        export_fixture(
+            dir.path(),
+            &vec![0; 32 * 1024 * 1024],
+            ewf_image::WriteOptions {
+                compression: ewf_image::WriteCompression::Zlib,
+                ..ewf_image::WriteOptions::default()
+            },
+        );
+        let child = running_recovery(dir.path());
+        assert!(
+            Command::new("kill")
+                .args([signal, &child.id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(130),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["status"], "cancelled");
+        assert_eq!(report["recovery_complete"], false);
+        assert!(report["output_sha256"].is_null());
+        let bundle = dir.path().join("recovered");
+        let raw = fs::read(bundle.join("image.raw.partial")).unwrap();
+        assert_eq!(report["raw_prefix_sha256"], hash(&raw));
+        let map = recovery_map(&bundle, "map.jsonl.partial");
+        let mapped: u64 = map[1..]
+            .iter()
+            .map(|v| v["byte_count"].as_u64().unwrap())
+            .sum();
+        assert_eq!(report["mapped_bytes"], mapped);
+        assert_eq!(mapped, raw.len() as u64);
+        assert!(!bundle.join("image.raw").exists());
+        let saved: Value =
+            serde_json::from_slice(&fs::read(bundle.join("result.json")).unwrap()).unwrap();
+        assert_eq!(saved, report);
+    }
+}
+
 #[test]
 fn cli_export_streams_formats_split_segments_and_partial_final_chunks() {
     use ewf_image::{WriteCompression as C, WriteFormat as F, WriteOptions};

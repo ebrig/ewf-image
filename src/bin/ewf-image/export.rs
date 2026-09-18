@@ -25,7 +25,7 @@ pub fn run(
     if !image.info().acquisition_complete {
         return Err(invalid("cannot export an incomplete acquisition"));
     }
-    let output = destination(&image, output)?;
+    let output = destination(image.segment_filenames(), output)?;
     report["output"] = json!(output);
     report["media_bytes"] = json!(image.media_size());
     report["exported_bytes"] = json!(0);
@@ -55,14 +55,14 @@ pub fn run(
     Ok(())
 }
 
-fn destination(image: &Image, output: &Path) -> Result<PathBuf> {
+pub(super) fn destination(segments: &[PathBuf], output: &Path) -> Result<PathBuf> {
     let name = output
         .file_name()
         .ok_or_else(|| invalid("missing output filename"))?;
     #[cfg(windows)]
     if name.to_string_lossy().contains(':') {
         return Err(invalid(
-            "alternate data streams are not export destinations",
+            "alternate data streams are not output destinations",
         ));
     }
     let parent = output
@@ -71,11 +71,11 @@ fn destination(image: &Image, output: &Path) -> Result<PathBuf> {
         .unwrap_or_else(|| Path::new("."));
     let output = fs::canonicalize(parent)?.join(name);
     match fs::symlink_metadata(&output) {
-        Ok(_) => return Err(invalid("export destination already exists")),
+        Ok(_) => return Err(invalid("output destination already exists")),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    for segment in image.segment_filenames() {
+    for segment in segments {
         let segment = fs::canonicalize(segment)?;
         // Protect absent control files too: creating one can hide or invalidate
         // otherwise healthy evidence. Include paths inside control directories.
@@ -91,7 +91,7 @@ fn destination(image: &Image, output: &Path) -> Result<PathBuf> {
                 .to_ascii_lowercase()
                 .starts_with(&prefix.to_ascii_lowercase())
         {
-            return Err(invalid("export destination overlaps an image control path"));
+            return Err(invalid("output destination overlaps an image control path"));
         }
     }
     Ok(output)

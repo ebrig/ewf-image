@@ -1,9 +1,10 @@
-//! Command-line acquisition, checkpoint inspection, and media verification.
+//! Command-line acquisition, integrity analysis, recovery, and raw export.
 
 mod analyze;
 mod export;
 mod history;
 mod inspect;
+mod recover;
 mod session;
 mod source;
 
@@ -29,7 +30,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Acquire, inspect, export, and verify EWF forensic images"
+    about = "Acquire, inspect, analyze, recover, export, and verify EWF forensic images"
 )]
 struct Cli {
     /// Suppress progress on stderr (JSON results are always written to stdout).
@@ -52,6 +53,17 @@ enum Command {
     },
     /// Export the complete, strictly decoded media stream to a new raw file.
     Export { image: PathBuf, output: PathBuf },
+    /// Recover physical raw/zlib EWF1 into a NEW directory with raw data and provenance.
+    Recover {
+        image: PathBuf,
+        output: PathBuf,
+        /// Reject declared media larger than this limit before creating output.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        maximum_output_bytes: Option<u64>,
+        /// Retain decodable checksum-suspect bytes when no validated alternate exists.
+        #[arg(long)]
+        preserve_checksum_suspect: bool,
+    },
     /// Acquire a source, publish its E01 segments, then reopen and verify them.
     Acquire(Acquire),
     /// Resume using the original source and options from the session manifest.
@@ -135,9 +147,10 @@ fn main() -> ExitCode {
         "status": "failed", "phase": "preflight", "published": false,
         "verification": null, "checkpoint_bytes": 0, "accepted_bytes": 0});
     let mut history = None;
+    let mut recovery = None;
     let result = ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed))
         .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
-        .and_then(|()| run(&cli, &stop, &mut report, &mut history));
+        .and_then(|()| run(&cli, &stop, &mut report, &mut history, &mut recovery));
     let mut code = if let Err(error) = result {
         let aborted = error
             .downcast_ref::<EwfError>()
@@ -167,13 +180,24 @@ fn main() -> ExitCode {
                 "complete_with_substitutions"
                 | "verified_with_substitutions"
                 | "exported_with_substitutions"
-                | "analysis_warnings",
+                | "analysis_warnings"
+                | "recovered_with_findings",
             ) => 4,
             _ => 0,
         }
     };
     report["exit_code"] = json!(code);
     report["elapsed_seconds"] = json!(started.elapsed().as_secs_f64());
+    if let Some(bundle) = &mut recovery
+        && let Err(error) = bundle.finish(&mut report)
+    {
+        report["recovery_status"] = report["status"].clone();
+        report["recovery_exit_code"] = json!(code);
+        report["report_error"] = json!(error.to_string());
+        report["status"] = json!("reporting_failed");
+        code = 1;
+        report["exit_code"] = json!(code);
+    }
     if let Some(history) = &mut history
         && let Err(error) = history.finish(&report)
     {
@@ -204,6 +228,7 @@ fn run(
     stop: &Arc<AtomicBool>,
     report: &mut Value,
     audit: &mut Option<history::History>,
+    recovery: &mut Option<recover::Bundle>,
 ) -> Result<()> {
     let mut progress = Progress::new(cli.quiet, stop);
     match &cli.command {
@@ -213,6 +238,20 @@ fn run(
             maximum_findings,
         } => analyze::run(image, *maximum_findings as usize, &mut progress, report),
         Command::Export { image, output } => export::run(image, output, &mut progress, report),
+        Command::Recover {
+            image,
+            output,
+            maximum_output_bytes,
+            preserve_checksum_suspect,
+        } => recover::run(
+            image,
+            output,
+            *maximum_output_bytes,
+            *preserve_checksum_suspect,
+            &mut progress,
+            report,
+            recovery,
+        ),
         Command::Acquire(args) => {
             let output = session::normalize_output(&args.output)?;
             let mut source = Source::open(&args.source, args.sector_size, &output)?;
