@@ -343,6 +343,133 @@ fn cli_recovery_rejects_limits_aliases_and_unsupported_formats_before_output() {
     assert!(!other.path().join("unsupported").exists());
 }
 
+#[test]
+fn cli_analysis_and_recovery_distinguish_redundant_table_fallback_from_loss() {
+    for both in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut data = vec![0x59; 65536];
+        export_fixture(dir.path(), &data, ewf_image::WriteOptions::default());
+        let path = dir.path().join("case.E01");
+        let image = Image::open(&path).unwrap();
+        let mut bytes = fs::read(&path).unwrap();
+        for table in image.sections().iter().filter(|s| matches!(&s.kind, ewf_image::SectionKind::Ewf1(name) if name == "table" || (both && name == "table2"))) {
+            let start = table.data_offset as usize;
+            let count = u32::from_le_bytes(bytes[start..start + 4].try_into().unwrap()) as usize;
+            bytes[start + 24..start + 28].copy_from_slice(&0x7fff_fff0_u32.to_le_bytes());
+            let (mut a, mut b) = (1_u32, 0_u32);
+            for byte in &bytes[start + 24..start + 24 + count * 4] {
+                a = (a + u32::from(*byte)) % 65521;
+                b = (b + a) % 65521;
+            }
+            bytes[start + 24 + count * 4..start + 28 + count * 4].copy_from_slice(&((b << 16) | a).to_le_bytes());
+        }
+        drop(image);
+        fs::write(&path, &bytes).unwrap();
+        let analysis = result(dir.path(), &["analyze", "case.E01"], 3);
+        if !both {
+            assert!(
+                analysis["analysis"]["findings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|f| f["kind"] == "RedundantTableMismatch")
+            );
+        }
+        let report = result(dir.path(), &["recover", "case.E01", "recovered"], 4);
+        if both {
+            data[..32768].fill(0);
+        }
+        assert_complete_recovery(&dir.path().join("recovered"), &report, &data);
+        let map = recovery_map(&dir.path().join("recovered"), "map.jsonl");
+        assert_eq!(
+            map[1]["status"],
+            if both { "ZeroFilled" } else { "Redundant" }
+        );
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn cli_recovery_map_remains_complete_beyond_summary_retention() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut expected = vec![0x51; 2050 * 512];
+    export_fixture(
+        dir.path(),
+        &expected,
+        ewf_image::WriteOptions {
+            sectors_per_chunk: 1,
+            ..ewf_image::WriteOptions::default()
+        },
+    );
+    let path = dir.path().join("case.E01");
+    let image = Image::open(&path).unwrap();
+    let offset = image
+        .sections()
+        .iter()
+        .find(|s| s.kind == ewf_image::SectionKind::Ewf1("sectors".into()))
+        .unwrap()
+        .data_offset as usize;
+    drop(image);
+    let mut bytes = fs::read(&path).unwrap();
+    for chunk in (0..2050).step_by(2) {
+        bytes[offset + chunk * 516] ^= 1;
+        expected[chunk * 512..(chunk + 1) * 512].fill(0);
+    }
+    fs::write(path, bytes).unwrap();
+    let report = result(dir.path(), &["recover", "case.E01", "recovered"], 4);
+    assert_complete_recovery(&dir.path().join("recovered"), &report, &expected);
+    assert_eq!(report["recovery"]["ranges"].as_array().unwrap().len(), 1024);
+    assert!(
+        report["recovery"]["omitted_chunk_records"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(
+        recovery_map(&dir.path().join("recovered"), "map.jsonl").len(),
+        2051
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_analysis_signal_cancellation_never_reports_complete_hashes() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    let dir = tempfile::tempdir().unwrap();
+    export_fixture(
+        dir.path(),
+        &vec![0; 32 * 1024 * 1024],
+        ewf_image::WriteOptions {
+            compression: ewf_image::WriteCompression::Zlib,
+            ..ewf_image::WriteOptions::default()
+        },
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ewf-image"))
+        .current_dir(dir.path())
+        .args(["analyze", "case.E01"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    stderr.read_line(&mut line).unwrap();
+    assert!(line.starts_with("analysis:"), "{line}");
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(130));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["media_verified"], false);
+    assert!(report["analysis"].is_null());
+}
+
 fn running_recovery(directory: &Path) -> std::process::Child {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
@@ -389,6 +516,43 @@ fn cli_recovery_never_replaces_a_late_raw_destination() {
     assert_eq!(report["published"], false);
     assert!(dir.path().join("recovered/image.raw.partial").exists());
     assert!(dir.path().join("recovered/result.json").exists());
+}
+
+#[test]
+fn cli_recovery_completion_report_collision_is_not_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = vec![0; 32 * 1024 * 1024];
+    export_fixture(
+        dir.path(),
+        &bytes,
+        ewf_image::WriteOptions {
+            compression: ewf_image::WriteCompression::Zlib,
+            ..ewf_image::WriteOptions::default()
+        },
+    );
+    let child = running_recovery(dir.path());
+    let existing = dir.path().join("recovered/result.json");
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&existing)
+        .unwrap()
+        .write_all(b"unrelated")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "reporting_failed");
+    assert_eq!(report["recovery_status"], "recovered");
+    assert_eq!(report["recovery_exit_code"], 0);
+    assert_eq!(report["recovery_complete"], false);
+    assert_eq!(report["published"], true);
+    assert_eq!(report["output_sha256"], hash(&bytes));
+    assert_eq!(
+        fs::read(dir.path().join("recovered/image.raw")).unwrap(),
+        bytes
+    );
+    assert_eq!(fs::read(existing).unwrap(), b"unrelated");
 }
 
 #[cfg(unix)]

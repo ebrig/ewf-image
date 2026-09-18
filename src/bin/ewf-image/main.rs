@@ -188,15 +188,16 @@ fn main() -> ExitCode {
     };
     report["exit_code"] = json!(code);
     report["elapsed_seconds"] = json!(started.elapsed().as_secs_f64());
-    if let Some(bundle) = &mut recovery
-        && let Err(error) = bundle.finish(&mut report)
-    {
-        report["recovery_status"] = report["status"].clone();
-        report["recovery_exit_code"] = json!(code);
-        report["report_error"] = json!(error.to_string());
-        report["status"] = json!("reporting_failed");
-        code = 1;
-        report["exit_code"] = json!(code);
+    if let Some(bundle) = &recovery {
+        let recovery_status = report["status"].clone();
+        if let Err(error) = bundle.finish(&mut report) {
+            report["recovery_status"] = recovery_status;
+            report["recovery_exit_code"] = json!(code);
+            report["report_error"] = json!(error.to_string());
+            report["status"] = json!("reporting_failed");
+            code = 1;
+            report["exit_code"] = json!(code);
+        }
     }
     if let Some(history) = &mut history
         && let Err(error) = history.finish(&report)

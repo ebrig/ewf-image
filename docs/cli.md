@@ -88,6 +88,7 @@ decodable bytes with suspect checksums when no validated alternate exists.
 `--maximum-output-bytes` rejects excessive declared media size before creating
 the directory. Existing output directories/files, source aliases, and source
 control paths are refused. Output files are created and published exclusively.
+The destination filesystem must support hard links for publication.
 
 During recovery, `image.raw.partial` contains emitted bytes and
 `map.jsonl.partial` starts with a header identifying source paths and policy.

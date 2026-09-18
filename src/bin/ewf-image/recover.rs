@@ -108,6 +108,8 @@ pub fn run(
     )?;
     bundle.map.inner.sync_all()?;
     sync_directory(&bundle.directory)?;
+    #[cfg(test)]
+    tests::crash_at("initialized");
     report["phase"] = json!("recovery");
     let recovered = stream(
         &recovery,
@@ -120,14 +122,20 @@ pub fn run(
     report["recovery"] = serde_json::to_value(&recovered)?;
     bundle.raw.inner.sync_all()?;
     bundle.map.inner.sync_all()?;
+    #[cfg(test)]
+    tests::crash_at("synced");
     if progress.stop.load(Ordering::Relaxed) {
         return Err(EwfError::Aborted.into());
     }
     report["phase"] = json!("publication");
     publish_partial(&mut bundle.raw_path, &bundle.directory.join("image.raw"))?;
     report["raw_path"] = json!(bundle.raw_path);
+    #[cfg(test)]
+    tests::crash_at("raw-installed");
     publish_partial(&mut bundle.map_path, &bundle.directory.join("map.jsonl"))?;
     report["map_path"] = json!(bundle.map_path);
+    #[cfg(test)]
+    tests::crash_at("map-installed");
     sync_directory(&bundle.directory)?;
     report["published"] = json!(true);
     report["status"] = json!(if recovered.chunks_zero_filled != 0
@@ -150,6 +158,13 @@ fn create(path: &Path) -> io::Result<File> {
 fn record(output: &mut impl Write, value: &Value) -> io::Result<()> {
     let mut bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
     bytes.push(b'\n');
+    #[cfg(test)]
+    if value["record"] == "chunk" {
+        let split = bytes.len() / 2;
+        output.write_all(&bytes[..split])?;
+        tests::crash_at("map-partial");
+        return output.write_all(&bytes[split..]);
+    }
     output.write_all(&bytes)
 }
 
@@ -174,6 +189,8 @@ fn stream(
             previous = p.bytes_written;
             report["mapped_bytes"] = json!(previous);
             report["mapped_chunks"] = json!(p.chunks_processed);
+            #[cfg(test)]
+            tests::crash_at("chunk");
         }
         progress.event("recovery", p.bytes_written, p.bytes_total)
     });
@@ -242,10 +259,19 @@ impl Bundle {
             let mut temporary = tempfile::Builder::new()
                 .prefix(".result-")
                 .tempfile_in(&self.directory)?;
-            serde_json::to_writer_pretty(&mut temporary, report)?;
+            let bytes = serde_json::to_vec_pretty(report)?;
+            let split = bytes.len() / 2;
+            temporary.write_all(&bytes[..split])?;
+            #[cfg(test)]
+            tests::crash_at("result-partial");
+            temporary.write_all(&bytes[split..])?;
             temporary.write_all(b"\n")?;
             temporary.as_file().sync_all()?;
+            #[cfg(test)]
+            tests::crash_at("result-synced");
             temporary.persist_noclobber(&path)?;
+            #[cfg(test)]
+            tests::crash_at("result-installed");
             Ok(())
         })();
         if saved.is_err() {
@@ -265,6 +291,99 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     use super::*;
+
+    pub(super) fn crash_at(point: &str) {
+        if std::env::var("EWF_RECOVERY_CRASH_POINT").is_ok_and(|v| v == point) {
+            std::process::exit(77);
+        }
+    }
+
+    #[test]
+    fn crash_worker() {
+        let Some(root) = std::env::var_os("EWF_RECOVERY_CRASH_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let stop = AtomicBool::new(false);
+        let mut bundle = None;
+        let mut report = json!({"schema_version": 1, "published": false, "exit_code": 0});
+        run(
+            &root.join("case.E01"),
+            &root.join("bundle"),
+            None,
+            false,
+            &mut Progress::new(true, &stop),
+            &mut report,
+            &mut bundle,
+        )
+        .unwrap();
+        bundle.unwrap().finish(&mut report).unwrap();
+        panic!("crash point was not reached");
+    }
+
+    #[test]
+    fn process_exit_never_installs_a_premature_completion_report() {
+        for point in [
+            "initialized",
+            "map-partial",
+            "chunk",
+            "synced",
+            "raw-installed",
+            "map-installed",
+            "result-partial",
+            "result-synced",
+            "result-installed",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("case.E01");
+            let bytes = vec![0x53; 65536];
+            let mut writer =
+                ewf_image::EwfWriter::create(&path, ewf_image::WriteOptions::default()).unwrap();
+            writer.write_all(&bytes).unwrap();
+            writer.finish().unwrap();
+            let original = fs::read(&path).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "recover::tests::crash_worker", "--nocapture"])
+                .env("EWF_RECOVERY_CRASH_ROOT", dir.path())
+                .env("EWF_RECOVERY_CRASH_POINT", point)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(77),
+                "{point}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(fs::read(path).unwrap(), original);
+            let bundle = dir.path().join("bundle");
+            if point == "result-installed" {
+                let report: Value =
+                    serde_json::from_slice(&fs::read(bundle.join("result.json")).unwrap()).unwrap();
+                assert_eq!(report["recovery_complete"], true);
+                assert_eq!(fs::read(bundle.join("image.raw")).unwrap(), bytes);
+                assert_eq!(
+                    report["map_sha256"],
+                    hex(&Sha256::digest(fs::read(bundle.join("map.jsonl")).unwrap()))
+                );
+            } else {
+                assert!(!bundle.join("result.json").exists(), "{point}");
+            }
+            let map = if bundle.join("map.jsonl").exists() {
+                bundle.join("map.jsonl")
+            } else {
+                bundle.join("map.jsonl.partial")
+            };
+            let text = fs::read_to_string(map).unwrap();
+            let lines: Vec<_> = text.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                if point == "map-partial" && index == lines.len() - 1 {
+                    assert!(serde_json::from_str::<Value>(line).is_err());
+                } else {
+                    serde_json::from_str::<Value>(line).unwrap();
+                }
+            }
+        }
+    }
 
     struct FullAfter {
         remaining: usize,

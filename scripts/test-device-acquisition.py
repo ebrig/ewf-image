@@ -335,6 +335,39 @@ def main():
         assert history["runs"][0]["status"] in ("failed", "interrupted"), history
         completed.append("persistent history: stops, policy changes, disk-full interruption, consolidated verified report")
         completed.append("real filesystem ENOSPC, retained checkpoint, capacity expansion, verified resume")
+
+        # Recovery retains the exact written prefix and never labels ENOSPC complete.
+        recovery_full = root / "recovery-full"
+        recovery_full.mkdir()
+        devices.mount("tmpfs", recovery_full, "-t", "tmpfs", "-o", "size=4m")
+        partial = recovery_full / "partial"
+        failed_recovery = cli(args.binary, root, ["recover", export_image, partial], 1)
+        assert not failed_recovery["recovery_complete"], failed_recovery
+        assert not failed_recovery["published"]
+        assert failed_recovery["output_sha256"] is None
+        raw_partial = partial / "image.raw.partial"
+        assert 0 < raw_partial.stat().st_size < source.stat().st_size
+        assert raw_partial.stat().st_size == failed_recovery["raw_bytes_written"]
+        assert digest(raw_partial) == failed_recovery["raw_prefix_sha256"]
+        assert failed_recovery["mapped_bytes"] <= raw_partial.stat().st_size
+        assert not (partial / "image.raw").exists()
+        if (partial / "result.json").exists():
+            assert not json.loads((partial / "result.json").read_text())["recovery_complete"]
+        map_bytes = (partial / "map.jsonl.partial").read_bytes()
+        complete_lines = map_bytes.split(b"\n")[:-1]
+        records = [json.loads(line) for line in complete_lines]
+        assert records[0]["record"] == "header"
+        mapped = sum(record["byte_count"] for record in records[1:])
+        assert mapped == failed_recovery["mapped_bytes"]
+        command("mount", "-o", "remount,size=64m", recovery_full)
+        retried = recovery_full / "retried"
+        recovered = cli(args.binary, root, ["recover", export_image, retried])
+        assert recovered["recovery_complete"]
+        assert recovered["output_sha256"] == expected
+        assert digest(retried / "image.raw") == expected
+        assert digest(source) == expected
+        cli(args.binary, root, ["verify", export_image])
+        completed.append("recovery ENOSPC: retained labeled prefix, complete map-record coverage, no false completion, successful fresh retry")
     finally:
         try:
             devices.close()
