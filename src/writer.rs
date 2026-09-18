@@ -33,11 +33,13 @@ use crate::types::{
 use crate::{EwfError, Result};
 
 mod acquisition;
+mod logical;
 pub use acquisition::{
     AcquisitionCheckpoint, AcquisitionOperationPhase, AcquisitionOperationProgress,
     AcquisitionOptions, AcquisitionOutcome, AcquisitionProgress, AcquisitionReadOptions,
     AcquisitionStatus, AcquisitionWriter, UnreadableSectorPolicy,
 };
+pub use logical::{LogicalEntryMetadata, LogicalWriteProgress, LogicalWriter};
 
 const VOLUME_DATA_SIZE: usize = 1052;
 const EWF1_LTREE_HEADER_SIZE: usize = 48;
@@ -3824,8 +3826,8 @@ fn single_file_permission_row(permission: &SingleFilePermission) -> String {
 
 fn single_file_entry_type_value(value: Option<SingleFileEntryType>) -> String {
     match value {
-        Some(SingleFileEntryType::File) => "f".to_owned(),
-        Some(SingleFileEntryType::Directory) => "d".to_owned(),
+        Some(SingleFileEntryType::File) => "0".to_owned(),
+        Some(SingleFileEntryType::Directory) => "1".to_owned(),
         Some(SingleFileEntryType::Unknown) => "u".to_owned(),
         None => String::new(),
     }

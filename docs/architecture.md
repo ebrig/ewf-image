@@ -56,6 +56,16 @@ redundant, suspect, and zero-filled output provenance.
 
 ## Writer Flow
 
+`LogicalWriter` wraps `EwfWriter` for L01/Lx01 creation. Directory identifiers
+select parents (root is 1); file inputs have caller-declared lengths and metadata.
+Each file receives contiguous extents and computed MD5/SHA1 references. Empty
+files are represented explicitly. Short reads, write errors, or cancellation
+poison the builder, preventing finalization. Catalog nesting is limited to 128.
+Names containing NUL, tab, CR, or LF are rejected rather than altered.
+This convenience API records names and timestamps, not filesystem ACLs, extended
+attributes, alternate streams, sparse allocation, or source snapshot consistency.
+Use the lower-level catalog API for explicitly authored richer metadata.
+
 The writer accepts sequential writes, positioned writes, and chunk-oriented
 writes. Input data is spooled while complete chunks are encoded and tracked
 with enough metadata to emit EWF tables and segment descriptors at finish time.

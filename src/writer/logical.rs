@@ -1,0 +1,254 @@
+//! Catalog construction on top of the EWF writer's transactional publication.
+
+use std::collections::BTreeMap;
+use std::io::Read;
+use std::ops::ControlFlow;
+use std::path::Path;
+
+use md5::{Digest, Md5};
+use sha1::Sha1;
+
+use super::{EwfWriter, WriteFormat, WriteOptions, WriteResult, hex_string};
+use crate::{
+    EwfError, MediaType, Result, SingleFileEntry, SingleFileEntryType, SingleFileExtent,
+    SingleFilesInfo,
+};
+
+/// Caller-supplied metadata for a logical acquisition entry.
+///
+/// Names are stored verbatim; NUL, tab, CR, and LF are rejected because the
+/// EWF catalog is line/tab-delimited. No host filesystem metadata is inferred.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LogicalEntryMetadata {
+    /// Entry name, independent of any source filesystem path.
+    pub name: String,
+    /// Creation timestamp in Unix seconds.
+    pub creation_time: Option<i64>,
+    /// Content modification timestamp in Unix seconds.
+    pub modification_time: Option<i64>,
+    /// Access timestamp in Unix seconds.
+    pub access_time: Option<i64>,
+    /// Metadata modification timestamp in Unix seconds.
+    pub entry_modification_time: Option<i64>,
+    /// Deletion timestamp in Unix seconds.
+    pub deletion_time: Option<i64>,
+}
+
+/// Progress within the file currently being added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LogicalWriteProgress {
+    /// Automatically assigned entry identifier.
+    pub identifier: u64,
+    /// File bytes accepted by the writer.
+    pub bytes_written: u64,
+    /// Declared file size.
+    pub bytes_total: u64,
+}
+
+/// Builds an L01/Lx01 catalog and file hashes while accepting file streams.
+///
+/// Uses the general writer's temporary spools and publication transaction.
+/// This is not checkpoint-resumable acquisition. Input errors or cancellation
+/// poison the builder so partial files cannot be published by `finish`.
+pub struct LogicalWriter {
+    writer: EwfWriter,
+    paths: BTreeMap<u64, Vec<usize>>,
+    next_identifier: u64,
+    poisoned: bool,
+}
+
+impl LogicalWriter {
+    /// Creates a logical writer. Select `Ewf1Logical` or `Ewf2Logical` explicitly.
+    /// Caller-authored catalogs and auxiliary file tables are rejected; this
+    /// builder owns those. The root has identifier 1 and an empty name.
+    pub fn create(path: impl AsRef<Path>, mut options: WriteOptions) -> Result<Self> {
+        if !matches!(
+            options.format,
+            WriteFormat::Ewf1Logical | WriteFormat::Ewf2Logical
+        ) || options.single_files.is_some()
+            || !options.ewf2_single_files_tables.is_empty()
+        {
+            return Err(EwfError::Unsupported(
+                "logical builder requires a logical format and no prebuilt catalog".into(),
+            ));
+        }
+        options.media_profile.media_type = Some(MediaType::SingleFiles);
+        options.single_files = Some(SingleFilesInfo {
+            root: SingleFileEntry {
+                identifier: Some(1),
+                name: Some(String::new()),
+                file_entry_type: Some(SingleFileEntryType::Directory),
+                permission_group_index: Some(-1),
+                ..SingleFileEntry::default()
+            },
+            ..SingleFilesInfo::default()
+        });
+        Ok(Self {
+            writer: EwfWriter::create(path, options)?,
+            paths: BTreeMap::from([(1, vec![])]),
+            next_identifier: 2,
+            poisoned: false,
+        })
+    }
+
+    /// Adds a directory beneath an existing directory and returns its identifier.
+    /// Duplicate names are permitted: identifiers disambiguate them.
+    pub fn add_directory(&mut self, parent: u64, metadata: LogicalEntryMetadata) -> Result<u64> {
+        let entry = self.prepare(parent, metadata, SingleFileEntryType::Directory)?;
+        Ok(self.insert(parent, entry))
+    }
+
+    /// Reads exactly `size` bytes, assigns extents, and computes MD5/SHA1.
+    /// Trailing input bytes are left unread, allowing bounded source streams.
+    /// Callers own snapshot consistency and source metadata collection.
+    pub fn add_file(
+        &mut self,
+        parent: u64,
+        metadata: LogicalEntryMetadata,
+        size: u64,
+        input: &mut impl Read,
+    ) -> Result<u64> {
+        self.add_file_with_progress(parent, metadata, size, input, |_| ControlFlow::Continue(()))
+    }
+
+    /// Adds a file with cooperative cancellation between input/output buffers.
+    /// Cancellation or an I/O error requires discarding this builder.
+    pub fn add_file_with_progress(
+        &mut self,
+        parent: u64,
+        metadata: LogicalEntryMetadata,
+        size: u64,
+        input: &mut impl Read,
+        mut progress: impl FnMut(LogicalWriteProgress) -> ControlFlow<()>,
+    ) -> Result<u64> {
+        let mut entry = self.prepare(parent, metadata, SingleFileEntryType::File)?;
+        let offset = self.writer.position();
+        let end = offset
+            .checked_add(size)
+            .filter(|end| i64::try_from(*end).is_ok())
+            .ok_or_else(|| {
+                EwfError::Malformed("logical file address exceeds EWF catalog range".into())
+            })?;
+        self.poisoned = true;
+        let mut written = 0;
+        let mut buffer = vec![0; 1024 * 1024];
+        let mut md5 = Md5::new();
+        let mut sha1 = Sha1::new();
+        loop {
+            if progress(LogicalWriteProgress {
+                identifier: self.next_identifier,
+                bytes_written: written,
+                bytes_total: size,
+            })
+            .is_break()
+            {
+                return Err(EwfError::Aborted);
+            }
+            if written == size {
+                break;
+            }
+            let length = (size - written).min(buffer.len() as u64) as usize;
+            input.read_exact(&mut buffer[..length])?;
+            self.writer.write_all(&buffer[..length])?;
+            md5.update(&buffer[..length]);
+            sha1.update(&buffer[..length]);
+            written += length as u64;
+        }
+        entry.size = Some(size);
+        entry.logical_offset = Some(offset as i64);
+        if size != 0 {
+            entry.extents.push(SingleFileExtent {
+                data_offset: offset,
+                data_size: size,
+                sparse: false,
+            });
+        }
+        entry.md5 = Some(hex_string(&md5.finalize()));
+        entry.sha1 = Some(hex_string(&sha1.finalize()));
+        self.writer
+            .options
+            .single_files
+            .as_mut()
+            .expect("builder catalog")
+            .data_size = end;
+        let identifier = self.insert(parent, entry);
+        self.poisoned = false;
+        Ok(identifier)
+    }
+
+    /// Publishes the completed image with the EWF writer's normal durability rules.
+    pub fn finish(self) -> Result<WriteResult> {
+        self.ensure_healthy()?;
+        self.writer.finish()
+    }
+
+    fn ensure_healthy(&self) -> Result<()> {
+        if self.poisoned {
+            return Err(EwfError::Unsupported(
+                "logical acquisition failed; discard this writer".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn prepare(
+        &self,
+        parent: u64,
+        metadata: LogicalEntryMetadata,
+        kind: SingleFileEntryType,
+    ) -> Result<SingleFileEntry> {
+        self.ensure_healthy()?;
+        if metadata.name.is_empty() || metadata.name.contains(['\0', '\t', '\r', '\n']) {
+            return Err(EwfError::Malformed(
+                "logical entry name is empty or contains catalog delimiters".into(),
+            ));
+        }
+        let path = self
+            .paths
+            .get(&parent)
+            .ok_or_else(|| EwfError::Malformed("logical parent does not exist".into()))?;
+        if path.len() >= 128 {
+            return Err(EwfError::Unsupported(
+                "logical directory nesting exceeds 128".into(),
+            ));
+        }
+        self.next_identifier
+            .checked_add(1)
+            .ok_or_else(|| EwfError::Malformed("logical identifier overflow".into()))?;
+        Ok(SingleFileEntry {
+            identifier: Some(self.next_identifier),
+            name: Some(metadata.name),
+            file_entry_type: Some(kind),
+            permission_group_index: Some(-1),
+            creation_time: metadata.creation_time,
+            modification_time: metadata.modification_time,
+            access_time: metadata.access_time,
+            entry_modification_time: metadata.entry_modification_time,
+            deletion_time: metadata.deletion_time,
+            ..SingleFileEntry::default()
+        })
+    }
+
+    fn insert(&mut self, parent: u64, entry: SingleFileEntry) -> u64 {
+        let mut path = self.paths[&parent].clone();
+        let mut node = &mut self
+            .writer
+            .options
+            .single_files
+            .as_mut()
+            .expect("builder catalog")
+            .root;
+        for &index in &path {
+            node = &mut node.children[index];
+        }
+        path.push(node.children.len());
+        if entry.file_entry_type == Some(SingleFileEntryType::Directory) {
+            self.paths.insert(self.next_identifier, path);
+        }
+        node.children.push(entry);
+        let identifier = self.next_identifier;
+        self.next_identifier += 1;
+        identifier
+    }
+}

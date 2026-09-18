@@ -713,6 +713,59 @@ fn external_writer_logical_single_files_match_ewfinfo() -> Result<(), Box<dyn Er
 }
 
 #[test]
+#[ignore = "requires ewfinfo and ewfexport"]
+fn external_logical_builder_files_match_ewfexport() -> Result<(), Box<dyn Error>> {
+    use ewf_image::{LogicalEntryMetadata, LogicalWriter, WriteFormat, WriteOptions};
+    let ewfinfo = env::var_os("EWFINFO").unwrap_or_else(|| OsString::from("ewfinfo"));
+    let ewfexport = env::var_os("EWFEXPORT").unwrap_or_else(|| OsString::from("ewfexport"));
+    let dir = tempfile::tempdir()?;
+    for (name, format) in [
+        ("case.L01", WriteFormat::Ewf1Logical),
+        ("case.Lx01", WriteFormat::Ewf2Logical),
+    ] {
+        let path = dir.path().join(name);
+        let mut writer = LogicalWriter::create(
+            &path,
+            WriteOptions {
+                format,
+                ..WriteOptions::default()
+            },
+        )?;
+        let folder = writer.add_directory(
+            1,
+            LogicalEntryMetadata {
+                name: "folder".into(),
+                ..LogicalEntryMetadata::default()
+            },
+        )?;
+        writer.add_file(
+            folder,
+            LogicalEntryMetadata {
+                name: "data.txt".into(),
+                ..LogicalEntryMetadata::default()
+            },
+            3,
+            &mut std::io::Cursor::new(b"abc"),
+        )?;
+        writer.finish()?;
+        assert!(ewfinfo_hierarchy(&ewfinfo, &path)?.contains("folder/data.txt"));
+        let output = dir.path().join(format!("{name}-export"));
+        let result = Command::new(&ewfexport)
+            .args(["-u", "-q", "-f", "files", "-t"])
+            .arg(&output)
+            .arg(&path)
+            .output()?;
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(fs::read(output.join("folder/data.txt"))?, b"abc");
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires real L01/Lx01 single-files fixtures and ewfinfo"]
 fn external_logical_single_files_fixtures_match_ewfinfo_hierarchy() -> Result<(), Box<dyn Error>> {
     let ewfinfo = env::var_os("EWFINFO").unwrap_or_else(|| OsString::from("ewfinfo"));

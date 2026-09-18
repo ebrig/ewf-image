@@ -222,9 +222,9 @@ pub use types::{
 pub use writer::{
     AcquisitionCheckpoint, AcquisitionOperationPhase, AcquisitionOperationProgress,
     AcquisitionOptions, AcquisitionOutcome, AcquisitionProgress, AcquisitionReadOptions,
-    AcquisitionStatus, AcquisitionWriter, EwfWriter, UnreadableSectorPolicy, WriteCompression,
-    WriteCompressionLevel, WriteCompressionValues, WriteFormat, WriteHashes, WriteMediaProfile,
-    WriteOptions, WriteResult,
+    AcquisitionStatus, AcquisitionWriter, EwfWriter, LogicalEntryMetadata, LogicalWriteProgress,
+    LogicalWriter, UnreadableSectorPolicy, WriteCompression, WriteCompressionLevel,
+    WriteCompressionValues, WriteFormat, WriteHashes, WriteMediaProfile, WriteOptions, WriteResult,
 };
 
 #[cfg(feature = "verify")]

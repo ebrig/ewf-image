@@ -19,6 +19,132 @@ use ewf_image::{
 use md5::{Digest, Md5};
 use sha1::Sha1;
 
+#[test]
+fn logical_builder_assigns_offsets_hashes_and_preserves_metadata() {
+    use ewf_image::{LogicalEntryMetadata, LogicalWriter};
+    for (name, format) in [
+        ("case.L01", WriteFormat::Ewf1Logical),
+        ("case.Lx01", WriteFormat::Ewf2Logical),
+    ] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(name);
+        let mut writer = LogicalWriter::create(
+            &path,
+            WriteOptions {
+                format,
+                compression: WriteCompression::Zlib,
+                maximum_segment_size: Some(65536),
+                ..WriteOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            writer
+                .add_directory(
+                    1,
+                    LogicalEntryMetadata {
+                        name: "bad\nname".into(),
+                        ..LogicalEntryMetadata::default()
+                    }
+                )
+                .is_err()
+        );
+        let folder = writer
+            .add_directory(
+                1,
+                LogicalEntryMetadata {
+                    name: "Evidence".into(),
+                    ..LogicalEntryMetadata::default()
+                },
+            )
+            .unwrap();
+        for (name, bytes) in [
+            ("first", b"abc".as_slice()),
+            ("empty", b"".as_slice()),
+            ("last", b"defgh".as_slice()),
+        ] {
+            writer
+                .add_file(
+                    folder,
+                    LogicalEntryMetadata {
+                        name: name.into(),
+                        modification_time: Some(1_700_000_000),
+                        ..LogicalEntryMetadata::default()
+                    },
+                    bytes.len() as u64,
+                    &mut Cursor::new(bytes),
+                )
+                .unwrap();
+        }
+        let result = writer.finish().unwrap();
+        let image = ewf_image::Image::open(&result.segment_paths[0]).unwrap();
+        for (name, bytes) in [
+            ("first", b"abc".as_slice()),
+            ("empty", b"".as_slice()),
+            ("last", b"defgh".as_slice()),
+        ] {
+            let entry = image
+                .file_entry_by_path(&format!("Evidence\t{name}"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(entry.modification_time, Some(1_700_000_000));
+            let mut read = Vec::new();
+            image
+                .single_file_cursor(entry)
+                .read_to_end(&mut read)
+                .unwrap();
+            assert_eq!(read, bytes);
+            assert_eq!(
+                entry.md5.as_deref(),
+                Some(hex_string(&Md5::digest(bytes)).as_str())
+            );
+            #[cfg(feature = "verify")]
+            assert_eq!(
+                image.verify_single_file(entry).unwrap().references_match(),
+                Some(true)
+            );
+        }
+    }
+}
+
+#[test]
+fn logical_builder_failed_input_or_cancel_cannot_publish() {
+    use ewf_image::{LogicalEntryMetadata, LogicalWriter};
+    use std::ops::ControlFlow;
+    for cancel in [false, true] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("case.L01");
+        let mut writer = LogicalWriter::create(
+            &path,
+            WriteOptions {
+                format: WriteFormat::Ewf1Logical,
+                ..WriteOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            writer
+                .add_file_with_progress(
+                    1,
+                    LogicalEntryMetadata {
+                        name: "short".into(),
+                        ..LogicalEntryMetadata::default()
+                    },
+                    10,
+                    &mut Cursor::new(b"abc"),
+                    |_| if cancel {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                )
+                .is_err()
+        );
+        assert!(writer.finish().is_err());
+        assert!(!path.exists());
+    }
+}
+
 fn adler32(data: &[u8]) -> u32 {
     const MOD_ADLER: u32 = 65_521;
     let mut a = 1_u32;

@@ -1029,8 +1029,32 @@ fn parse_entry(lines: &[String], types: &[&str], cursor: &mut usize) -> Result<S
     Ok(entry)
 }
 
+#[cfg(test)]
+mod entry_type_tests {
+    use super::*;
+
+    #[test]
+    fn standard_and_legacy_entry_types() {
+        for (value, expected) in [
+            ("", SingleFileEntryType::File),
+            ("0", SingleFileEntryType::File),
+            ("1", SingleFileEntryType::Directory),
+            ("f", SingleFileEntryType::File),
+            ("d", SingleFileEntryType::Directory),
+            ("x", SingleFileEntryType::Unknown),
+        ] {
+            let mut entry = SingleFileEntry::default();
+            apply_entry_value(&mut entry, "p", value).unwrap();
+            assert_eq!(entry.file_entry_type, Some(expected));
+        }
+    }
+}
+
 fn apply_entry_value(entry: &mut SingleFileEntry, value_type: &str, value: &str) -> Result<()> {
     if value.is_empty() {
+        if value_type == "p" {
+            entry.file_entry_type = Some(SingleFileEntryType::File);
+        }
         return Ok(());
     }
 
@@ -1052,8 +1076,8 @@ fn apply_entry_value(entry: &mut SingleFileEntry, value_type: &str, value: &str)
         "opr" => entry.flags = Some(parse_u32(value, "entry flags")?),
         "p" => {
             entry.file_entry_type = Some(match value {
-                "f" => SingleFileEntryType::File,
-                "d" => SingleFileEntryType::Directory,
+                "f" | "0" => SingleFileEntryType::File,
+                "d" | "1" => SingleFileEntryType::Directory,
                 _ => SingleFileEntryType::Unknown,
             });
         }
