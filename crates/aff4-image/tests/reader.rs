@@ -146,7 +146,7 @@ fn bounded_compression_and_unknown_data() {
     let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(b"aaaa").unwrap();
     let data = encoder.finish().unwrap();
-    let meta = r#"@prefix a: <http://aff4.org/Schema#> . <aff4://volume/data> a a:ImageStream; a:chunkSize 4; a:chunksInSegment 1; a:size 4; a:compressionMethod <https://tools.ietf.org/html/rfc1951> ."#;
+    let meta = r#"@prefix a: <http://aff4.org/Schema#> . <aff4://volume/data> a a:ImageStream; a:chunkSize 4; a:chunksInSegment 1; a:size 4; a:compressionMethod <https://www.ietf.org/rfc/rfc1950.txt> ."#;
     let file = fixture(
         meta,
         &[

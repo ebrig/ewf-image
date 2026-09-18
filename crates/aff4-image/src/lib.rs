@@ -7,7 +7,9 @@
 #![forbid(unsafe_code)]
 
 mod reader;
+mod writer;
 pub use reader::{Container, Limits, Property, StreamInfo, Verification};
+pub use writer::{AcquiredStream, Compression, Profile, WriteOptions, WriteResult, Writer};
 
 /// AFF4 operation result.
 pub type Result<T> = std::result::Result<T, Error>;

@@ -710,9 +710,16 @@ fn decode(data: &[u8], method: Option<&str>, size: usize) -> Result<Vec<u8>> {
                 .decompress_vec(data)
                 .map_err(|e| malformed(e.to_string()))
         }
-        Some("https://tools.ietf.org/html/rfc1951") => {
+        Some("https://www.ietf.org/rfc/rfc1950.txt") => {
             let mut decoded = Vec::new();
             flate2::read::ZlibDecoder::new(data)
+                .take(size as u64 + 1)
+                .read_to_end(&mut decoded)?;
+            Ok(decoded)
+        }
+        Some("https://tools.ietf.org/html/rfc1951") => {
+            let mut decoded = Vec::new();
+            flate2::read::DeflateDecoder::new(data)
                 .take(size as u64 + 1)
                 .read_to_end(&mut decoded)?;
             Ok(decoded)
