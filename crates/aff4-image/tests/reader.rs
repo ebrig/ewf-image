@@ -553,3 +553,50 @@ fn canonical_full_integrity_tree_matches_independent_producer() {
     );
     assert!(!report.all_match()); // unidentified digest and absent metadata anchor
 }
+
+#[test]
+fn streaming_metadata_preserves_repeated_subjects_and_import_provenance() {
+    let primary = "@prefix a: <http://aff4.org/Schema#> . <aff4://one> a:size 1 . <aff4://two> a:size 2 . <aff4://one> a:fileName \"late\" . <aff4://volume> a:imports <aff4://volume/more> .";
+    let file = fixture(
+        primary,
+        &[("more", b"<aff4://three> <http://aff4.org/Schema#size> 3 .")],
+    );
+    let mut records = Vec::new();
+    let result = Container::scan_metadata(
+        file.path(),
+        Limits::default(),
+        |source, subject, property| {
+            records.push((source.to_owned(), subject.to_owned(), property.clone()));
+            ControlFlow::Continue(())
+        },
+    )
+    .unwrap();
+    assert_eq!((result.triples, result.stores), (5, 2));
+    assert_eq!(
+        records
+            .iter()
+            .filter(|(_, subject, _)| subject == "aff4://one")
+            .count(),
+        2
+    );
+    assert_eq!(records.last().unwrap().0, "more");
+    assert!(
+        Container::scan_metadata(
+            file.path(),
+            Limits {
+                triples: 4,
+                ..Limits::default()
+            },
+            |_, _, _| ControlFlow::Continue(())
+        )
+        .is_err()
+    );
+    assert!(matches!(
+        Container::scan_metadata(
+            file.path(),
+            Limits::default(),
+            |_, _, _| ControlFlow::Break(())
+        ),
+        Err(Error::Aborted)
+    ));
+}

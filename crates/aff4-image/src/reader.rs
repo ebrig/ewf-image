@@ -23,6 +23,10 @@ pub use integrity::{CheckOutcome, IntegrityCheck, MetadataVerification};
 mod verify_all;
 pub use verify_all::{ByteCoverage, ContainerVerification, ResourceVerification};
 
+#[path = "scan.rs"]
+mod scan;
+pub use scan::MetadataScan;
+
 const NS: &str = "http://aff4.org/Schema#";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const LOGICAL_NS: &str = "https://aff4.org/Schema/2022/#";
@@ -105,6 +109,7 @@ pub struct Container {
     graph: BTreeMap<String, Vec<Property>>,
     limits: Limits,
     cache: Option<(String, Vec<u8>)>,
+    index_cache: Option<(String, Vec<u8>)>,
     maps: BTreeMap<String, Arc<Map>>,
     version: (u32, u32),
     metadata_members: BTreeMap<String, String>,
@@ -234,6 +239,7 @@ impl Container {
             graph,
             limits,
             cache: None,
+            index_cache: None,
             maps: BTreeMap::new(),
             version,
             metadata_members,
@@ -311,35 +317,24 @@ impl Container {
     ) -> Result<Verification> {
         let size = self.size(id)?;
         self.cache = None;
+        self.index_cache = None;
         self.maps.clear();
         self.read_inner(id, &mut [], 0, &mut Vec::new())?;
-        let mut offset = 0;
-        let mut buffer = vec![0; 1024 * 1024];
         let mut md5 = Md5::new();
         let mut sha1 = Sha1::new();
         let mut sha256 = Sha256::new();
         let mut sha512 = sha2::Sha512::new();
         let mut blake2b = <blake2::Blake2b512 as blake2::Digest>::new();
-        loop {
-            if progress(offset, size).is_break() {
-                return Err(Error::Aborted);
-            }
-            if offset == size {
-                break;
-            }
-            let read = self.read_at(id, &mut buffer, offset)?;
-            if read == 0 {
-                return Err(malformed("truncated stream"));
-            }
-            md5.update(&buffer[..read]);
-            sha1.update(&buffer[..read]);
-            sha256.update(&buffer[..read]);
-            sha512.update(&buffer[..read]);
-            blake2::Digest::update(&mut blake2b, &buffer[..read]);
-            offset += read as u64;
-        }
+        self.walk_bytes(id, |bytes, done| {
+            md5.update(bytes);
+            sha1.update(bytes);
+            sha256.update(bytes);
+            sha512.update(bytes);
+            blake2::Digest::update(&mut blake2b, bytes);
+            progress(done, size)
+        })?;
         let mut result = Verification {
-            bytes_verified: offset,
+            bytes_verified: size,
             md5: hex(&md5.finalize()),
             sha1: hex(&sha1.finalize()),
             sha256: hex(&sha256.finalize()),
@@ -375,6 +370,64 @@ impl Container {
             );
         }
         Ok(result)
+    }
+
+    // ZIP files must be decoded once for sequential verification. Positioned
+    // reads remain available, but restarting Deflate for each buffer is quadratic.
+    fn walk_bytes(
+        &mut self,
+        id: &str,
+        mut consume: impl FnMut(&[u8], u64) -> ControlFlow<()>,
+    ) -> Result<()> {
+        let size = self.size(id)?;
+        if consume(&[], 0).is_break() {
+            return Err(Error::Aborted);
+        }
+        let mut target = id.to_owned();
+        let mut visited = Vec::new();
+        loop {
+            enter(&target, &mut visited)?;
+            if self.inline_data(&target)?.is_some() {
+                break;
+            }
+            match self.value(&target, "dataStream")? {
+                Some(next) => target = next,
+                None => break,
+            }
+        }
+        let mut buffer = vec![0; 1024 * 1024];
+        if self.has_type(&target, "ZipSegment") || self.has_type(&target, "zip_segment") {
+            let path = self.path(&target)?;
+            let mut file = self.archive.by_name(&path)?;
+            if file.size() != size {
+                return Err(malformed("ZIP segment size mismatch"));
+            }
+            let mut offset = 0;
+            while offset < size {
+                let take = (size - offset).min(buffer.len() as u64) as usize;
+                file.read_exact(&mut buffer[..take])?;
+                offset += take as u64;
+                if consume(&buffer[..take], offset).is_break() {
+                    return Err(Error::Aborted);
+                }
+            }
+            if file.read(&mut buffer[..1])? != 0 {
+                return Err(malformed("oversized ZIP segment"));
+            }
+        } else {
+            let mut offset = 0;
+            while offset < size {
+                let read = self.read_at(id, &mut buffer, offset)?;
+                if read == 0 {
+                    return Err(malformed("truncated stream"));
+                }
+                offset += read as u64;
+                if consume(&buffer[..read], offset).is_break() {
+                    return Err(Error::Aborted);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn properties<'a>(&'a self, id: &str) -> impl Iterator<Item = &'a Property> {
@@ -632,12 +685,22 @@ impl Container {
             let position = offset + done as u64;
             let chunk = position / chunk_size;
             let name = format!("{path}/{:08}", chunk / per_bevy);
-            let index = member(
-                &mut self.archive,
-                &format!("{name}.index"),
-                self.limits.member_bytes,
-            )?;
-            if index.len() % 12 != 0 {
+            if self
+                .index_cache
+                .as_ref()
+                .is_none_or(|(key, _)| key != &name)
+            {
+                self.index_cache = Some((
+                    name.clone(),
+                    member(
+                        &mut self.archive,
+                        &format!("{name}.index"),
+                        self.limits.member_bytes,
+                    )?,
+                ));
+            }
+            let index = &self.index_cache.as_ref().unwrap().1;
+            if !index.len().is_multiple_of(12) {
                 return Err(malformed("partial chunk index record"));
             }
             let index_offset = usize::try_from(chunk % per_bevy)
@@ -714,6 +777,16 @@ fn storage_name(
     let rest = id
         .strip_prefix("aff4://")
         .ok_or_else(|| Error::Unsupported("non-AFF4 storage reference".into()))?;
+    // Legacy AFF4-L producers also use the physical ARN escaping for chunked
+    // storage. Resolve only an existing prefix; draft 2.1 uses unescaped ARNs.
+    let legacy = format!("aff4%3A%2F%2F{}", escape(rest));
+    if version == (1, 1)
+        && archive
+            .file_names()
+            .any(|n| n.starts_with(&format!("{legacy}/")))
+    {
+        return Ok(legacy);
+    }
     Ok(if version == (1, 0) {
         format!("aff4%3A%2F%2F{}", escape(rest))
     } else {

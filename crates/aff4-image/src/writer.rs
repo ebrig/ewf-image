@@ -95,6 +95,7 @@ pub struct Writer {
     metadata: String,
     streams: Vec<AcquiredStream>,
     poisoned: bool,
+    logical_zip_threshold: u64,
 }
 
 impl Writer {
@@ -164,6 +165,7 @@ impl Writer {
             metadata,
             streams: Vec::new(),
             poisoned: false,
+            logical_zip_threshold: 1024 * 1024,
         })
     }
 
@@ -173,7 +175,7 @@ impl Writer {
         &mut self,
         size: u64,
         input: &mut impl Read,
-        mut progress: impl FnMut(u64, u64) -> ControlFlow<()>,
+        progress: impl FnMut(u64, u64) -> ControlFlow<()>,
     ) -> Result<String> {
         self.healthy()?;
         if self.profile != Profile::Physical {
@@ -181,11 +183,46 @@ impl Writer {
                 "physical image in a logical writer".into(),
             ));
         }
+        self.add_chunked(size, input, progress, None)
+    }
+
+    /// Sets the largest logical file stored as one ZIP segment (at most 1 GiB).
+    /// Larger files use chunked ImageStreams with Maps and block integrity hashes.
+    pub fn set_logical_zip_threshold(&mut self, bytes: u64) -> Result<()> {
+        self.healthy()?;
+        if bytes > 1024 * 1024 * 1024 {
+            return Err(malformed("ZIP threshold exceeds 1 GiB"));
+        }
+        self.logical_zip_threshold = bytes;
+        Ok(())
+    }
+
+    fn add_chunked(
+        &mut self,
+        size: u64,
+        input: &mut impl Read,
+        mut progress: impl FnMut(u64, u64) -> ControlFlow<()>,
+        logical_path: Option<&str>,
+    ) -> Result<String> {
         self.poisoned = true;
-        let id = identifier();
-        let stream = identifier();
+        let id = if logical_path.is_some() {
+            format!("{}/files/{}", self.volume, uuid::Uuid::new_v4())
+        } else {
+            identifier()
+        };
+        let stream = if logical_path.is_some() {
+            id.clone()
+        } else {
+            identifier()
+        };
         let map = identifier();
-        let storage = format!("aff4%3A%2F%2F{}", stream.strip_prefix("aff4://").unwrap());
+        let storage = if logical_path.is_some() {
+            id.strip_prefix(&format!("{}/", self.volume))
+                .unwrap()
+                .to_owned()
+        } else {
+            format!("aff4%3A%2F%2F{}", stream.strip_prefix("aff4://").unwrap())
+        };
         let mut hashes = Hashes::new();
         let mut done = 0;
         let mut chunk = 0u64;
@@ -257,12 +294,14 @@ impl Writer {
             range.extend_from_slice(&0u64.to_le_bytes());
             range.extend_from_slice(&0u32.to_le_bytes());
         }
-        write_member(zip, &format!("{map_storage}/map"), &range)?;
-        write_member(
-            zip,
-            &format!("{map_storage}/idx"),
-            format!("{stream}\n").as_bytes(),
-        )?;
+        if logical_path.is_none() {
+            write_member(zip, &format!("{map_storage}/map"), &range)?;
+            write_member(
+                zip,
+                &format!("{map_storage}/idx"),
+                format!("{stream}\n").as_bytes(),
+            )?;
+        }
         let index_hash = hex(&index_tree.finalize());
         let md5_tree = md5_tree.finalize();
         let sha256_tree = sha256_tree.finalize();
@@ -293,8 +332,27 @@ impl Writer {
             Compression::Snappy => "a:compressionMethod <http://code.google.com/p/snappy/>;".into(),
             Compression::Lz4 => "a:compressionMethod <https://code.google.com/p/lz4/>;".into(),
         };
+        let kind = if logical_path.is_some() {
+            "FileImage"
+        } else {
+            "DiskImage"
+        };
+        let logical_properties = logical_path
+            .map(|path| {
+                let path_literal = oxrdf::Literal::new_simple_literal(path).to_string();
+                let name = oxrdf::Literal::new_simple_literal(
+                    path.rsplit(['/', '\\']).next().unwrap_or(path),
+                )
+                .to_string();
+                format!("a:originalFileName {path_literal}; a:fileName {name};")
+            })
+            .unwrap_or_default();
         let volume = &self.volume;
-        self.metadata.push_str(&format!("<{stream}> a a:ImageStream; a:size {size}; a:chunkSize {}; a:chunksInSegment {}; {compression} a:target <{map}>; a:stored <{volume}>; a:imageStreamIndexHash \"{index_hash}\"^^a:SHA512 .\n<{id}> a a:Image, a:ContiguousImage, a:DiskImage; a:size {size}; a:dataStream <{map}>; a:stored <{volume}>; {}; a:hash \"{composite}\"^^a:blockMapHashSHA512 .\n<{map}> a a:Map; a:size {size}; a:dependentStream <{stream}>; a:target <{id}>; a:stored <{volume}>; a:blockMapHash \"{composite}\"^^a:SHA512; a:mapPointHash \"{}\"^^a:SHA512; a:mapIdxHash \"{}\"^^a:SHA512; a:mapPathHash \"{}\"^^a:SHA512; a:mapHash \"{map_hash}\"^^a:SHA512 .\n", self.options.chunk_bytes, self.options.chunks_per_bevy, hash_triples(&result), hex(&points_hash), hex(&target_hash), hex(&empty_hash)));
+        if logical_path.is_some() {
+            self.metadata.push_str(&format!("<{id}> a a:FileImage, a:Image, a:ImageStream; {logical_properties} a:size {size}; a:chunkSize {}; a:chunksInSegment {}; {compression} a:stored <{volume}>; a:imageStreamIndexHash \"{index_hash}\"^^a:SHA512; {} .\n", self.options.chunk_bytes, self.options.chunks_per_bevy, hash_triples(&result)));
+        } else {
+            self.metadata.push_str(&format!("<{stream}> a a:ImageStream; a:size {size}; a:chunkSize {}; a:chunksInSegment {}; {compression} a:target <{map}>; a:stored <{volume}>; a:imageStreamIndexHash \"{index_hash}\"^^a:SHA512 .\n<{id}> a a:Image, a:ContiguousImage, a:{kind}; {logical_properties} a:size {size}; a:dataStream <{map}>; a:stored <{volume}>; {}; a:hash \"{composite}\"^^a:blockMapHashSHA512 .\n<{map}> a a:Map; a:size {size}; a:dependentStream <{stream}>; a:target <{id}>; a:stored <{volume}>; a:blockMapHash \"{composite}\"^^a:SHA512; a:mapPointHash \"{}\"^^a:SHA512; a:mapIdxHash \"{}\"^^a:SHA512; a:mapPathHash \"{}\"^^a:SHA512; a:mapHash \"{map_hash}\"^^a:SHA512 .\n", self.options.chunk_bytes, self.options.chunks_per_bevy, hash_triples(&result), hex(&points_hash), hex(&target_hash), hex(&empty_hash)));
+        }
         if size != 0 {
             self.metadata.push_str(&format!("<{stream}/blockhash.md5> a a:BlockHashes; a:hash \"{}\"^^a:SHA512 .\n<{stream}/blockhash.sha256> a a:BlockHashes; a:hash \"{}\"^^a:SHA512 .\n", hex(&md5_tree), hex(&sha256_tree)));
         }
@@ -305,7 +363,7 @@ impl Writer {
 
     /// Acquires one logical file as a ZIP segment with recorded original path.
     /// Names stay in metadata; ZIP storage uses a generated identifier.
-    /// Streams over 1 GiB are rejected for this small-file storage profile.
+    /// Files above the configured threshold use ImageStreams with block hashes.
     pub fn add_file(
         &mut self,
         original_path: &str,
@@ -319,15 +377,13 @@ impl Writer {
                 "logical file in a physical writer".into(),
             ));
         }
-        if size > 1024 * 1024 * 1024 {
-            return Err(Error::Unsupported(
-                "ZIP logical file exceeds 1 GiB profile limit".into(),
-            ));
-        }
         if original_path.is_empty() || original_path.chars().any(char::is_control) {
             return Err(malformed(
                 "logical path must be nonempty UTF-8 without control characters",
             ));
+        }
+        if size > self.logical_zip_threshold {
+            return self.add_chunked(size, input, progress, Some(original_path));
         }
         self.poisoned = true;
         let storage = format!("files/{}", uuid::Uuid::new_v4());

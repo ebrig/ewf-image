@@ -159,6 +159,9 @@ fn independent_consumer_exports_and_verifies_writer_output() {
                 },
             )
             .unwrap();
+            if profile == Profile::Logical {
+                writer.set_logical_zip_threshold(0).unwrap();
+            }
             match profile {
                 Profile::Physical => {
                     writer
@@ -294,4 +297,47 @@ fn independent_producer_images_and_files_are_readable() {
             assert_eq!(verified.bytes_verified, data.len() as u64);
         }
     }
+}
+
+#[test]
+fn logical_chunked_storage_has_full_integrity_and_no_size_rejection() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chunked.aff4");
+    let bytes = data();
+    let mut writer = Writer::create(&path, Profile::Logical, WriteOptions::default()).unwrap();
+    writer.set_logical_zip_threshold(32).unwrap();
+    let id = writer
+        .add_file(
+            "large.bin",
+            bytes.len() as u64,
+            &mut Cursor::new(&bytes),
+            proceed,
+        )
+        .unwrap();
+    let output = writer.finish().unwrap();
+    let mut image = Container::open(path).unwrap();
+    let report = image
+        .verify_all(Some(&output.metadata_sha256), |_, _, _| {
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+    assert!(report.all_match(), "{report:#?}");
+    let mut tail = [0; 19];
+    image
+        .read_at(&id, &mut tail, bytes.len() as u64 - 19)
+        .unwrap();
+    assert_eq!(&tail, &bytes[bytes.len() - 19..]);
+    let path = dir.path().join("cancel-large.aff4");
+    let mut writer = Writer::create(&path, Profile::Logical, WriteOptions::default()).unwrap();
+    assert!(matches!(
+        writer.add_file(
+            "over-one-gib",
+            (1 << 30) + 17,
+            &mut std::io::repeat(0),
+            |_, _| ControlFlow::Break(())
+        ),
+        Err(aff4_image::Error::Aborted)
+    ));
+    assert!(writer.finish().is_err());
+    assert!(!path.exists());
 }
