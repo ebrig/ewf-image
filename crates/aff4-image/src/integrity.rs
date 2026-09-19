@@ -65,6 +65,9 @@ pub(super) fn compare(
         "SHA1" => Some(hex(&Sha1::digest(bytes))),
         "SHA256" => Some(hex(&Sha256::digest(bytes))),
         "SHA512" => Some(hex(&Sha512::digest(bytes))),
+        "Blake2b" | "BLAKE2B" | "blake2b" => {
+            Some(hex(&<blake2::Blake2b512 as blake2::Digest>::digest(bytes)))
+        }
         _ => None,
     };
     let (outcome, detail) = match &computed {

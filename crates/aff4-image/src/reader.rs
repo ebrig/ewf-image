@@ -19,6 +19,10 @@ use base64::Engine;
 mod integrity;
 pub use integrity::{CheckOutcome, IntegrityCheck, MetadataVerification};
 
+#[path = "verify_all.rs"]
+mod verify_all;
+pub use verify_all::{ByteCoverage, ContainerVerification, ResourceVerification};
+
 const NS: &str = "http://aff4.org/Schema#";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const LOGICAL_NS: &str = "https://aff4.org/Schema/2022/#";
@@ -83,6 +87,10 @@ pub struct Verification {
     pub sha1: String,
     /// Computed hexadecimal SHA256.
     pub sha256: String,
+    /// Computed hexadecimal SHA512.
+    pub sha512: String,
+    /// Computed hexadecimal BLAKE2b-512.
+    pub blake2b: String,
     /// Available supported linear references all match; None means none exist.
     pub references_match: Option<bool>,
     /// Datatypes of stored hashes not verified, including block-map hashes.
@@ -310,6 +318,8 @@ impl Container {
         let mut md5 = Md5::new();
         let mut sha1 = Sha1::new();
         let mut sha256 = Sha256::new();
+        let mut sha512 = sha2::Sha512::new();
+        let mut blake2b = <blake2::Blake2b512 as blake2::Digest>::new();
         loop {
             if progress(offset, size).is_break() {
                 return Err(Error::Aborted);
@@ -324,6 +334,8 @@ impl Container {
             md5.update(&buffer[..read]);
             sha1.update(&buffer[..read]);
             sha256.update(&buffer[..read]);
+            sha512.update(&buffer[..read]);
+            blake2::Digest::update(&mut blake2b, &buffer[..read]);
             offset += read as u64;
         }
         let mut result = Verification {
@@ -331,6 +343,8 @@ impl Container {
             md5: hex(&md5.finalize()),
             sha1: hex(&sha1.finalize()),
             sha256: hex(&sha256.finalize()),
+            sha512: hex(&sha512.finalize()),
+            blake2b: hex(&blake2::Digest::finalize(blake2b)),
             references_match: None,
             unsupported_hashes: Vec::new(),
         };
@@ -343,6 +357,8 @@ impl Container {
                 Some("MD5") => &result.md5,
                 Some("SHA1") => &result.sha1,
                 Some("SHA256") => &result.sha256,
+                Some("SHA512") => &result.sha512,
+                Some("Blake2b" | "blake2b") => &result.blake2b,
                 _ => {
                     result.unsupported_hashes.push(datatype.into());
                     continue;

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use md5::{Digest, Md5};
 use sha1::Sha1;
-use sha2::Sha256;
+use sha2::{Sha256, Sha512};
 use tempfile::NamedTempFile;
 use zip::{ZipWriter, write::SimpleFileOptions};
 
@@ -191,6 +191,11 @@ impl Writer {
         let mut chunk = 0u64;
         let mut buffer = vec![0; self.options.chunk_bytes as usize];
         let mut index = Vec::new();
+        let mut md5_blocks = Vec::new();
+        let mut sha256_blocks = Vec::new();
+        let mut md5_tree = Sha512::new();
+        let mut sha256_tree = Sha512::new();
+        let mut index_tree = Sha512::new();
         let mut bevy_bytes = 0u64;
         let zip = self.zip.as_mut().unwrap();
         loop {
@@ -205,11 +210,15 @@ impl Writer {
                 zip.start_file(format!("{storage}/{bevy:08}"), stored())?;
                 bevy_bytes = 0;
                 index.clear();
+                md5_blocks.clear();
+                sha256_blocks.clear();
             }
             let length = (size - done).min(buffer.len() as u64) as usize;
             buffer.fill(0);
             input.read_exact(&mut buffer[..length])?;
             hashes.update(&buffer[..length]);
+            md5_blocks.extend_from_slice(&Md5::digest(&buffer[..length]));
+            sha256_blocks.extend_from_slice(&Sha256::digest(&buffer[..length]));
             let encoded = encode(&buffer, self.options.compression)?;
             let encoded = if encoded.len() < buffer.len().saturating_sub(16) {
                 &encoded
@@ -224,6 +233,19 @@ impl Writer {
             chunk += 1;
             if chunk.is_multiple_of(u64::from(self.options.chunks_per_bevy)) || done == size {
                 write_member(zip, &format!("{storage}/{bevy:08}.index"), &index)?;
+                write_member(
+                    zip,
+                    &format!("{storage}/{bevy:08}.blockHash.md5"),
+                    &md5_blocks,
+                )?;
+                write_member(
+                    zip,
+                    &format!("{storage}/{bevy:08}.blockHash.sha256"),
+                    &sha256_blocks,
+                )?;
+                md5_tree.update(&md5_blocks);
+                sha256_tree.update(&sha256_blocks);
+                index_tree.update(&index);
             }
         }
         let result = hashes.finish(id.clone(), size);
@@ -241,6 +263,26 @@ impl Writer {
             &format!("{map_storage}/idx"),
             format!("{stream}\n").as_bytes(),
         )?;
+        let index_hash = hex(&index_tree.finalize());
+        let md5_tree = md5_tree.finalize();
+        let sha256_tree = sha256_tree.finalize();
+        let points_hash = Sha512::digest(&range);
+        let target_index = format!("{stream}\n");
+        let target_hash = Sha512::digest(target_index.as_bytes());
+        let empty_hash = Sha512::digest([]);
+        let mut composite = Sha512::new();
+        if size != 0 {
+            composite.update(md5_tree);
+            composite.update(sha256_tree);
+        }
+        composite.update(points_hash);
+        composite.update(target_hash);
+        composite.update(empty_hash);
+        let composite = hex(&composite.finalize());
+        let mut map_hash = Sha512::new();
+        map_hash.update(&range);
+        map_hash.update(target_index.as_bytes());
+        let map_hash = hex(&map_hash.finalize());
         let compression: String = match self.options.compression {
             Compression::Stored => {
                 "a:compressionMethod <http://aff4.org/Schema#compression/stored>;".into()
@@ -252,7 +294,10 @@ impl Writer {
             Compression::Lz4 => "a:compressionMethod <https://code.google.com/p/lz4/>;".into(),
         };
         let volume = &self.volume;
-        self.metadata.push_str(&format!("<{stream}> a a:ImageStream; a:size {size}; a:chunkSize {}; a:chunksInSegment {}; {compression} a:target <{map}>; a:stored <{volume}> .\n<{id}> a a:Image, a:ContiguousImage, a:DiskImage; a:size {size}; a:dataStream <{map}>; a:stored <{volume}>; {} .\n<{map}> a a:Map; a:size {size}; a:dependentStream <{stream}>; a:target <{id}>; a:stored <{volume}> .\n", self.options.chunk_bytes, self.options.chunks_per_bevy, hash_triples(&result)));
+        self.metadata.push_str(&format!("<{stream}> a a:ImageStream; a:size {size}; a:chunkSize {}; a:chunksInSegment {}; {compression} a:target <{map}>; a:stored <{volume}>; a:imageStreamIndexHash \"{index_hash}\"^^a:SHA512 .\n<{id}> a a:Image, a:ContiguousImage, a:DiskImage; a:size {size}; a:dataStream <{map}>; a:stored <{volume}>; {}; a:hash \"{composite}\"^^a:blockMapHashSHA512 .\n<{map}> a a:Map; a:size {size}; a:dependentStream <{stream}>; a:target <{id}>; a:stored <{volume}>; a:blockMapHash \"{composite}\"^^a:SHA512; a:mapPointHash \"{}\"^^a:SHA512; a:mapIdxHash \"{}\"^^a:SHA512; a:mapPathHash \"{}\"^^a:SHA512; a:mapHash \"{map_hash}\"^^a:SHA512 .\n", self.options.chunk_bytes, self.options.chunks_per_bevy, hash_triples(&result), hex(&points_hash), hex(&target_hash), hex(&empty_hash)));
+        if size != 0 {
+            self.metadata.push_str(&format!("<{stream}/blockhash.md5> a a:BlockHashes; a:hash \"{}\"^^a:SHA512 .\n<{stream}/blockhash.sha256> a a:BlockHashes; a:hash \"{}\"^^a:SHA512 .\n", hex(&md5_tree), hex(&sha256_tree)));
+        }
         self.streams.push(result);
         self.poisoned = false;
         Ok(id)

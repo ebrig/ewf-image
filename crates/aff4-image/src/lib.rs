@@ -10,8 +10,8 @@
 mod reader;
 mod writer;
 pub use reader::{
-    CheckOutcome, Container, IntegrityCheck, Limits, MetadataVerification, Property, StreamInfo,
-    Verification,
+    ByteCoverage, CheckOutcome, Container, ContainerVerification, IntegrityCheck, Limits,
+    MetadataVerification, Property, ResourceVerification, StreamInfo, Verification,
 };
 pub use writer::{AcquiredStream, Compression, Profile, WriteOptions, WriteResult, Writer};
 

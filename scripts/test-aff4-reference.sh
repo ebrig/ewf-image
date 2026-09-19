@@ -9,3 +9,7 @@ AFF4_REFERENCE_IMAGE="$directory/Base-Linear.aff4" cargo test -p aff4-image --te
 curl --fail --location --retry 3 https://raw.githubusercontent.com/aff4/ReferenceImages/84773b088bf6cce551a515d8ebb486bad69b58b8/AFF4-L/deprecated/dream.aff4 --output "$directory/dream.aff4"
 printf '%s  %s\n' ff90ec81dd332509a5535e82dc6d3de2ed5ffa3ec9b6246ace8389281c7cf7eb "$directory/dream.aff4" | sha256sum --check -
 AFF4_LOGICAL_REFERENCE_IMAGE="$directory/dream.aff4" cargo test -p aff4-image --test reader canonical_logical_reference_matches_producer_hashes -- --exact --ignored
+
+curl --fail --location --retry 3 https://raw.githubusercontent.com/aff4/ReferenceImages/84773b088bf6cce551a515d8ebb486bad69b58b8/AFF4Std/Base-Linear-AllHashes.aff4 --output "$directory/Base-Linear-AllHashes.aff4"
+printf '%s  %s\n' d8f098b1bb51eceb1e913c2389d3fb0a8543323d1db01bf8957e21bdccb1846d "$directory/Base-Linear-AllHashes.aff4" | sha256sum --check -
+AFF4_ALL_HASHES_REFERENCE="$directory/Base-Linear-AllHashes.aff4" cargo test --release -p aff4-image --test reader canonical_full_integrity_tree_matches_independent_producer -- --exact --ignored

@@ -448,3 +448,108 @@ fn imported_metadata_requires_a_primary_store_hash() {
         CheckOutcome::Mismatch
     );
 }
+
+#[test]
+fn full_verification_reports_block_corruption_and_gap_coverage() {
+    use aff4_image::CheckOutcome;
+    use md5::{Digest, Md5};
+    let mut hashes = Md5::digest(b"abcd").to_vec();
+    hashes.extend_from_slice(&Md5::digest(b"ef"));
+    for corrupt in [false, true] {
+        let mut recorded = hashes.clone();
+        if corrupt {
+            recorded[0] ^= 1;
+        }
+        let file = fixture(
+            &metadata(),
+            &[
+                ("data/00000000", b"abcd"),
+                ("data/00000001", b"ef\0\0"),
+                ("data/00000000.index", &index(4)),
+                ("data/00000001.index", &index(4)),
+                ("data/00000000.blockHash.md5", &recorded[..16]),
+                ("data/00000001.blockHash.md5", &recorded[16..]),
+            ],
+        );
+        let mut image = Container::open(file.path()).unwrap();
+        let report = image
+            .verify_all(None, |_, _, _| ControlFlow::Continue(()))
+            .unwrap();
+        let blocks: Vec<_> = report
+            .checks
+            .iter()
+            .filter(|c| c.reference_source.contains("blockHash"))
+            .collect();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            blocks[0].outcome,
+            if corrupt {
+                CheckOutcome::Mismatch
+            } else {
+                CheckOutcome::Match
+            }
+        );
+        assert_eq!(blocks[1].outcome, CheckOutcome::Match);
+        assert!(
+            report
+                .resources
+                .iter()
+                .all(|r| r.coverage.as_ref().unwrap().stored == 6)
+        );
+        assert!(!report.all_match()); // no metadata hash reference
+        assert!(matches!(
+            image.verify_all(None, |_, _, _| ControlFlow::Break(())),
+            Err(Error::Aborted)
+        ));
+    }
+    let meta = "@prefix a: <http://aff4.org/Schema#> . <aff4://volume/map> a a:Map; a:size 5 .";
+    let mut range = 1u64.to_le_bytes().to_vec();
+    range.extend(2u64.to_le_bytes());
+    range.extend(0u64.to_le_bytes());
+    range.extend(0u32.to_le_bytes());
+    let file = fixture(
+        meta,
+        &[
+            ("map/map", &range),
+            ("map/idx", b"http://aff4.org/Schema#Zero\n"),
+        ],
+    );
+    let report = Container::open(file.path())
+        .unwrap()
+        .verify_all(None, |_, _, _| ControlFlow::Continue(()))
+        .unwrap();
+    let c = report.resources[0].coverage.as_ref().unwrap();
+    assert_eq!((c.stored, c.described, c.gap_filled), (0, 2, 3));
+}
+
+#[test]
+#[ignore = "requires pinned Base-Linear-AllHashes canonical image"]
+fn canonical_full_integrity_tree_matches_independent_producer() {
+    use aff4_image::CheckOutcome;
+    let path =
+        std::env::var_os("AFF4_ALL_HASHES_REFERENCE").expect("AFF4_ALL_HASHES_REFERENCE required");
+    let report = Container::open(path)
+        .unwrap()
+        .verify_all(None, |_, _, _| ControlFlow::Continue(()))
+        .unwrap();
+    assert!(
+        report.resources.iter().all(|r| r.error.is_none()),
+        "{report:#?}"
+    );
+    assert!(report.checks.len() >= 20);
+    for check in &report.checks {
+        if check.reference_source.ends_with("#imageStreamHash") {
+            assert_eq!(check.outcome, CheckOutcome::Unsupported);
+        } else {
+            assert_eq!(check.outcome, CheckOutcome::Match, "{check:#?}");
+        }
+    }
+    assert!(report.checks.iter().any(|c| c.algorithm == "Blake2b"));
+    assert!(
+        report
+            .resources
+            .iter()
+            .any(|r| r.coverage.as_ref().unwrap().described > 0)
+    );
+    assert!(!report.all_match()); // unidentified digest and absent metadata anchor
+}

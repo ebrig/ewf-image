@@ -45,6 +45,12 @@ fn physical_codecs_bevies_padding_and_logical_zip_roundtrip() {
             .unwrap();
         let result = writer.finish().unwrap();
         let mut image = Container::open(&path).unwrap();
+        let full = image
+            .verify_all(Some(&result.metadata_sha256), |_, _, _| {
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        assert!(full.all_match(), "{full:#?}");
         let report = image.verify(&id, proceed).unwrap();
         assert_eq!(report.references_match, Some(true));
         assert_eq!(report.sha256, result.streams[0].sha256);
