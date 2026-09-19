@@ -15,6 +15,10 @@ use zip::ZipArchive;
 use crate::{Error, Result, malformed};
 use base64::Engine;
 
+#[path = "integrity.rs"]
+mod integrity;
+pub use integrity::{CheckOutcome, IntegrityCheck, MetadataVerification};
+
 const NS: &str = "http://aff4.org/Schema#";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const LOGICAL_NS: &str = "https://aff4.org/Schema/2022/#";
@@ -95,6 +99,7 @@ pub struct Container {
     cache: Option<(String, Vec<u8>)>,
     maps: BTreeMap<String, Arc<Map>>,
     version: (u32, u32),
+    metadata_members: BTreeMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -172,6 +177,7 @@ impl Container {
         let mut graph: BTreeMap<String, Vec<Property>> = BTreeMap::new();
         let mut pending = vec!["information.turtle".to_owned()];
         let mut seen = BTreeSet::new();
+        let mut metadata_members = BTreeMap::new();
         let mut remaining = limits.metadata_bytes;
         let mut count = 0;
         while let Some(name) = pending.pop() {
@@ -180,6 +186,7 @@ impl Container {
             }
             let turtle = member(&mut archive, &name, remaining)?;
             remaining -= turtle.len() as u64;
+            metadata_members.insert(name.clone(), hex(&Sha256::digest(&turtle)));
             for triple in TurtleParser::new().for_reader(turtle.as_slice()) {
                 if count >= limits.triples {
                     return Err(malformed("RDF triple limit exceeded"));
@@ -221,6 +228,7 @@ impl Container {
             cache: None,
             maps: BTreeMap::new(),
             version,
+            metadata_members,
         })
     }
 

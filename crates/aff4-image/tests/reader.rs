@@ -334,3 +334,117 @@ fn canonical_logical_reference_matches_producer_hashes() {
     assert_eq!(result.sha1, "9ae1b46bead70c322eef7ac8bc36a8ea2055595c");
     assert_eq!(result.references_match, Some(true));
 }
+
+#[test]
+fn metadata_hashes_cover_exact_bytes_and_external_reference() {
+    use aff4_image::CheckOutcome;
+    use sha2::{Digest, Sha256};
+    let primary = "@prefix a: <http://aff4.org/Schema#> .\n";
+    let digest = Sha256::digest(primary.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let rdf = format!(
+        "<aff4://volume/information.turtle> <http://aff4.org/Schema#hash> \"{digest}\"^^<http://aff4.org/Schema#SHA256> ."
+    );
+    let legacy = format!("{{\"sha256\":\"{digest}\"}}");
+    let file = fixture(
+        primary,
+        &[
+            ("information.turtle.hashes", rdf.as_bytes()),
+            ("container.hashes", legacy.as_bytes()),
+        ],
+    );
+    let mut image = Container::open(file.path()).unwrap();
+    let report = image.verify_metadata(Some(&digest)).unwrap();
+    assert!(report.all_match());
+    assert_eq!(report.checks.len(), 3);
+    assert_eq!(
+        image.verify_metadata(Some(&"0".repeat(64))).unwrap().checks[0].outcome,
+        CheckOutcome::Mismatch
+    );
+    // Whitespace preserves RDF semantics but changes the signed/hashed bytes.
+    let changed = fixture(
+        &format!("{primary} "),
+        &[("information.turtle.hashes", rdf.as_bytes())],
+    );
+    assert_eq!(
+        Container::open(changed.path())
+            .unwrap()
+            .verify_metadata(None)
+            .unwrap()
+            .checks[0]
+            .outcome,
+        CheckOutcome::Mismatch
+    );
+    let conflict = fixture(
+        primary,
+        &[
+            ("information.turtle.hashes", rdf.as_bytes()),
+            (
+                "container.hashes",
+                br#"{"sha256":"0000000000000000000000000000000000000000000000000000000000000000"}"#,
+            ),
+        ],
+    );
+    assert!(
+        !Container::open(conflict.path())
+            .unwrap()
+            .verify_metadata(None)
+            .unwrap()
+            .all_match()
+    );
+    let duplicate = fixture(
+        primary,
+        &[("container.hashes", br#"{"sha256":"a","SHA256":"b"}"#)],
+    );
+    assert!(
+        Container::open(duplicate.path())
+            .unwrap()
+            .verify_metadata(None)
+            .is_err()
+    );
+    let missing = fixture(primary, &[]);
+    assert_eq!(
+        Container::open(missing.path())
+            .unwrap()
+            .verify_metadata(None)
+            .unwrap()
+            .checks[0]
+            .outcome,
+        CheckOutcome::Missing
+    );
+}
+
+#[test]
+fn imported_metadata_requires_a_primary_store_hash() {
+    use aff4_image::CheckOutcome;
+    use sha2::{Digest, Sha256};
+    let secondary = "<aff4://file> <http://aff4.org/Schema#size> 0 .";
+    let hash = Sha256::digest(secondary)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let primary = format!(
+        "@prefix a: <http://aff4.org/Schema#> . <aff4://volume> a:imports <aff4://volume/more> . <aff4://volume/more> a:hash \"{hash}\"^^a:SHA256 ."
+    );
+    let file = fixture(&primary, &[("more", secondary.as_bytes())]);
+    let report = Container::open(file.path())
+        .unwrap()
+        .verify_metadata(None)
+        .unwrap();
+    assert_eq!(report.checks.last().unwrap().outcome, CheckOutcome::Match);
+    assert!(!report.all_match()); // the primary hash itself is absent
+    let file = fixture(&primary, &[("more", format!("{secondary} ").as_bytes())]);
+    assert_eq!(
+        Container::open(file.path())
+            .unwrap()
+            .verify_metadata(None)
+            .unwrap()
+            .checks
+            .last()
+            .unwrap()
+            .outcome,
+        CheckOutcome::Mismatch
+    );
+}

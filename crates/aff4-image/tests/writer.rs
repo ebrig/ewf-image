@@ -171,6 +171,13 @@ fn independent_consumer_exports_and_verifies_writer_output() {
                 }
             }
             let written = writer.finish().unwrap();
+            assert!(
+                Container::open(&path)
+                    .unwrap()
+                    .verify_metadata(Some(&written.metadata_sha256))
+                    .unwrap()
+                    .all_match()
+            );
             let conformance = std::process::Command::new(&oracle)
                 .args(["conformance", "--strict"])
                 .arg(&path)

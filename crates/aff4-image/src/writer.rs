@@ -75,6 +75,8 @@ pub struct WriteResult {
     pub path: PathBuf,
     /// Per-resource source hashes.
     pub streams: Vec<AcquiredStream>,
+    /// SHA256 of the exact information.turtle bytes; record externally.
+    pub metadata_sha256: String,
 }
 
 /// Streaming writer with exclusive publication and no full-source spool.
@@ -328,6 +330,12 @@ impl Writer {
         self.healthy()?;
         let mut zip = self.zip.take().unwrap();
         write_member(&mut zip, "information.turtle", self.metadata.as_bytes())?;
+        let metadata_sha256 = hex(&Sha256::digest(self.metadata.as_bytes()));
+        let hashes = format!(
+            "@prefix a: <http://aff4.org/Schema#> .\n<{}/information.turtle> a:hash \"{}\"^^a:SHA256 .\n",
+            self.volume, metadata_sha256
+        );
+        write_member(&mut zip, "information.turtle.hashes", hashes.as_bytes())?;
         let file = zip.finish()?;
         file.sync_all()?;
         drop(file);
@@ -339,6 +347,7 @@ impl Writer {
         Ok(WriteResult {
             path: self.path,
             streams: self.streams,
+            metadata_sha256,
         })
     }
 

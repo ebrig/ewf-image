@@ -3,12 +3,16 @@
 //! Supports ZIP AFF4 v1 physical ImageStreams and Maps, legacy AFF4-L 1.1,
 //! and a documented subset of the AFF4-L 2.1 draft. Reads never extract
 //! archive paths onto the host filesystem. Verification covers selected stream
-//! bytes and available linear hashes, not block-map or metadata authenticity.
+//! bytes and available linear hashes. Metadata hashes are checked separately;
+//! neither internal hashes nor matching bytes establish independent authenticity.
 #![forbid(unsafe_code)]
 
 mod reader;
 mod writer;
-pub use reader::{Container, Limits, Property, StreamInfo, Verification};
+pub use reader::{
+    CheckOutcome, Container, IntegrityCheck, Limits, MetadataVerification, Property, StreamInfo,
+    Verification,
+};
 pub use writer::{AcquiredStream, Compression, Profile, WriteOptions, WriteResult, Writer};
 
 /// AFF4 operation result.

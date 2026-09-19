@@ -29,6 +29,8 @@ dependencies = [
  "md-5",
  "oxrdf",
  "oxttl",
+ "serde",
+ "serde_json",
  "sha1",
  "sha2",
  "snap",
