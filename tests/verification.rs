@@ -68,6 +68,12 @@ fn logical_verification_handles_sparse_duplicates_references_and_cancellation() 
     assert_eq!(image.verify_single_file(&entry).unwrap().bytes_verified, 0);
     entry.file_entry_type = Some(SingleFileEntryType::Directory);
     assert!(image.verify_single_file(&entry).is_err());
+    entry.file_entry_type = Some(SingleFileEntryType::File);
+    image.signal_abort();
+    assert!(matches!(
+        image.verify_single_file(&entry),
+        Err(EwfError::Aborted)
+    ));
 }
 
 #[test]

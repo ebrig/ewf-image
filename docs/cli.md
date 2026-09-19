@@ -24,7 +24,8 @@ ewf-image report case.E01 --write
 ## Logical file operations
 
 `files IMAGE` lists L01/Lx01 catalog entries in preorder, with root index 0.
-Use `--offset` and `--limit` to page through the catalog; `next_offset` is null
+Each entry includes `parent_index` (null for the root), preserving hierarchy
+across pages. Use `--offset` and `--limit` to page through the catalog; `next_offset` is null
 on the last page. Indices select entries even when names collide or contain
 characters that cannot be represented as destination filenames. They remain
 stable only for the same unchanged image. Listing does not verify file data.

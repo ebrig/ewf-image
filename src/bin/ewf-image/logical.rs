@@ -7,17 +7,27 @@ use serde_json::{Value, json};
 
 use super::{Progress, Result, export, hex, inspect, invalid};
 
-fn entries(image: &Image) -> Result<impl Iterator<Item = (usize, &SingleFileEntry)>> {
+fn entries(
+    image: &Image,
+) -> Result<impl Iterator<Item = (usize, &SingleFileEntry, Option<usize>)>> {
     let root = image
         .root_file_entry()
         .ok_or_else(|| invalid("image has no logical file catalog"))?;
-    let mut stack = vec![root];
+    let mut stack = vec![(root, None)];
+    let mut index = 0;
     Ok(std::iter::from_fn(move || {
-        let entry = stack.pop()?;
-        stack.extend(entry.children.iter().rev());
-        Some(entry)
-    })
-    .enumerate())
+        let (entry, parent) = stack.pop()?;
+        let current = index;
+        index += 1;
+        stack.extend(
+            entry
+                .children
+                .iter()
+                .rev()
+                .map(|child| (child, Some(current))),
+        );
+        Some((current, entry, parent))
+    }))
 }
 
 fn entry_json(index: usize, entry: &SingleFileEntry) -> Value {
@@ -41,7 +51,7 @@ pub fn list(
     report["phase"] = json!("catalog");
     let mut page = Vec::new();
     let mut next = None;
-    for (index, entry) in entries(&image)? {
+    for (index, entry, parent) in entries(&image)? {
         if progress.event("catalog", index as u64, 0).is_break() {
             return Err(EwfError::Aborted.into());
         }
@@ -52,7 +62,9 @@ pub fn list(
             next = Some(index);
             break;
         }
-        page.push(entry_json(index, entry));
+        let mut value = entry_json(index, entry);
+        value["parent_index"] = json!(parent);
+        page.push(value);
     }
     report["entries"] = json!(page);
     report["next_offset"] = json!(next);
@@ -77,7 +89,7 @@ pub fn read(
     let image = inspect::open(input, report)?;
     let entry = entries(&image)?
         .nth(index)
-        .map(|(_, e)| e)
+        .map(|(_, e, _)| e)
         .ok_or_else(|| invalid("catalog index does not exist"))?;
     report["entry"] = entry_json(index, entry);
     let output = output

@@ -76,6 +76,8 @@ impl Image {
                 "entry is not a regular logical file".into(),
             ));
         }
+        // Honor the image-wide abort flag even for an empty file.
+        self.read_single_file_at_strict(entry, &mut [], 0)?;
         let references = [
             (HashAlgorithm::Md5, "MD5", entry.md5.as_deref()),
             (HashAlgorithm::Sha1, "SHA1", entry.sha1.as_deref()),

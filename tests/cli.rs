@@ -63,6 +63,7 @@ fn cli_logical_listing_verification_and_safe_selective_extraction() {
         assert_eq!(page["media_verified"], false);
         let next = result(dir.path(), &["files", name, "--offset", "2"], 0);
         assert_eq!(next["entries"][0]["index"], 2);
+        assert_eq!(next["entries"][0]["parent_index"], 0);
         let verified = result(dir.path(), &["verify-file", name, "1"], 0);
         assert_eq!(verified["verification"]["references_match"], true);
         assert_eq!(verified["verification"]["bytes_verified"], 3);
