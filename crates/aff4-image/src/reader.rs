@@ -141,11 +141,11 @@ impl Container {
             fields
                 .get("major")
                 .and_then(|n| n.parse().ok())
-                .unwrap_or(0),
+                .ok_or_else(|| malformed("missing or invalid major version"))?,
             fields
                 .get("minor")
                 .and_then(|n| n.parse().ok())
-                .unwrap_or(0),
+                .ok_or_else(|| malformed("missing or invalid minor version"))?,
         );
         if !matches!(version, (1, 0) | (1, 1) | (2, 1)) {
             return Err(Error::Unsupported(
@@ -420,6 +420,14 @@ impl Container {
                 return Err(malformed("conflicting inline data"));
             }
             result = Some(bytes);
+        }
+        if result.is_some()
+            && self.properties(id).any(|p| {
+                (is_property(&p.predicate, "dataStream") || is_property(&p.predicate, "dataSteam"))
+                    && p.datatype.as_deref() != Some(BASE64)
+            })
+        {
+            return Err(malformed("conflicting inline and referenced data streams"));
         }
         Ok(result)
     }

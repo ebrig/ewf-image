@@ -171,6 +171,19 @@ fn independent_consumer_exports_and_verifies_writer_output() {
                 }
             }
             let written = writer.finish().unwrap();
+            let conformance = std::process::Command::new(&oracle)
+                .args(["conformance", "--strict"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(
+                conformance.status.success(),
+                "{:?}/{:?}: {} {}",
+                profile,
+                codec,
+                String::from_utf8_lossy(&conformance.stdout),
+                String::from_utf8_lossy(&conformance.stderr)
+            );
             let verify = std::process::Command::new(&oracle)
                 .arg("verify")
                 .arg(&path)

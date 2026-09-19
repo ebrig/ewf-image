@@ -249,11 +249,8 @@ impl Writer {
             Compression::Snappy => "a:compressionMethod <http://code.google.com/p/snappy/>;".into(),
             Compression::Lz4 => "a:compressionMethod <https://code.google.com/p/lz4/>;".into(),
         };
-        self.metadata.push_str(&format!("<{stream}> a a:ImageStream; a:size {size}; a:chunkSize {}; a:chunksInSegment {}; {compression} a:target <{map}> .\n<{id}> a a:Image, a:ContiguousImage, a:DiskImage; a:size {size}; a:dataStream <{map}>; {} .\n<{map}> a a:Map; a:size {size}; a:dependentStream <{stream}>; a:target <{id}>; a:stored <{}> .\n", self.options.chunk_bytes, self.options.chunks_per_bevy, hash_triples(&result),self.volume));
-        self.metadata.push_str(&format!(
-            "<{stream}> a:stored <{}> .\n<{id}> a:stored <{}> .\n",
-            self.volume, self.volume
-        ));
+        let volume = &self.volume;
+        self.metadata.push_str(&format!("<{stream}> a a:ImageStream; a:size {size}; a:chunkSize {}; a:chunksInSegment {}; {compression} a:target <{map}>; a:stored <{volume}> .\n<{id}> a a:Image, a:ContiguousImage, a:DiskImage; a:size {size}; a:dataStream <{map}>; a:stored <{volume}>; {} .\n<{map}> a a:Map; a:size {size}; a:dependentStream <{stream}>; a:target <{id}>; a:stored <{volume}> .\n", self.options.chunk_bytes, self.options.chunks_per_bevy, hash_triples(&result)));
         self.streams.push(result);
         self.poisoned = false;
         Ok(id)
@@ -318,9 +315,7 @@ impl Writer {
             .unwrap_or(original_path);
         let name = oxrdf::Literal::new_simple_literal(name).to_string();
         let path = oxrdf::Literal::new_simple_literal(original_path).to_string();
-        self.metadata.push_str(&format!("<{id}> a a:FileImage, a:Image, a:zip_segment; a:size {size}; a:fileName {name}; a:originalFileName {path}; {} .\n", hash_triples(&result)));
-        self.metadata
-            .push_str(&format!("<{id}> a:stored <{}> .\n", self.volume));
+        self.metadata.push_str(&format!("<{id}> a a:FileImage, a:Image, a:zip_segment; a:size {size}; a:fileName {name}; a:originalFileName {path}; a:stored <{}>; {} .\n", self.volume, hash_triples(&result)));
         self.streams.push(result);
         self.poisoned = false;
         Ok(id)

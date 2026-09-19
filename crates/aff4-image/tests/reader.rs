@@ -259,6 +259,66 @@ fn logical_zip_inline_imports_and_metadata() {
 }
 
 #[test]
+fn rejects_missing_versions_ambiguous_inline_and_missing_empty_members() {
+    let missing = fixture_version(&metadata(), &[], b"major=1\n");
+    assert!(Container::open(missing.path()).is_err());
+    let empty = r#"@prefix a: <http://aff4.org/Schema#> . <aff4://volume/file> a a:Image, a:ZipSegment; a:size 0 ."#;
+    let file = fixture_version(empty, &[], b"major=2\nminor=1\n");
+    assert!(
+        Container::open(file.path())
+            .unwrap()
+            .verify("aff4://volume/file", |_, _| ControlFlow::Continue(()))
+            .is_err()
+    );
+    let mixed = r#"@prefix a: <http://aff4.org/Schema#> . <aff4://inline> a a:Image; a:size 3; a:dataStream "YWJj"^^<http://www.w3.org/2001/XMLSchema#base64Binary>, <aff4://other> ."#;
+    let file = fixture_version(mixed, &[], b"major=2\nminor=1\n");
+    assert!(
+        Container::open(file.path())
+            .unwrap()
+            .size("aff4://inline")
+            .is_err()
+    );
+}
+
+#[test]
+fn raw_deflate_is_distinct_from_zlib() {
+    let mut encoder =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&[42; 1024]).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let meta = r#"@prefix a: <http://aff4.org/Schema#> . <aff4://volume/data> a a:ImageStream; a:chunkSize 1024; a:chunksInSegment 1; a:size 1024; a:compressionMethod <https://tools.ietf.org/html/rfc1951> ."#;
+    let file = fixture(
+        meta,
+        &[
+            ("data/00000000", &compressed),
+            ("data/00000000.index", &index(compressed.len() as u32)),
+        ],
+    );
+    let mut bytes = [0; 1024];
+    Container::open(file.path())
+        .unwrap()
+        .read_at("aff4://volume/data", &mut bytes, 0)
+        .unwrap();
+    assert_eq!(bytes, [42; 1024]);
+    let wrong = fixture(
+        &meta.replace(
+            "https://tools.ietf.org/html/rfc1951",
+            "https://www.ietf.org/rfc/rfc1950.txt",
+        ),
+        &[
+            ("data/00000000", &compressed),
+            ("data/00000000.index", &index(compressed.len() as u32)),
+        ],
+    );
+    assert!(
+        Container::open(wrong.path())
+            .unwrap()
+            .read_at("aff4://volume/data", &mut bytes, 0)
+            .is_err()
+    );
+}
+
+#[test]
 #[ignore = "requires the pinned legacy AFF4-L canonical dream image"]
 fn canonical_logical_reference_matches_producer_hashes() {
     let path = std::env::var_os("AFF4_LOGICAL_REFERENCE_IMAGE")
