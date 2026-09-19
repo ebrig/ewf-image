@@ -1,6 +1,6 @@
 //! AFF4 inventory, verification, local collection, and selective extraction.
 use aff4_image::{
-    CaseMetadata, CollectionOptions, Container, Limits, Profile, WriteOptions, Writer,
+    CaseMetadata, CollectionOptions, Container, Limits, Profile, VolumeSet, WriteOptions, Writer,
 };
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -34,6 +34,15 @@ enum Command {
         image: PathBuf,
         #[arg(long)]
         expected_metadata_sha256: Option<String>,
+    },
+    /// Hash a physical image across explicitly supplied volumes (primary first).
+    VerifySet {
+        #[arg(required = true)]
+        volumes: Vec<PathBuf>,
+        #[arg(long)]
+        image: String,
+        #[arg(long)]
+        expected_image_sha256: Option<String>,
     },
     /// Acquire a local directory. Use a stable snapshot for cross-file consistency.
     Collect {
@@ -91,6 +100,26 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
             println!("{}", serde_json::to_string(&result)?);
             if !result.all_match() {
                 return Ok(4);
+            }
+        }
+        Command::VerifySet {
+            volumes,
+            image,
+            expected_image_sha256,
+        } => {
+            let result = VolumeSet::open(&volumes)?.verify_image(
+                &image,
+                expected_image_sha256.as_deref(),
+                progress,
+            )?;
+            println!(
+                "{}",
+                json!({"scope":"assembled image bytes only", "result":result})
+            );
+            match result.external_match {
+                Some(true) => {}
+                Some(false) => return Ok(3),
+                None => return Ok(4),
             }
         }
         Command::Collect {

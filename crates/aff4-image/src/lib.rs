@@ -11,7 +11,8 @@ mod reader;
 mod writer;
 pub use reader::{
     ByteCoverage, CheckOutcome, Container, ContainerVerification, IntegrityCheck, Limits,
-    MetadataScan, MetadataVerification, Property, ResourceVerification, StreamInfo, Verification,
+    MetadataScan, MetadataVerification, Property, ResourceVerification, SetDigest, StreamInfo,
+    Verification, VolumeSet, VolumeSource,
 };
 pub use writer::{
     AcquiredStream, CaseMetadata, CollectionIssue, CollectionOptions, CollectionReport,

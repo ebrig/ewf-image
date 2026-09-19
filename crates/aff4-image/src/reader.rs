@@ -27,6 +27,10 @@ pub use verify_all::{ByteCoverage, ContainerVerification, ResourceVerification};
 mod scan;
 pub use scan::MetadataScan;
 
+#[path = "volume_set.rs"]
+mod volume_set;
+pub use volume_set::{SetDigest, VolumeSet, VolumeSource};
+
 const NS: &str = "http://aff4.org/Schema#";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const LOGICAL_NS: &str = "https://aff4.org/Schema/2022/#";
@@ -638,6 +642,20 @@ impl Container {
             return Ok(());
         }
         if let Some(target) = self.value(id, "dataStream")? {
+            if self.has_type(id, "ContiguousImage") && self.has_type(&target, "Map") {
+                self.load_map(&target)?;
+                let map = &self.maps[&target];
+                let mut end = 0;
+                for range in &map.ranges {
+                    if range.start != end {
+                        return Err(malformed("gap in declared contiguous image"));
+                    }
+                    end = range.end;
+                }
+                if end != size {
+                    return Err(malformed("truncated contiguous image map"));
+                }
+            }
             return self.read_inner(&target, buffer, offset, visited);
         }
         if self.has_type(id, "ZipSegment") || self.has_type(id, "zip_segment") {
