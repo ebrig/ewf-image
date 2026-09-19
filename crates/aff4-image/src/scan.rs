@@ -2,7 +2,7 @@
 use super::*;
 
 /// Work performed by a streaming metadata scan. Triples include repeated subjects.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct MetadataScan {
     /// Total triples delivered, including imported stores.
     pub triples: usize,

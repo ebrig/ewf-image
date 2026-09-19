@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::Arc;
@@ -34,7 +34,7 @@ const LEGACY_LOGICAL_NS: &str = "http://aff4.org/Schema/2022/#";
 const BASE64: &str = "http://www.w3.org/2001/XMLSchema#base64Binary";
 
 /// Limits on retained metadata, map/index members, and decoded chunks.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Limits {
     /// Maximum decompressed metadata bytes.
     pub metadata_bytes: u64,
@@ -57,7 +57,7 @@ impl Default for Limits {
 }
 
 /// Preserved RDF property; values remain associated with their subject.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Property {
     /// Fully expanded predicate IRI.
     pub predicate: String,
@@ -70,7 +70,7 @@ pub struct Property {
 }
 
 /// An explicitly selectable image or underlying data stream.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct StreamInfo {
     /// AFF4 resource identifier.
     pub id: String,
@@ -81,7 +81,7 @@ pub struct StreamInfo {
 }
 
 /// Selected-stream linear digest results. Unsupported references are explicit.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Verification {
     /// Number of logical bytes read.
     pub bytes_verified: u64,
@@ -313,6 +313,18 @@ impl Container {
     pub fn verify(
         &mut self,
         id: &str,
+        progress: impl FnMut(u64, u64) -> ControlFlow<()>,
+    ) -> Result<Verification> {
+        self.copy_verified(id, &mut std::io::sink(), progress)
+    }
+
+    /// Copies exact logical bytes while computing and comparing linear hashes.
+    /// The caller owns staging/publication and must inspect `references_match`.
+    /// Partial output may remain in the sink after any failure or cancellation.
+    pub fn copy_verified(
+        &mut self,
+        id: &str,
+        output: &mut impl Write,
         mut progress: impl FnMut(u64, u64) -> ControlFlow<()>,
     ) -> Result<Verification> {
         let size = self.size(id)?;
@@ -325,14 +337,23 @@ impl Container {
         let mut sha256 = Sha256::new();
         let mut sha512 = sha2::Sha512::new();
         let mut blake2b = <blake2::Blake2b512 as blake2::Digest>::new();
-        self.walk_bytes(id, |bytes, done| {
+        let mut write_error = None;
+        let walked = self.walk_bytes(id, |bytes, done| {
+            if let Err(error) = output.write_all(bytes) {
+                write_error = Some(error);
+                return ControlFlow::Break(());
+            }
             md5.update(bytes);
             sha1.update(bytes);
             sha256.update(bytes);
             sha512.update(bytes);
             blake2::Digest::update(&mut blake2b, bytes);
             progress(done, size)
-        })?;
+        });
+        if let Some(error) = write_error {
+            return Err(error.into());
+        }
+        walked?;
         let mut result = Verification {
             bytes_verified: size,
             md5: hex(&md5.finalize()),

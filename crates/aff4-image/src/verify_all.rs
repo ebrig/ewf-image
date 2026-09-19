@@ -4,7 +4,7 @@ use super::*;
 use sha2::Sha512;
 
 /// Byte provenance for one fully traversed resource. Counts sum to its size.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ByteCoverage {
     /// Bytes read from ZIP members or ImageStreams.
     pub stored: u64,
@@ -15,7 +15,7 @@ pub struct ByteCoverage {
 }
 
 /// Content traversal of one resource, kept separate from metadata checks.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ResourceVerification {
     /// Selected image, file, map, or storage stream.
     pub resource: String,
@@ -28,7 +28,7 @@ pub struct ResourceVerification {
 }
 
 /// Container-wide inventory. No single matching digest substitutes for coverage.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ContainerVerification {
     /// Metadata integrity report when its hash files can be interpreted.
     pub metadata: Option<MetadataVerification>,

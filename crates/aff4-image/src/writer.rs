@@ -1,4 +1,11 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File};
+#[path = "collect.rs"]
+mod collect;
+#[path = "logical_metadata.rs"]
+mod logical_metadata;
+pub use collect::{CollectionIssue, CollectionOptions, CollectionReport};
+pub use logical_metadata::{CaseMetadata, LogicalMetadata, SubstreamKind};
 use std::io::{Read, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -12,7 +19,7 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 use crate::{Error, Result, malformed, reader::hex};
 
 /// Container profile chosen before any evidence bytes are written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Profile {
     /// AFF4 Standard 1.0 physical images with ImageStream storage.
     Physical,
@@ -21,7 +28,7 @@ pub enum Profile {
 }
 
 /// Physical chunk codec. Logical ZIP segments use Stored or Deflate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Compression {
     /// Uncompressed bytes.
     Stored,
@@ -34,7 +41,7 @@ pub enum Compression {
 }
 
 /// Bounded writer geometry. Output is always a new single ZIP volume.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct WriteOptions {
     /// Physical chunk bytes (1 through 16 MiB).
     pub chunk_bytes: u32,
@@ -54,7 +61,7 @@ impl Default for WriteOptions {
 }
 
 /// Digests of source bytes accepted for one image or file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct AcquiredStream {
     /// Image or FileImage resource identifier.
     pub id: String,
@@ -69,7 +76,7 @@ pub struct AcquiredStream {
 }
 
 /// Published acquisition result. Caller may reopen to verify independently.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct WriteResult {
     /// Final, exclusively created path.
     pub path: PathBuf,
@@ -96,6 +103,9 @@ pub struct Writer {
     streams: Vec<AcquiredStream>,
     poisoned: bool,
     logical_zip_threshold: u64,
+    folders: BTreeMap<String, (String, Vec<String>)>,
+    roots: Vec<String>,
+    path_separator: char,
 }
 
 impl Writer {
@@ -166,6 +176,9 @@ impl Writer {
             streams: Vec::new(),
             poisoned: false,
             logical_zip_threshold: 1024 * 1024,
+            folders: BTreeMap::new(),
+            roots: Vec::new(),
+            path_separator: '/',
         })
     }
 
@@ -183,7 +196,7 @@ impl Writer {
                 "physical image in a logical writer".into(),
             ));
         }
-        self.add_chunked(size, input, progress, None)
+        self.add_chunked(size, input, progress, None, "")
     }
 
     /// Sets the largest logical file stored as one ZIP segment (at most 1 GiB).
@@ -203,6 +216,7 @@ impl Writer {
         input: &mut impl Read,
         mut progress: impl FnMut(u64, u64) -> ControlFlow<()>,
         logical_path: Option<&str>,
+        extra_properties: &str,
     ) -> Result<String> {
         self.poisoned = true;
         let id = if logical_path.is_some() {
@@ -349,7 +363,7 @@ impl Writer {
             .unwrap_or_default();
         let volume = &self.volume;
         if logical_path.is_some() {
-            self.metadata.push_str(&format!("<{id}> a a:FileImage, a:Image, a:ImageStream; {logical_properties} a:size {size}; a:chunkSize {}; a:chunksInSegment {}; {compression} a:stored <{volume}>; a:imageStreamIndexHash \"{index_hash}\"^^a:SHA512; {} .\n", self.options.chunk_bytes, self.options.chunks_per_bevy, hash_triples(&result)));
+            self.metadata.push_str(&format!("<{id}> a a:FileImage, a:Image, a:ImageStream; {extra_properties} {logical_properties} a:size {size}; a:chunkSize {}; a:chunksInSegment {}; {compression} a:stored <{volume}>; a:imageStreamIndexHash \"{index_hash}\"^^a:SHA512; {} .\n", self.options.chunk_bytes, self.options.chunks_per_bevy, hash_triples(&result)));
         } else {
             self.metadata.push_str(&format!("<{stream}> a a:ImageStream; a:size {size}; a:chunkSize {}; a:chunksInSegment {}; {compression} a:target <{map}>; a:stored <{volume}>; a:imageStreamIndexHash \"{index_hash}\"^^a:SHA512 .\n<{id}> a a:Image, a:ContiguousImage, a:{kind}; {logical_properties} a:size {size}; a:dataStream <{map}>; a:stored <{volume}>; {}; a:hash \"{composite}\"^^a:blockMapHashSHA512 .\n<{map}> a a:Map; a:size {size}; a:dependentStream <{stream}>; a:target <{id}>; a:stored <{volume}>; a:blockMapHash \"{composite}\"^^a:SHA512; a:mapPointHash \"{}\"^^a:SHA512; a:mapIdxHash \"{}\"^^a:SHA512; a:mapPathHash \"{}\"^^a:SHA512; a:mapHash \"{map_hash}\"^^a:SHA512 .\n", self.options.chunk_bytes, self.options.chunks_per_bevy, hash_triples(&result), hex(&points_hash), hex(&target_hash), hex(&empty_hash)));
         }
@@ -369,7 +383,18 @@ impl Writer {
         original_path: &str,
         size: u64,
         input: &mut impl Read,
+        progress: impl FnMut(u64, u64) -> ControlFlow<()>,
+    ) -> Result<String> {
+        self.add_file_impl(original_path, size, input, progress, "")
+    }
+
+    fn add_file_impl(
+        &mut self,
+        original_path: &str,
+        size: u64,
+        input: &mut impl Read,
         mut progress: impl FnMut(u64, u64) -> ControlFlow<()>,
+        extra_properties: &str,
     ) -> Result<String> {
         self.healthy()?;
         if self.profile != Profile::Logical {
@@ -383,7 +408,7 @@ impl Writer {
             ));
         }
         if size > self.logical_zip_threshold {
-            return self.add_chunked(size, input, progress, Some(original_path));
+            return self.add_chunked(size, input, progress, Some(original_path), extra_properties);
         }
         self.poisoned = true;
         let storage = format!("files/{}", uuid::Uuid::new_v4());
@@ -418,7 +443,7 @@ impl Writer {
             .unwrap_or(original_path);
         let name = oxrdf::Literal::new_simple_literal(name).to_string();
         let path = oxrdf::Literal::new_simple_literal(original_path).to_string();
-        self.metadata.push_str(&format!("<{id}> a a:FileImage, a:Image, a:zip_segment; a:size {size}; a:fileName {name}; a:originalFileName {path}; a:stored <{}>; {} .\n", self.volume, hash_triples(&result)));
+        self.metadata.push_str(&format!("<{id}> a a:FileImage, a:Image, a:zip_segment; {extra_properties} a:size {size}; a:fileName {name}; a:originalFileName {path}; a:stored <{}>; {} .\n", self.volume, hash_triples(&result)));
         self.streams.push(result);
         self.poisoned = false;
         Ok(id)
@@ -429,6 +454,7 @@ impl Writer {
     /// certify power-loss durability on every filesystem or device.
     pub fn finish(mut self) -> Result<WriteResult> {
         self.healthy()?;
+        self.finish_logical_metadata();
         let mut zip = self.zip.take().unwrap();
         write_member(&mut zip, "information.turtle", self.metadata.as_bytes())?;
         let metadata_sha256 = hex(&Sha256::digest(self.metadata.as_bytes()));

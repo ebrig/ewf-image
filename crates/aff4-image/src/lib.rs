@@ -13,7 +13,10 @@ pub use reader::{
     ByteCoverage, CheckOutcome, Container, ContainerVerification, IntegrityCheck, Limits,
     MetadataScan, MetadataVerification, Property, ResourceVerification, StreamInfo, Verification,
 };
-pub use writer::{AcquiredStream, Compression, Profile, WriteOptions, WriteResult, Writer};
+pub use writer::{
+    AcquiredStream, CaseMetadata, CollectionIssue, CollectionOptions, CollectionReport,
+    Compression, LogicalMetadata, Profile, SubstreamKind, WriteOptions, WriteResult, Writer,
+};
 
 /// AFF4 operation result.
 pub type Result<T> = std::result::Result<T, Error>;

@@ -3,7 +3,7 @@ use super::*;
 use sha2::Sha512;
 
 /// Result of an individual integrity check. A missing reference is not a match.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum CheckOutcome {
     /// Computed bytes match the supplied reference.
     Match,
@@ -18,7 +18,7 @@ pub enum CheckOutcome {
 }
 
 /// One explicitly scoped integrity comparison.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct IntegrityCheck {
     /// Member or evidence resource whose bytes are covered.
     pub resource: String,
@@ -37,7 +37,7 @@ pub struct IntegrityCheck {
 }
 
 /// Metadata checks, separate from file content verification and authenticity.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct MetadataVerification {
     /// SHA256 of information.turtle, suitable for an external evidence record.
     pub sha256: String,
