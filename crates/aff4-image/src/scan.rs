@@ -17,13 +17,13 @@ impl Container {
     /// Subject order is arbitrary; callers must not assume adjacent statements
     /// describe a complete object. The callback receives source-member provenance.
     /// This is an inventory operation, not content or metadata verification.
-    /// ZIP central-directory allocation is still performed by the ZIP dependency.
+    /// ZIP directory and entry limits are checked before ZIP parsing.
     pub fn scan_metadata(
         path: impl AsRef<Path>,
         limits: Limits,
         mut visit: impl FnMut(&str, &str, &Property) -> ControlFlow<()>,
     ) -> Result<MetadataScan> {
-        let mut archive = ZipArchive::new(File::open(path)?)?;
+        let (mut archive, _) = archive::open(path.as_ref(), &limits)?;
         let mut names = BTreeSet::new();
         for name in archive.file_names() {
             if !names.insert(name.to_owned()) {

@@ -27,6 +27,9 @@ pub use verify_all::{ByteCoverage, ContainerVerification, ResourceVerification};
 mod scan;
 pub use scan::MetadataScan;
 
+#[path = "archive.rs"]
+mod archive;
+
 #[path = "volume_set.rs"]
 mod volume_set;
 pub use volume_set::{SetDigest, VolumeSet, VolumeSource};
@@ -40,6 +43,10 @@ const BASE64: &str = "http://www.w3.org/2001/XMLSchema#base64Binary";
 /// Limits on retained metadata, map/index members, and decoded chunks.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Limits {
+    /// Maximum ZIP central-directory bytes, checked before ZIP parsing.
+    pub directory_bytes: u64,
+    /// Maximum ZIP entries, checked before ZIP parsing.
+    pub archive_entries: usize,
     /// Maximum decompressed metadata bytes.
     pub metadata_bytes: u64,
     /// Maximum bytes in an individual retained data/index member.
@@ -48,14 +55,23 @@ pub struct Limits {
     pub chunk_bytes: u64,
     /// Maximum RDF triples retained.
     pub triples: usize,
+    /// Maximum retained map range records and target strings, in bytes.
+    pub map_bytes: usize,
+    /// Maximum logical bytes traversed by one verification/copy operation.
+    /// Container-wide verification shares this across resources and block scans.
+    pub verification_bytes: u64,
 }
 impl Default for Limits {
     fn default() -> Self {
         Self {
+            directory_bytes: 64 * 1024 * 1024,
+            archive_entries: 200_000,
             metadata_bytes: 16 * 1024 * 1024,
             member_bytes: 128 * 1024 * 1024,
             chunk_bytes: 16 * 1024 * 1024,
             triples: 200_000,
+            map_bytes: 128 * 1024 * 1024,
+            verification_bytes: 64 * 1024 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -117,6 +133,7 @@ pub struct Container {
     maps: BTreeMap<String, Arc<Map>>,
     version: (u32, u32),
     metadata_members: BTreeMap<String, String>,
+    usage: archive::Usage,
 }
 
 #[derive(Clone)]
@@ -141,7 +158,7 @@ impl Container {
     /// Opens a container, validates its version, and parses bounded RDF metadata.
     /// External RDF references are never fetched over the network.
     pub fn open_with_limits(path: impl AsRef<Path>, limits: Limits) -> Result<Self> {
-        let mut archive = ZipArchive::new(File::open(path)?)?;
+        let (mut archive, mut usage) = archive::open(path.as_ref(), &limits)?;
         let mut names = BTreeSet::new();
         for name in archive.file_names() {
             if !names.insert(name.to_owned()) {
@@ -237,6 +254,8 @@ impl Container {
                 });
             }
         }
+        usage.metadata_bytes = limits.metadata_bytes - remaining;
+        usage.triples = count;
         Ok(Self {
             archive,
             volume,
@@ -247,6 +266,7 @@ impl Container {
             maps: BTreeMap::new(),
             version,
             metadata_members,
+            usage,
         })
     }
 
@@ -332,6 +352,9 @@ impl Container {
         mut progress: impl FnMut(u64, u64) -> ControlFlow<()>,
     ) -> Result<Verification> {
         let size = self.size(id)?;
+        if size > self.limits.verification_bytes {
+            return Err(malformed("verification byte limit exceeded"));
+        }
         self.cache = None;
         self.index_cache = None;
         self.maps.clear();
@@ -554,7 +577,12 @@ impl Container {
         if data.len() % 28 != 0 {
             return Err(malformed("partial map record"));
         }
-        let mut ranges = Vec::new();
+        let records = data.len() / 28;
+        if records > self.limits.map_bytes / std::mem::size_of::<Range>() {
+            return Err(malformed("retained map byte limit exceeded"));
+        }
+        let mut ranges = Vec::with_capacity(records);
+        let mut retained = 0_usize;
         let mut previous = 0;
         let size = self.number(id, "size")?;
         for record in data.chunks_exact(28) {
@@ -569,14 +597,19 @@ impl Container {
             {
                 return Err(malformed("invalid or overlapping map range"));
             }
+            let target = *targets
+                .get(target)
+                .ok_or_else(|| malformed("missing map target"))?;
+            retained = retained
+                .checked_add(std::mem::size_of::<Range>())
+                .and_then(|n| n.checked_add(target.len()))
+                .filter(|n| *n <= self.limits.map_bytes)
+                .ok_or_else(|| malformed("retained map byte limit exceeded"))?;
             ranges.push(Range {
                 start,
                 end,
                 offset,
-                target: targets
-                    .get(target)
-                    .ok_or_else(|| malformed("missing map target"))?
-                    .to_string(),
+                target: target.to_owned(),
             });
             previous = end;
         }

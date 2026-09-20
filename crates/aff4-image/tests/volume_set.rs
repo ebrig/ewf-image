@@ -1,5 +1,5 @@
 //! Explicit companion resolution, ownership conflicts, and independent stripes.
-use aff4_image::{Container, Error, VolumeSet};
+use aff4_image::{Container, Error, Limits, VolumeSet};
 use std::{
     fs::File,
     io::Write,
@@ -43,6 +43,45 @@ const PRIMARY: &str = r#"@prefix a: <http://aff4.org/Schema#> .
 <aff4://v1/image> a a:DiskImage, a:ContiguousImage; a:dataStream <aff4://v1/map>; a:size 8 ."#;
 const COMPANION: &str = r#"@prefix a: <http://aff4.org/Schema#> .
 <aff4://v2/b> a a:ImageStream; a:stored <aff4://v2>; a:size 4; a:chunkSize 4; a:chunksInSegment 1 ."#;
+
+#[test]
+fn companion_metadata_and_directory_budgets_are_shared() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = pair(
+        directory.path(),
+        PRIMARY,
+        COMPANION,
+        &[map(0, 4, 0, 0), map(4, 4, 0, 1)].concat(),
+    );
+    for limits in [
+        Limits {
+            metadata_bytes: PRIMARY.len() as u64,
+            ..Limits::default()
+        },
+        Limits {
+            archive_entries: 6,
+            ..Limits::default()
+        },
+        Limits {
+            triples: 17,
+            ..Limits::default()
+        },
+    ] {
+        for path in &paths {
+            assert!(Container::open_with_limits(path, limits.clone()).is_ok());
+        }
+        assert!(VolumeSet::open_with_limits(&paths, limits).is_err());
+    }
+    let limits = Limits {
+        metadata_bytes: (PRIMARY.len() + COMPANION.len()) as u64,
+        archive_entries: 10,
+        ..Limits::default()
+    };
+    let mut set = VolumeSet::open_with_limits(&paths, limits).unwrap();
+    let mut bytes = [0; 8];
+    set.read_at("aff4://v1/image", &mut bytes, 0).unwrap();
+    assert_eq!(&bytes, b"abcdEFGH");
+}
 fn pair(directory: &Path, primary: &str, companion: &str, ranges: &[u8]) -> Vec<PathBuf> {
     let paths = vec![
         directory.join("arbitrary-z.zip"),

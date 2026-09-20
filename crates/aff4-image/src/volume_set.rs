@@ -36,25 +36,34 @@ pub struct VolumeSet {
     paths: Vec<PathBuf>,
     owners: BTreeMap<String, usize>,
     validated: BTreeMap<String, (Arc<Map>, u64)>,
+    cached_owner: Option<usize>,
 }
 
 impl VolumeSet {
-    /// Opens the primary (first path) and companions with default per-volume limits.
+    /// Opens the primary and companions with a shared metadata/directory budget.
     /// The primary must contain the selected image's complete Map. Named foreign
     /// volume references must be supplied; duplicate owners/volume IDs are errors.
     pub fn open(paths: &[PathBuf]) -> Result<Self> {
         Self::open_with_limits(paths, Limits::default())
     }
 
-    /// Opens at most 128 volumes, each bounded by the supplied parser limits.
+    /// Opens at most 128 volumes. Metadata bytes, triples, ZIP directory bytes,
+    /// and entry counts are aggregate limits across the entire set. Chunk and
+    /// member limits apply per object; only one volume retains payload caches.
     pub fn open_with_limits(paths: &[PathBuf], limits: Limits) -> Result<Self> {
         if paths.is_empty() || paths.len() > 128 {
             return Err(malformed("volume set must contain 1 through 128 paths"));
         }
         let mut volumes = Vec::new();
         let mut ids = BTreeSet::new();
+        let mut remaining = limits.clone();
         for path in paths {
-            let volume = Container::open_with_limits(path, limits.clone())?;
+            let mut volume = Container::open_with_limits(path, remaining.clone())?;
+            remaining.metadata_bytes -= volume.usage.metadata_bytes;
+            remaining.triples -= volume.usage.triples;
+            remaining.directory_bytes -= volume.usage.directory_bytes;
+            remaining.archive_entries -= volume.usage.entries;
+            volume.limits = limits.clone();
             if volume.version != (1, 0) {
                 return Err(Error::Unsupported(
                     "volume sets currently support physical AFF4 1.0".into(),
@@ -134,6 +143,7 @@ impl VolumeSet {
             paths: paths.to_vec(),
             owners,
             validated: BTreeMap::new(),
+            cached_owner: None,
         })
     }
 
@@ -207,6 +217,7 @@ impl VolumeSet {
         if !is_symbolic(&map.gap) && !self.owners.contains_key(&map.gap) {
             return Err(Error::Unsupported("external/nested gap stream".into()));
         }
+        self.validated.clear();
         self.validated.insert(id.into(), (map.clone(), size));
         Ok((map, size))
     }
@@ -245,6 +256,13 @@ impl VolumeSet {
                     .get(target)
                     .ok_or_else(|| malformed("missing target volume"))?
             };
+            if self.cached_owner != Some(owner) {
+                if let Some(previous) = self.cached_owner {
+                    self.volumes[previous].cache = None;
+                    self.volumes[previous].index_cache = None;
+                }
+                self.cached_owner = Some(owner);
+            }
             self.volumes[owner].read_inner(
                 target,
                 &mut buffer[done..done + take],
@@ -271,6 +289,9 @@ impl VolumeSet {
             return Err(malformed("invalid external SHA256"));
         }
         let size = self.size(id)?;
+        if size > self.volumes[0].limits.verification_bytes {
+            return Err(malformed("verification byte limit exceeded"));
+        }
         let mut buffer = vec![0; 1024 * 1024];
         let mut offset = 0;
         let mut hash = Sha256::new();

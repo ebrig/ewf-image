@@ -42,6 +42,97 @@ fn metadata() -> String {
         .into()
 }
 
+#[test]
+fn directory_and_map_limits_apply_to_small_valid_inputs() {
+    let range = [
+        0u64.to_le_bytes().as_slice(),
+        &4u64.to_le_bytes(),
+        &0u64.to_le_bytes(),
+        &0u32.to_le_bytes(),
+    ]
+    .concat();
+    let file = fixture(
+        "@prefix a: <http://aff4.org/Schema#> . <aff4://volume/map> a a:Map; a:size 4 .",
+        &[
+            ("map/map", &range),
+            ("map/idx", b"http://aff4.org/Schema#Zero\n"),
+        ],
+    );
+    for limits in [
+        Limits {
+            archive_entries: 3,
+            ..Limits::default()
+        },
+        Limits {
+            directory_bytes: 16,
+            ..Limits::default()
+        },
+    ] {
+        assert!(Container::open_with_limits(file.path(), limits.clone()).is_err());
+        let mut visits = 0;
+        assert!(
+            Container::scan_metadata(file.path(), limits, |_, _, _| {
+                visits += 1;
+                ControlFlow::Continue(())
+            })
+            .is_err()
+        );
+        assert_eq!(visits, 0);
+    }
+    let mut image = Container::open_with_limits(
+        file.path(),
+        Limits {
+            archive_entries: 4,
+            map_bytes: 1,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    assert!(image.read_at("aff4://volume/map", &mut [0; 4], 0).is_err());
+    assert_eq!(
+        Container::open(file.path())
+            .unwrap()
+            .read_at("aff4://volume/map", &mut [0; 4], 0)
+            .unwrap(),
+        4
+    );
+}
+
+#[test]
+fn verification_work_is_bounded_across_resources() {
+    let file = fixture(
+        &metadata(),
+        &[
+            ("data/00000000", b"abcd"),
+            ("data/00000001", b"ef\0\0"),
+            ("data/00000000.index", &index(4)),
+            ("data/00000001.index", &index(4)),
+        ],
+    );
+    let mut image = Container::open_with_limits(
+        file.path(),
+        Limits {
+            verification_bytes: 6,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        image
+            .verify("aff4://volume/data", |_, _| ControlFlow::Continue(()))
+            .is_ok()
+    );
+    let report = image
+        .verify_all(None, |_, _, _| ControlFlow::Continue(()))
+        .unwrap();
+    assert!(!report.all_match());
+    assert!(report.resources.iter().any(|r| {
+        r.error
+            .as_deref()
+            .is_some_and(|e| e.contains("verification byte limit"))
+    }));
+}
+
 fn index(length: u32) -> Vec<u8> {
     let mut data = 0u64.to_le_bytes().to_vec();
     data.extend_from_slice(&length.to_le_bytes());

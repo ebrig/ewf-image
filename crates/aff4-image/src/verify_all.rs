@@ -106,8 +106,14 @@ impl Container {
             .filter(|s| !self.has_type(&s.id, "Folder") && !self.has_type(&s.id, "FolderImage"))
             .map(|s| s.id)
             .collect();
+        let mut remaining = self.limits.verification_bytes;
         for id in &ids {
-            let value = self.verify(id, |done, size| progress(id, done, size));
+            let value = self.size(id).and_then(|size| {
+                remaining = remaining
+                    .checked_sub(size)
+                    .ok_or_else(|| malformed("verification byte limit exceeded"))?;
+                self.verify(id, |done, size| progress(id, done, size))
+            });
             let (verification, coverage, error) = match value {
                 Err(Error::Aborted) => return Err(Error::Aborted),
                 Err(e) => (None, None, Some(e.to_string())),
@@ -222,7 +228,7 @@ impl Container {
                 }
             }
             if self.has_type(&id, "ImageStream") {
-                match self.check_blocks(&id, &mut progress) {
+                match self.check_blocks(&id, &mut remaining, &mut progress) {
                     Ok(checks) => {
                         if checks.is_empty()
                             && !self
@@ -462,6 +468,7 @@ impl Container {
     fn check_blocks(
         &mut self,
         id: &str,
+        remaining: &mut u64,
         progress: &mut impl FnMut(&str, u64, u64) -> ControlFlow<()>,
     ) -> Result<Vec<IntegrityCheck>> {
         let mut checks = Vec::new();
@@ -512,6 +519,9 @@ impl Container {
                         return Err(Error::Aborted);
                     }
                     let take = (size - offset).min(chunk) as usize;
+                    *remaining = remaining
+                        .checked_sub(take as u64)
+                        .ok_or_else(|| malformed("verification byte limit exceeded"))?;
                     self.read_at(id, &mut buffer[..take], offset)?;
                     let start = (n * width) as usize;
                     let expected = hex(&recorded[start..start + width as usize]);
