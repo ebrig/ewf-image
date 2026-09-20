@@ -43,6 +43,9 @@ enum Command {
         image: String,
         #[arg(long)]
         expected_image_sha256: Option<String>,
+        /// Also check per-volume metadata, owned streams, maps and striped roots.
+        #[arg(long)]
+        full: bool,
     },
     /// Acquire a local directory. Use a stable snapshot for cross-file consistency.
     Collect {
@@ -106,7 +109,31 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
             volumes,
             image,
             expected_image_sha256,
+            full,
         } => {
+            if full {
+                let result = VolumeSet::open(&volumes)?.verify_full(
+                    &image,
+                    expected_image_sha256.as_deref(),
+                    |_, done, total| progress(done, total),
+                )?;
+                let matched = result.all_match();
+                let external_mismatch = result
+                    .assembled
+                    .as_ref()
+                    .is_some_and(|v| v.external_match == Some(false));
+                println!(
+                    "{}",
+                    json!({"scope":"selected image and supplied-volume integrity", "result":result})
+                );
+                return Ok(if external_mismatch {
+                    3
+                } else if matched {
+                    0
+                } else {
+                    4
+                });
+            }
             let result = VolumeSet::open(&volumes)?.verify_image(
                 &image,
                 expected_image_sha256.as_deref(),

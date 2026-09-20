@@ -4,7 +4,8 @@
 //! and a documented subset of the AFF4-L 2.1 draft. Reads never extract
 //! archive paths onto the host filesystem. Verification reports linear content,
 //! block/map structures, metadata digests, and byte provenance. Physical volume
-//! sets support assembled-image SHA256 with explicit source attribution. Neither
+//! sets support assembled-image SHA256 and contextual metadata/block/map checks
+//! with explicit source attribution and caller-supplied stripe order. Neither
 //! internal hashes nor matching bytes establish independent authenticity.
 #![forbid(unsafe_code)]
 
@@ -12,8 +13,8 @@ mod reader;
 mod writer;
 pub use reader::{
     ByteCoverage, CheckOutcome, Container, ContainerVerification, IntegrityCheck, Limits,
-    MetadataScan, MetadataVerification, Property, ResourceVerification, SetDigest, StreamInfo,
-    Verification, VolumeSet, VolumeSource,
+    MetadataScan, MetadataVerification, Property, ResourceVerification, SetDigest, SetVerification,
+    SetVolumeVerification, StreamInfo, Verification, VolumeSet, VolumeSource,
 };
 pub use writer::{
     AcquiredStream, CaseMetadata, CollectionIssue, CollectionOptions, CollectionReport,

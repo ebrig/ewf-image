@@ -57,12 +57,12 @@ impl ContainerVerification {
     }
 }
 
-fn algorithm(p: &Property) -> &str {
+pub(super) fn algorithm(p: &Property) -> &str {
     let datatype = p.datatype.as_deref().unwrap_or("");
     datatype.strip_prefix(NS).unwrap_or(datatype)
 }
 
-fn declined(id: &str, p: &Property, error: &Error) -> IntegrityCheck {
+pub(super) fn declined(id: &str, p: &Property, error: &Error) -> IntegrityCheck {
     IntegrityCheck {
         resource: id.into(),
         reference_source: p.predicate.clone(),
@@ -344,7 +344,16 @@ impl Container {
         Ok(result)
     }
 
-    fn structural_input(&mut self, id: &str, p: &Property) -> Result<(Vec<u8>, String)> {
+    pub(super) fn structural_input(&mut self, id: &str, p: &Property) -> Result<(Vec<u8>, String)> {
+        self.structural_input_scoped(id, p, None)
+    }
+
+    pub(super) fn structural_input_scoped(
+        &mut self,
+        id: &str,
+        p: &Property,
+        local: Option<&BTreeSet<String>>,
+    ) -> Result<(Vec<u8>, String)> {
         let alg = algorithm(p);
         if self.has_type(id, "BlockHashes") {
             let (stream, suffix) = id
@@ -440,6 +449,9 @@ impl Container {
                     "nested or external block map target".into(),
                 ));
             }
+            if local.is_some_and(|streams| !streams.contains(target)) {
+                continue;
+            }
             if self
                 .value(target, "stored")?
                 .is_some_and(|owner| owner != self.volume)
@@ -471,10 +483,21 @@ impl Container {
         remaining: &mut u64,
         progress: &mut impl FnMut(&str, u64, u64) -> ControlFlow<()>,
     ) -> Result<Vec<IntegrityCheck>> {
+        self.check_blocks_from(id, None, remaining, progress)
+    }
+
+    pub(super) fn check_blocks_from(
+        &mut self,
+        id: &str,
+        mut source: Option<&mut Self>,
+        remaining: &mut u64,
+        progress: &mut impl FnMut(&str, u64, u64) -> ControlFlow<()>,
+    ) -> Result<Vec<IntegrityCheck>> {
         let mut checks = Vec::new();
-        let size = self.number(id, "size")?;
-        let chunk = self.number(id, "chunkSize")?;
-        let per = self.number(id, "chunksInSegment")?;
+        let geometry = source.as_deref().unwrap_or(self);
+        let size = geometry.number(id, "size")?;
+        let chunk = geometry.number(id, "chunkSize")?;
+        let per = geometry.number(id, "chunksInSegment")?;
         if chunk == 0 || chunk > self.limits.chunk_bytes || per == 0 {
             return Err(malformed("invalid block hash geometry"));
         }
@@ -522,7 +545,11 @@ impl Container {
                     *remaining = remaining
                         .checked_sub(take as u64)
                         .ok_or_else(|| malformed("verification byte limit exceeded"))?;
-                    self.read_at(id, &mut buffer[..take], offset)?;
+                    if let Some(reader) = source.as_deref_mut() {
+                        reader.read_at(id, &mut buffer[..take], offset)?;
+                    } else {
+                        self.read_at(id, &mut buffer[..take], offset)?;
+                    }
                     let start = (n * width) as usize;
                     let expected = hex(&recorded[start..start + width as usize]);
                     let value = compare(id, name, algorithm, &expected, &buffer[..take]);

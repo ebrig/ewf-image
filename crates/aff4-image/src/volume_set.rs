@@ -2,6 +2,10 @@
 use super::*;
 use std::path::PathBuf;
 
+#[path = "set_verify.rs"]
+mod set_verify;
+pub use set_verify::{SetVerification, SetVolumeVerification};
+
 /// Attribution of a stored ImageStream to its owning ZIP volume.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VolumeSource {
@@ -281,8 +285,19 @@ impl VolumeSet {
         &mut self,
         id: &str,
         expected_sha256: Option<&str>,
-        mut progress: impl FnMut(u64, u64) -> ControlFlow<()>,
+        progress: impl FnMut(u64, u64) -> ControlFlow<()>,
     ) -> Result<SetDigest> {
+        self.scan_image(id, expected_sha256, false, progress)
+            .map(|(digest, _)| digest)
+    }
+
+    fn scan_image(
+        &mut self,
+        id: &str,
+        expected_sha256: Option<&str>,
+        all_hashes: bool,
+        mut progress: impl FnMut(u64, u64) -> ControlFlow<()>,
+    ) -> Result<(SetDigest, Option<Verification>)> {
         if expected_sha256
             .is_some_and(|s| s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()))
         {
@@ -295,6 +310,14 @@ impl VolumeSet {
         let mut buffer = vec![0; 1024 * 1024];
         let mut offset = 0;
         let mut hash = Sha256::new();
+        let mut extra = all_hashes.then(|| {
+            (
+                Md5::new(),
+                Sha1::new(),
+                sha2::Sha512::new(),
+                blake2::Blake2b512::new(),
+            )
+        });
         loop {
             if progress(offset, size).is_break() {
                 return Err(Error::Aborted);
@@ -307,16 +330,35 @@ impl VolumeSet {
                 return Err(malformed("truncated volume set"));
             }
             hash.update(&buffer[..read]);
+            if let Some((md5, sha1, sha512, blake2b)) = &mut extra {
+                md5.update(&buffer[..read]);
+                sha1.update(&buffer[..read]);
+                sha512.update(&buffer[..read]);
+                blake2b.update(&buffer[..read]);
+            }
             offset += read as u64;
         }
         let sha256 = hex(&hash.finalize());
-        Ok(SetDigest {
-            image: id.into(),
-            bytes: size,
-            external_match: expected_sha256.map(|s| s.eq_ignore_ascii_case(&sha256)),
-            sha256,
-            sources: self.sources(),
-        })
+        let verification = extra.map(|(md5, sha1, sha512, blake2b)| Verification {
+            bytes_verified: size,
+            md5: hex(&md5.finalize()),
+            sha1: hex(&sha1.finalize()),
+            sha256: sha256.clone(),
+            sha512: hex(&sha512.finalize()),
+            blake2b: hex(&blake2b.finalize()),
+            references_match: None,
+            unsupported_hashes: Vec::new(),
+        });
+        Ok((
+            SetDigest {
+                image: id.into(),
+                bytes: size,
+                external_match: expected_sha256.map(|s| s.eq_ignore_ascii_case(&sha256)),
+                sha256,
+                sources: self.sources(),
+            },
+            verification,
+        ))
     }
 }
 

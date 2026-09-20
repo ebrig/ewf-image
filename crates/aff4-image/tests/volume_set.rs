@@ -205,6 +205,168 @@ fn canonical_striped_image_matches_independent_export() {
     assert_eq!(result.bytes, 268435456);
     assert_eq!(result.external_match, Some(true));
     assert_eq!(result.sources.len(), 2);
+    let report = set
+        .verify_full(
+            "aff4://951b3e29-6549-4266-8e81-3f88ddba61ae",
+            Some("d7d6df4534f06568eb90a06e252592c9b79378b95bb9a7e01db3a388feda6c13"),
+            |_, _, _| ControlFlow::Continue(()),
+        )
+        .unwrap();
+    let coverage = report.coverage.as_ref().unwrap();
+    assert_eq!(
+        coverage.stored + coverage.described + coverage.gap_filled,
+        268435456
+    );
+    assert!(coverage.stored > 0 && coverage.described > 0);
+    for volume in &report.volumes {
+        for check in &volume.checks {
+            if check.reference_source.ends_with("#imageStreamHash") {
+                assert_eq!(check.outcome, aff4_image::CheckOutcome::Unsupported);
+                continue;
+            }
+            assert_eq!(
+                check.outcome,
+                aff4_image::CheckOutcome::Match,
+                "{}: {check:?}",
+                volume.volume
+            );
+        }
+    }
+    assert!(
+        report
+            .volumes
+            .iter()
+            .flat_map(|v| &v.checks)
+            .filter(|c| c.algorithm == "SHA512" && c.resource == report.image)
+            .count()
+            >= 2
+    );
+    // This historical canonical image has no metadata integrity sidecars.
+    assert!(!report.all_match());
+}
+
+#[test]
+fn full_set_report_retains_missing_references_coverage_and_cancellation() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = pair(
+        dir.path(),
+        PRIMARY,
+        COMPANION,
+        &[map(0, 4, 0, 0), map(4, 4, 0, 1)].concat(),
+    );
+    let mut set = VolumeSet::open(&paths).unwrap();
+    let report = set
+        .verify_full("aff4://v1/image", None, |_, _, _| ControlFlow::Continue(()))
+        .unwrap();
+    assert_eq!(report.coverage.as_ref().unwrap().stored, 8);
+    assert_eq!(report.streams.len(), 2);
+    assert_eq!(report.volumes.len(), 2);
+    assert!(!report.all_match());
+    assert!(
+        report
+            .volumes
+            .iter()
+            .flat_map(|v| &v.checks)
+            .any(|c| c.outcome == aff4_image::CheckOutcome::Missing)
+    );
+    assert!(matches!(
+        set.verify_full("aff4://v1/image", None, |_, _, _| ControlFlow::Break(())),
+        Err(Error::Aborted)
+    ));
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image"))
+        .arg("verify-set")
+        .args(&paths)
+        .args(["--image", "aff4://v1/image", "--full"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(4));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["scope"],
+        "selected image and supplied-volume integrity"
+    );
+}
+
+#[test]
+fn full_set_verifies_foreign_block_references_and_metadata_in_their_own_context() {
+    use sha2::{Digest, Sha256};
+    let hash = |data: &[u8]| {
+        Sha256::digest(data)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let paths = [dir.path().join("one.aff4"), dir.path().join("two.aff4")];
+    let ranges = [map(0, 4, 0, 0), map(4, 4, 0, 1)].concat();
+    let targets = b"aff4://v1/a\naff4://v2/b\n";
+    let primary = format!(
+        "{PRIMARY}\n<aff4://v1/a> <http://aff4.org/Schema#hash> \"{}\"^^<http://aff4.org/Schema#SHA256> .\n<aff4://v1/image> <http://aff4.org/Schema#hash> \"{}\"^^<http://aff4.org/Schema#SHA256> .\n<aff4://v1/map> <http://aff4.org/Schema#mapHash> \"{}\"^^<http://aff4.org/Schema#SHA256> .",
+        hash(b"abcd"),
+        hash(b"abcdEFGH"),
+        hash(&[ranges.as_slice(), targets].concat())
+    );
+    let companion = format!(
+        "{COMPANION}\n<aff4://v2/b> <http://aff4.org/Schema#hash> \"{}\"^^<http://aff4.org/Schema#SHA256> .",
+        hash(b"EFGH")
+    );
+    let metadata_hash = |volume: &str, metadata: &str| {
+        format!(
+            "<{volume}/information.turtle> <http://aff4.org/Schema#hash> \"{}\"^^<http://aff4.org/Schema#SHA256> .",
+            hash(metadata.as_bytes())
+        )
+    };
+    let primary_hash = metadata_hash("aff4://v1", &primary);
+    let companion_hash = metadata_hash("aff4://v2", &companion);
+    for changed in [false, true] {
+        let foreign = Sha256::digest(if changed { b"efgh" } else { b"EFGH" });
+        fixture(
+            &paths[0],
+            "aff4://v1",
+            &primary,
+            &[
+                ("a/00000000", b"abcd"),
+                ("a/00000000.index", &index(4)),
+                ("map/map", &ranges),
+                ("map/idx", targets),
+                ("aff4%3A%2F%2Fv2/b/00000000.blockHash.sha256", &foreign),
+                ("information.turtle.hashes", primary_hash.as_bytes()),
+            ],
+        );
+        fixture(
+            &paths[1],
+            "aff4://v2",
+            &companion,
+            &[
+                ("b/00000000", b"EFGH"),
+                ("b/00000000.index", &index(4)),
+                ("information.turtle.hashes", companion_hash.as_bytes()),
+            ],
+        );
+        let report = VolumeSet::open(&paths)
+            .unwrap()
+            .verify_full("aff4://v1/image", Some(&hash(b"abcdEFGH")), |_, _, _| {
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        assert_eq!(
+            report.assembled.as_ref().unwrap().external_match,
+            Some(true)
+        );
+        assert_eq!(report.all_match(), !changed, "{report:?}");
+        assert!(
+            report.volumes[0]
+                .checks
+                .iter()
+                .any(|c| c.resource == "aff4://v2/b"
+                    && c.outcome
+                        == if changed {
+                            aff4_image::CheckOutcome::Mismatch
+                        } else {
+                            aff4_image::CheckOutcome::Match
+                        })
+        );
+    }
 }
 
 #[test]

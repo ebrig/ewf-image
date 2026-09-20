@@ -32,7 +32,7 @@ mod archive;
 
 #[path = "volume_set.rs"]
 mod volume_set;
-pub use volume_set::{SetDigest, VolumeSet, VolumeSource};
+pub use volume_set::{SetDigest, SetVerification, SetVolumeVerification, VolumeSet, VolumeSource};
 
 const NS: &str = "http://aff4.org/Schema#";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
