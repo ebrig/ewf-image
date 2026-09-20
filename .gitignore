@@ -2,3 +2,7 @@
 **/*.rs.bk
 /mem-*.raw
 /design/
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/
