@@ -16,6 +16,63 @@ const BUFFER_SIZE: usize = 1024 * 1024;
 const DEFAULT_CORPUS_DIR: &str =
     "/mnt/c/Users/user/Documents/Repos/ewf-upstream-prs/ewf/tests/data";
 
+#[test]
+#[cfg(feature = "verify")]
+#[ignore = "requires EWF_WINACQ_FIXTURE_DIR with the synthetic WinAcq 20.3 corpus"]
+fn external_winacq_media_and_segment_provenance() -> Result<(), Box<dyn Error>> {
+    let root = PathBuf::from(
+        env::var_os("EWF_WINACQ_FIXTURE_DIR")
+            .ok_or("set EWF_WINACQ_FIXTURE_DIR to the synthetic WinAcq fixture directory")?,
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("interop-manifest.json"))?)?;
+    assert_eq!(manifest["producer_versions"]["bundled_WinAcq"], "20.3");
+    let source_path = root.join("synthetic-vhd-media.raw");
+    assert_eq!(fs::metadata(&source_path)?.len(), 32 * 1024 * 1024);
+    let source = fs::read(source_path)?;
+    let expected: [u8; 32] = Sha256::digest(&source).into();
+    assert_eq!(
+        hex_lower(&expected),
+        "e66dc1a029af43acdb01162cf4d4a4b752db4a1cbc2278142d222e0f4c605e84"
+    );
+    for (stem, segments) in [("encase-winacq", 1), ("encase-winacq-raw", 9)] {
+        for ordinal in 1..=segments {
+            let name = format!("{stem}.E{ordinal:02}");
+            let recorded = &manifest["files"][&name];
+            let path = root.join(&name);
+            assert_eq!(
+                Some(fs::metadata(&path)?.len()),
+                recorded["bytes"].as_u64(),
+                "{name}"
+            );
+            assert_eq!(
+                sha256_hex(&fs::read(path)?),
+                recorded["sha256"]
+                    .as_str()
+                    .ok_or("missing segment SHA256")?,
+                "{name}"
+            );
+        }
+        let image = ewf_image::Image::open(root.join(format!("{stem}.E01")))?;
+        assert_eq!(image.number_of_segments(), segments as usize);
+        let result = image.verify_with_options(
+            &ewf_image::VerifyOptions::default().with_expected_sha256(expected),
+        )?;
+        assert_eq!(result.bytes_verified, source.len() as u64);
+        assert_eq!(result.references_match(), Some(true));
+        // Compare the strict media stream as well as the complete digest, including
+        // boundaries between the native producer's nine uncompressed segments.
+        let mut cursor = image.cursor();
+        let mut buffer = vec![0; BUFFER_SIZE];
+        for part in source.chunks(BUFFER_SIZE) {
+            cursor.read_exact(&mut buffer[..part.len()])?;
+            assert_eq!(&buffer[..part.len()], part);
+        }
+        assert_eq!(cursor.read(&mut buffer[..1])?, 0);
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("failed to open external EWF fixture {}: {source}", path.display())]
 struct ExternalFixtureOpenError {
