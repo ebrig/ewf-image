@@ -151,10 +151,25 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
                 return Err(aff4_image::Error::Aborted.into());
             }
             let written = writer.finish()?;
-            let verification = Container::open(&written.path)?
-                .verify_all(Some(&written.metadata_sha256), |_, done, total| {
+            let verification = Container::open(&written.path).and_then(|mut container| {
+                container.verify_all(Some(&written.metadata_sha256), |_, done, total| {
                     progress(done, total)
-                })?;
+                })
+            });
+            let verification = match verification {
+                Ok(value) => value,
+                Err(error) => {
+                    println!(
+                        "{}",
+                        json!({"published":true,"output":written,"collection":collection,"verification_error":error.to_string()})
+                    );
+                    return Ok(if matches!(error, aff4_image::Error::Aborted) {
+                        130
+                    } else {
+                        4
+                    });
+                }
+            };
             let complete = verification.all_match() && collection.issues.is_empty();
             println!(
                 "{}",

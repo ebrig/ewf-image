@@ -41,19 +41,18 @@ pub struct ContainerVerification {
 }
 
 impl ContainerVerification {
-    /// True only with complete matching metadata and recorded content checks.
+    /// True only with matching metadata and all inventoried content checks.
+    /// Metadata-only containers have no content checks to perform.
     /// Does not establish authenticity without independently trusted references.
     pub fn all_match(&self) -> bool {
         self.metadata
             .as_ref()
             .is_some_and(MetadataVerification::all_match)
             && self.metadata_error.is_none()
-            && !self.resources.is_empty()
             && self
                 .resources
                 .iter()
                 .all(|r| r.verification.is_some() && r.coverage.is_some())
-            && !self.checks.is_empty()
             && self.checks.iter().all(|c| c.outcome == CheckOutcome::Match)
     }
 }
@@ -198,9 +197,44 @@ impl Container {
                 };
                 report.checks.push(check);
             }
+            if self.has_type(&id, "Map")
+                && !properties.iter().any(|p| {
+                    is_property(&p.predicate, "hash")
+                        || is_property(&p.predicate, "mapHash")
+                        || is_property(&p.predicate, "blockMapHash")
+                })
+            {
+                let path = self.path(&id)?;
+                for (member, key) in [
+                    ("map", "mapPointHash"),
+                    ("idx", "mapIdxHash"),
+                    ("mapPath", "mapPathHash"),
+                ] {
+                    if (member != "mapPath"
+                        || self
+                            .archive
+                            .index_for_name(&format!("{path}/{member}"))
+                            .is_some())
+                        && !properties.iter().any(|p| is_property(&p.predicate, key))
+                    {
+                        report.checks.push(absent(&id, key));
+                    }
+                }
+            }
             if self.has_type(&id, "ImageStream") {
                 match self.check_blocks(&id, &mut progress) {
-                    Ok(checks) => report.checks.extend(checks),
+                    Ok(checks) => {
+                        if checks.is_empty()
+                            && !self
+                                .properties(&id)
+                                .any(|p| is_property(&p.predicate, "hash"))
+                        {
+                            report
+                                .checks
+                                .push(absent(&id, "linear or block content digest"));
+                        }
+                        report.checks.extend(checks);
+                    }
                     Err(Error::Aborted) => return Err(Error::Aborted),
                     Err(e) => {
                         let p = Property {
@@ -398,6 +432,14 @@ impl Container {
                 }
                 return Err(Error::Unsupported(
                     "nested or external block map target".into(),
+                ));
+            }
+            if self
+                .value(target, "stored")?
+                .is_some_and(|owner| owner != self.volume)
+            {
+                return Err(Error::Unsupported(
+                    "cross-volume composite block map digest".into(),
                 ));
             }
             if !seen.insert(target) {

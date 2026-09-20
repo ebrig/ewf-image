@@ -2,9 +2,10 @@
 //!
 //! Supports ZIP AFF4 v1 physical ImageStreams and Maps, legacy AFF4-L 1.1,
 //! and a documented subset of the AFF4-L 2.1 draft. Reads never extract
-//! archive paths onto the host filesystem. Verification covers selected stream
-//! bytes and available linear hashes. Metadata hashes are checked separately;
-//! neither internal hashes nor matching bytes establish independent authenticity.
+//! archive paths onto the host filesystem. Verification reports linear content,
+//! block/map structures, metadata digests, and byte provenance. Physical volume
+//! sets support assembled-image SHA256 with explicit source attribution. Neither
+//! internal hashes nor matching bytes establish independent authenticity.
 #![forbid(unsafe_code)]
 
 mod reader;

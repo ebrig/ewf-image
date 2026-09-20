@@ -215,39 +215,41 @@ impl Container {
         if !found {
             checks.push(absent("information.turtle", "metadata hash files"));
         }
-        for (name, opened_hash) in &self.metadata_members {
-            let bytes = if name == "information.turtle" {
-                primary.clone()
-            } else {
-                member(&mut self.archive, name, self.limits.metadata_bytes)?
-            };
-            if hex(&Sha256::digest(&bytes)) != *opened_hash {
-                return Err(malformed("metadata changed after opening"));
-            }
-            if name == "information.turtle" {
-                continue;
-            }
-            // Only the primary store can anchor imported metadata. A hash in
-            // an imported file must never authenticate that same file.
-            let mut refs = Vec::new();
+        // Parse import references once; retain only primary-store hashes for
+        // members actually imported. Imported self-hashes are not trusted.
+        let mut imported_refs: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+        if self.metadata_members.len() > 1 {
             for triple in TurtleParser::new().for_reader(primary.as_slice()) {
                 let triple = triple.map_err(|e| malformed(e.to_string()))?;
                 if !is_property(triple.predicate.as_str(), "hash") {
                     continue;
                 }
                 if let NamedOrBlankNode::NamedNode(subject) = triple.subject
-                    && storage_name(&self.archive, &self.volume, subject.as_str(), self.version)
-                        .ok()
-                        .as_ref()
-                        == Some(name)
+                    && let Ok(name) =
+                        storage_name(&self.archive, &self.volume, subject.as_str(), self.version)
+                    && name != "information.turtle"
+                    && self.metadata_members.contains_key(&name)
                     && let Term::Literal(value) = triple.object
                 {
-                    refs.push((
+                    imported_refs.entry(name).or_default().push((
                         value.datatype().as_str().to_owned(),
                         value.value().to_owned(),
                     ));
                 }
             }
+        }
+        for (name, opened_hash) in &self.metadata_members {
+            if name == "information.turtle" {
+                if sha256 != *opened_hash {
+                    return Err(malformed("metadata changed after opening"));
+                }
+                continue;
+            }
+            let bytes = member(&mut self.archive, name, self.limits.metadata_bytes)?;
+            if hex(&Sha256::digest(&bytes)) != *opened_hash {
+                return Err(malformed("metadata changed after opening"));
+            }
+            let refs = imported_refs.remove(name).unwrap_or_default();
             if refs.is_empty() {
                 checks.push(absent(name, "RDF metadata"));
             }

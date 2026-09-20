@@ -600,3 +600,43 @@ fn streaming_metadata_preserves_repeated_subjects_and_import_provenance() {
         Err(Error::Aborted)
     ));
 }
+
+#[test]
+fn matching_resource_does_not_hide_another_streams_missing_references() {
+    use aff4_image::CheckOutcome;
+    use sha2::{Digest, Sha256};
+    let primary = format!(
+        "{}\n<aff4://volume/unchecked> a a:ImageStream; a:chunkSize 4; a:chunksInSegment 1; a:size 4 .",
+        metadata()
+    );
+    let digest = Sha256::digest(primary.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let legacy = format!("{{\"sha256\":\"{digest}\"}}");
+    let file = fixture(
+        &primary,
+        &[
+            ("container.hashes", legacy.as_bytes()),
+            ("data/00000000", b"abcd"),
+            ("data/00000000.index", &index(4)),
+            ("data/00000001", b"ef\0\0"),
+            ("data/00000001.index", &index(4)),
+            ("unchecked/00000000", b"free"),
+            ("unchecked/00000000.index", &index(4)),
+        ],
+    );
+    let report = Container::open(file.path())
+        .unwrap()
+        .verify_all(None, |_, _, _| ControlFlow::Continue(()))
+        .unwrap();
+    assert!(report.metadata.as_ref().unwrap().all_match());
+    assert!(report.resources.iter().all(|r| r.error.is_none()));
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|c| c.resource == "aff4://volume/unchecked" && c.outcome == CheckOutcome::Missing)
+    );
+    assert!(!report.all_match());
+}

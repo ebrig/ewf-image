@@ -200,3 +200,35 @@ fn collector_never_follows_symlinks() {
     assert_eq!((report.files, report.issues.len()), (0, 1));
     writer.finish().unwrap();
 }
+
+#[test]
+fn cli_collects_and_verifies_an_empty_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("empty");
+    fs::create_dir(&root).unwrap();
+    let output = dir.path().join("empty.aff4");
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image"))
+        .arg("collect")
+        .arg(root)
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(json["published"], true);
+    assert_eq!(json["collection"]["files"], 0);
+    assert_eq!(json["collection"]["folders"], 1);
+    assert_eq!(json["verification"]["resources"], serde_json::json!([]));
+    assert!(
+        Container::open(output)
+            .unwrap()
+            .verify_all(None, |_, _, _| ControlFlow::Continue(()))
+            .unwrap()
+            .all_match()
+    );
+}

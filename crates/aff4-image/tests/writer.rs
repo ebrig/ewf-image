@@ -135,7 +135,11 @@ fn failures_cancellation_and_late_collisions_do_not_publish() {
 fn independent_consumer_exports_and_verifies_writer_output() {
     let oracle = std::env::var_os("AFF4_ORACLE").expect("AFF4_ORACLE required");
     let data = data();
-    for profile in [Profile::Physical, Profile::Logical] {
+    for (profile, threshold) in [
+        (Profile::Physical, 0),
+        (Profile::Logical, 0),
+        (Profile::Logical, 1024 * 1024),
+    ] {
         for codec in [
             Compression::Stored,
             Compression::Zlib,
@@ -160,7 +164,7 @@ fn independent_consumer_exports_and_verifies_writer_output() {
             )
             .unwrap();
             if profile == Profile::Logical {
-                writer.set_logical_zip_threshold(0).unwrap();
+                writer.set_logical_zip_threshold(threshold).unwrap();
             }
             match profile {
                 Profile::Physical => {
