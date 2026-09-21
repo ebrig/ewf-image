@@ -72,6 +72,7 @@ def main():
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--mib", type=int, default=512)
     parser.add_argument("--compression", choices=["raw", "zlib"], default="zlib")
+    parser.add_argument("--repeat-resume", action="store_true", help="also pause at half and three quarters to measure repeated prefix validation")
     parser.add_argument("--directory", type=Path, help="parent directory for temporary test files")
     args = parser.parse_args()
     if not sys.platform.startswith("linux"):
@@ -93,11 +94,16 @@ def main():
         acquisition = measure(binary, directory, "acquire", [
             "acquire", "source.raw", "case.E01", "--compression", args.compression,
             "--stop-after", str(size // 4)], 130)
+        pauses = []
+        if args.repeat_resume:
+            for part in [2, 3]:
+                pauses.append(measure(binary, directory, f"resume-{part}", [
+                    "resume", "case.E01", "--stop-after", str(size * part // 4)], 130))
         resumed = measure(binary, directory, "resume", ["resume", "case.E01"], 0)
         result = resumed["result"]
         if result["status"] != "complete" or result["verification"]["sha256"] != expected.hexdigest():
             raise RuntimeError("resumed output failed independent source SHA256 comparison")
-        total_seconds = acquisition["elapsed_seconds"] + resumed["elapsed_seconds"]
+        total_seconds = acquisition["elapsed_seconds"] + resumed["elapsed_seconds"] + sum(pause["elapsed_seconds"] for pause in pauses)
         print(json.dumps({
             "schema_version": 1,
             "source_bytes": size,
@@ -107,6 +113,7 @@ def main():
             "measurement_notes": "Includes checkpoint validation, resume rehash, publication, and verification. Scratch peaks are sampled lower bounds; RSS is Linux wait4 process high-water RSS. Synthetic source and output may benefit from OS caches.",
             "acquire": acquisition,
             "resume": resumed,
+            "intermediate_resumes": pauses,
         }, indent=2))
 
 
