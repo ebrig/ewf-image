@@ -30,6 +30,16 @@ pub enum Error {
     /// Backing I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// Output was published, but synchronizing its parent directory failed.
+    /// Preserve the result and independently verify it before further use.
+    #[error("AFF4 output published at {path}, but directory synchronization failed: {source}", path = result.path.display())]
+    PublishedButUnsynced {
+        /// Published path and source digests; output must not be overwritten.
+        result: Box<WriteResult>,
+        /// Directory synchronization failure.
+        #[source]
+        source: std::io::Error,
+    },
     /// ZIP structure or decoding error.
     #[error(transparent)]
     Zip(#[from] zip::result::ZipError),

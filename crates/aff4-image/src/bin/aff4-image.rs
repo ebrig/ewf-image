@@ -177,7 +177,18 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
             if progress(0, 0).is_break() {
                 return Err(aff4_image::Error::Aborted.into());
             }
-            let written = writer.finish()?;
+            let written = match writer.finish() {
+                Ok(written) => written,
+                Err(aff4_image::Error::PublishedButUnsynced { result, source }) => {
+                    println!(
+                        "{}",
+                        json!({"published":true,"output":result,"collection":collection,
+                        "durability_error":source.to_string(),"verification":"not started"})
+                    );
+                    return Ok(4);
+                }
+                Err(error) => return Err(error.into()),
+            };
             let verification = Container::open(&written.path).and_then(|mut container| {
                 container.verify_all(Some(&written.metadata_sha256), |_, done, total| {
                     progress(done, total)

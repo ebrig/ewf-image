@@ -452,6 +452,7 @@ impl Writer {
     /// Finalizes ZIP metadata, synchronizes bytes, and publishes exclusively.
     /// Unix additionally synchronizes the parent directory. This API does not
     /// certify power-loss durability on every filesystem or device.
+    /// `Error::PublishedButUnsynced` retains the result if that last sync fails.
     pub fn finish(mut self) -> Result<WriteResult> {
         self.healthy()?;
         self.finish_logical_metadata();
@@ -463,19 +464,36 @@ impl Writer {
             self.volume, metadata_sha256
         );
         write_member(&mut zip, "information.turtle.hashes", hashes.as_bytes())?;
+        #[cfg(test)]
+        failure_tests::boundary("metadata");
         let file = zip.finish()?;
+        #[cfg(test)]
+        failure_tests::boundary("zip_closed");
         file.sync_all()?;
         drop(file);
+        #[cfg(test)]
+        failure_tests::boundary("file_synced");
         self.temporary
             .persist_noclobber(&self.path)
             .map_err(|error| Error::Io(error.error))?;
-        #[cfg(unix)]
-        File::open(self.path.parent().unwrap())?.sync_all()?;
-        Ok(WriteResult {
+        let result = WriteResult {
             path: self.path,
             streams: self.streams,
             metadata_sha256,
-        })
+        };
+        #[cfg(test)]
+        failure_tests::boundary("published");
+        sync_published_directory(&result.path).map_err(|source| Error::PublishedButUnsynced {
+            result: Box::new(WriteResult {
+                path: result.path.clone(),
+                streams: result.streams.clone(),
+                metadata_sha256: result.metadata_sha256.clone(),
+            }),
+            source,
+        })?;
+        #[cfg(test)]
+        failure_tests::boundary("directory_synced");
+        Ok(result)
     }
 
     fn healthy(&self) -> Result<()> {
@@ -487,6 +505,22 @@ impl Writer {
         Ok(())
     }
 }
+
+fn sync_published_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if failure_tests::FAIL_DIRECTORY_SYNC.get() {
+        return Err(std::io::Error::other("injected directory sync failure"));
+    }
+    #[cfg(unix)]
+    File::open(path.parent().unwrap())?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "writer_failure_tests.rs"]
+mod failure_tests;
 
 fn identifier() -> String {
     format!("aff4://{}", uuid::Uuid::new_v4())
