@@ -185,3 +185,31 @@ directory entries. Windows power-loss durability, network filesystems, and
 devices that disregard flushes are not certified. This API does not open
 device handles itself, perform positioned output writes, replace an existing
 image, mirror targets, or resume arbitrary E01 files from other producers.
+# Bounded EWF2 writing
+
+`SequentialWriter` accepts an exact known source length and streams physical
+Ex01 or logical Lx01 output into staged native segments. Select
+`SequentialOptions::chunks_per_segment` (raw capacity at most 512 MiB); this is
+not an encoded segment size limit. Chunks are limited to 16 MiB. The example
+`cargo run --release --example sequential -- SOURCE OUTPUT [zlib]` uses 32 MiB
+raw capacity per segment and verifies the published image's SHA256.
+
+Only the current encoded segment is spooled, alongside output staging. Memory
+contains a chunk, codec buffers, current chunk descriptors, and the segment path
+list. Logical catalogs remain in memory and are written in the final segment.
+`LogicalWriter::create_sequential` builds that catalog while accepting files;
+declare the sum of file lengths as `source_size`. Empty files/directories work.
+An incomplete file, cancellation, or oversize write prevents publication. Final
+sector padding is zero and included in image hashes, but not file hashes.
+
+`finish` uses the existing recoverable publication transaction, including
+mirrors and optional replacement. Completed staged native segments occupy the
+eventual output size; this is bounded *payload scratch*, not bounded total disk
+use or catalog memory. No seeking, checkpoint resume, or encoded-size split
+limit is supported. After process interruption call `EwfWriter::recover_output`
+to discard uncommitted staging or recover interrupted publication. Existing
+`EwfWriter` remains available for seek/patch operations and EWF1 logical output.
+The E01 `AcquisitionWriter` remains the resumable path. The sequential EWF2
+transaction uses renames rather than hard links; removable filesystems still
+need their own durability acceptance tests.
+

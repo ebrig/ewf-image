@@ -34,12 +34,14 @@ use crate::{EwfError, Result};
 
 mod acquisition;
 mod logical;
+mod sequential;
 pub use acquisition::{
     AcquisitionCheckpoint, AcquisitionOperationPhase, AcquisitionOperationProgress,
     AcquisitionOptions, AcquisitionOutcome, AcquisitionProgress, AcquisitionReadOptions,
     AcquisitionStatus, AcquisitionWriter, UnreadableSectorPolicy,
 };
 pub use logical::{LogicalEntryMetadata, LogicalWriteProgress, LogicalWriter};
+pub use sequential::{SequentialOptions, SequentialWriter};
 
 const VOLUME_DATA_SIZE: usize = 1052;
 const EWF1_LTREE_HEADER_SIZE: usize = 48;
@@ -2762,7 +2764,11 @@ fn write_ewf2_segment<W: Write>(
     } else {
         &[]
     };
-    let single_files_data = if context.segment_number == 1 {
+    // libewf completes the logical catalog while opening this segment and
+    // rejects subsequent segments once that catalog exists. Keep all logical
+    // catalog sections in the terminal segment, as with EWF1 ltree.
+    let writes_hash_sections = context.terminal_section_type == EWF2_DONE_SECTION;
+    let single_files_data = if writes_hash_sections {
         options
             .single_files
             .as_ref()
@@ -2771,26 +2777,25 @@ fn write_ewf2_segment<W: Write>(
     } else {
         None
     };
-    let single_files_table_0x21 = if context.segment_number == 1 {
+    let single_files_table_0x21 = if writes_hash_sections {
         ewf2_single_files_aux_u64_table_payload(
             &options.ewf2_single_files_tables.table_0x21_entries,
         )
     } else {
         None
     };
-    let single_files_md5_hash_table = if context.segment_number == 1 {
+    let single_files_md5_hash_table = if writes_hash_sections {
         ewf2_single_files_md5_hash_table_payload(&options.ewf2_single_files_tables.md5_hashes)
     } else {
         None
     };
-    let single_files_table_0x23 = if context.segment_number == 1 {
+    let single_files_table_0x23 = if writes_hash_sections {
         ewf2_single_files_aux_u64_table_payload(
             &options.ewf2_single_files_tables.table_0x23_entries,
         )
     } else {
         None
     };
-    let writes_hash_sections = context.terminal_section_type == EWF2_DONE_SECTION;
     let md5_hash = writes_hash_sections
         .then(|| options.hashes.md5.map(ewf2_hash_payload))
         .flatten();

@@ -8,7 +8,10 @@ use std::path::Path;
 use md5::{Digest, Md5};
 use sha1::Sha1;
 
-use super::{EwfWriter, WriteFormat, WriteOptions, WriteResult, hex_string};
+use super::{
+    EwfWriter, SequentialOptions, SequentialWriter, WriteFormat, WriteOptions, WriteResult,
+    hex_string,
+};
 use crate::{
     EwfError, MediaType, Result, SingleFileEntry, SingleFileEntryType, SingleFileExtent,
     SingleFilesInfo,
@@ -52,10 +55,42 @@ pub struct LogicalWriteProgress {
 /// This is not checkpoint-resumable acquisition. Input errors or cancellation
 /// poison the builder so partial files cannot be published by `finish`.
 pub struct LogicalWriter {
-    writer: EwfWriter,
+    writer: Backend,
     paths: BTreeMap<u64, Vec<usize>>,
     next_identifier: u64,
     poisoned: bool,
+}
+
+enum Backend {
+    General(Box<EwfWriter>),
+    Sequential(Box<SequentialWriter>),
+}
+
+impl Backend {
+    fn position(&self) -> u64 {
+        match self {
+            Self::General(w) => w.position(),
+            Self::Sequential(w) => w.position(),
+        }
+    }
+    fn options(&mut self) -> &mut WriteOptions {
+        match self {
+            Self::General(w) => &mut w.options,
+            Self::Sequential(w) => &mut w.options,
+        }
+    }
+    fn write_all(&mut self, data: &[u8]) -> Result<()> {
+        match self {
+            Self::General(w) => w.write_all(data),
+            Self::Sequential(w) => w.write_all(data),
+        }
+    }
+    fn finish(self) -> Result<WriteResult> {
+        match self {
+            Self::General(w) => w.finish(),
+            Self::Sequential(w) => w.finish(),
+        }
+    }
 }
 
 impl LogicalWriter {
@@ -63,6 +98,40 @@ impl LogicalWriter {
     /// Caller-authored catalogs and auxiliary file tables are rejected; this
     /// builder owns those. The root has identifier 1 and an empty name.
     pub fn create(path: impl AsRef<Path>, mut options: WriteOptions) -> Result<Self> {
+        Self::catalog(&mut options)?;
+        Ok(Self::from_backend(Backend::General(Box::new(
+            EwfWriter::create(path, options)?,
+        ))))
+    }
+
+    /// Creates bounded sequential Lx01 output. `source_size` is the sum of all
+    /// file payload lengths. Catalog metadata remains in memory; one encoded
+    /// segment is retained as payload scratch. No checkpoint resume.
+    pub fn create_sequential(
+        path: impl AsRef<Path>,
+        mut options: SequentialOptions,
+    ) -> Result<Self> {
+        if options.write.format != WriteFormat::Ewf2Logical {
+            return Err(EwfError::Unsupported(
+                "sequential logical builder requires EWF2 logical format".into(),
+            ));
+        }
+        Self::catalog(&mut options.write)?;
+        Ok(Self::from_backend(Backend::Sequential(Box::new(
+            SequentialWriter::create(path, options)?,
+        ))))
+    }
+
+    fn from_backend(writer: Backend) -> Self {
+        Self {
+            writer,
+            paths: BTreeMap::from([(1, vec![])]),
+            next_identifier: 2,
+            poisoned: false,
+        }
+    }
+
+    fn catalog(options: &mut WriteOptions) -> Result<()> {
         if !matches!(
             options.format,
             WriteFormat::Ewf1Logical | WriteFormat::Ewf2Logical
@@ -84,12 +153,7 @@ impl LogicalWriter {
             },
             ..SingleFilesInfo::default()
         });
-        Ok(Self {
-            writer: EwfWriter::create(path, options)?,
-            paths: BTreeMap::from([(1, vec![])]),
-            next_identifier: 2,
-            poisoned: false,
-        })
+        Ok(())
     }
 
     /// Adds a directory beneath an existing directory and returns its identifier.
@@ -167,7 +231,7 @@ impl LogicalWriter {
         entry.md5 = Some(hex_string(&md5.finalize()));
         entry.sha1 = Some(hex_string(&sha1.finalize()));
         self.writer
-            .options
+            .options()
             .single_files
             .as_mut()
             .expect("builder catalog")
@@ -234,7 +298,7 @@ impl LogicalWriter {
         let mut path = self.paths[&parent].clone();
         let mut node = &mut self
             .writer
-            .options
+            .options()
             .single_files
             .as_mut()
             .expect("builder catalog")

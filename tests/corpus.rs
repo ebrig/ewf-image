@@ -399,6 +399,26 @@ fn external_writer_outputs_match_ewfexport_stdout() -> Result<(), Box<dyn Error>
         compare_with_ewfexport(&ewfexport, &path)?;
     }
 
+    for (index, compression) in [
+        ewf_image::WriteCompression::None,
+        ewf_image::WriteCompression::Zlib,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = dir.path().join(format!("sequential-{index}.Ex01"));
+        let mut settings = ewf_image::SequentialOptions::new(split_data.len() as u64);
+        settings.write.compression = compression;
+        settings.write.sectors_per_chunk = 1;
+        settings.chunks_per_segment = 7;
+        let mut writer = ewf_image::SequentialWriter::create(&path, settings)?;
+        writer.write_all(&split_data)?;
+        let written = writer.finish()?;
+        let mut expected = split_data.clone();
+        expected.resize(written.logical_size as usize, 0);
+        compare_ewfexport_bytes(&ewfexport, &path, &expected)?;
+    }
+
     Ok(())
 }
 
@@ -772,22 +792,32 @@ fn external_writer_logical_single_files_match_ewfinfo() -> Result<(), Box<dyn Er
 #[test]
 #[ignore = "requires ewfinfo and ewfexport"]
 fn external_logical_builder_files_match_ewfexport() -> Result<(), Box<dyn Error>> {
-    use ewf_image::{LogicalEntryMetadata, LogicalWriter, WriteFormat, WriteOptions};
+    use ewf_image::{
+        LogicalEntryMetadata, LogicalWriter, SequentialOptions, WriteFormat, WriteOptions,
+    };
     let ewfinfo = env::var_os("EWFINFO").unwrap_or_else(|| OsString::from("ewfinfo"));
     let ewfexport = env::var_os("EWFEXPORT").unwrap_or_else(|| OsString::from("ewfexport"));
     let dir = tempfile::tempdir()?;
     for (name, format) in [
         ("case.L01", WriteFormat::Ewf1Logical),
         ("case.Lx01", WriteFormat::Ewf2Logical),
+        ("stream.Lx01", WriteFormat::Ewf2Logical),
     ] {
         let path = dir.path().join(name);
-        let mut writer = LogicalWriter::create(
-            &path,
-            WriteOptions {
-                format,
-                ..WriteOptions::default()
-            },
-        )?;
+        let mut writer = if name == "stream.Lx01" {
+            let mut settings = SequentialOptions::new(150_003);
+            settings.write.format = format;
+            settings.chunks_per_segment = 2;
+            LogicalWriter::create_sequential(&path, settings)?
+        } else {
+            LogicalWriter::create(
+                &path,
+                WriteOptions {
+                    format,
+                    ..WriteOptions::default()
+                },
+            )?
+        };
         let folder = writer.add_directory(
             1,
             LogicalEntryMetadata {
@@ -804,6 +834,17 @@ fn external_logical_builder_files_match_ewfexport() -> Result<(), Box<dyn Error>
             3,
             &mut std::io::Cursor::new(b"abc"),
         )?;
+        if name == "stream.Lx01" {
+            writer.add_file(
+                folder,
+                LogicalEntryMetadata {
+                    name: "later.bin".into(),
+                    ..Default::default()
+                },
+                150_000,
+                &mut std::io::Cursor::new(vec![73; 150_000]),
+            )?;
+        }
         writer.finish()?;
         assert!(ewfinfo_hierarchy(&ewfinfo, &path)?.contains("folder/data.txt"));
         let output = dir.path().join(format!("{name}-export"));
@@ -818,6 +859,12 @@ fn external_logical_builder_files_match_ewfexport() -> Result<(), Box<dyn Error>
             String::from_utf8_lossy(&result.stderr)
         );
         assert_eq!(fs::read(output.join("folder/data.txt"))?, b"abc");
+        if name == "stream.Lx01" {
+            assert_eq!(
+                fs::read(output.join("folder/later.bin"))?,
+                vec![73; 150_000]
+            );
+        }
     }
     Ok(())
 }

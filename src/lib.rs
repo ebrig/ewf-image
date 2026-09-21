@@ -223,8 +223,9 @@ pub use writer::{
     AcquisitionCheckpoint, AcquisitionOperationPhase, AcquisitionOperationProgress,
     AcquisitionOptions, AcquisitionOutcome, AcquisitionProgress, AcquisitionReadOptions,
     AcquisitionStatus, AcquisitionWriter, EwfWriter, LogicalEntryMetadata, LogicalWriteProgress,
-    LogicalWriter, UnreadableSectorPolicy, WriteCompression, WriteCompressionLevel,
-    WriteCompressionValues, WriteFormat, WriteHashes, WriteMediaProfile, WriteOptions, WriteResult,
+    LogicalWriter, SequentialOptions, SequentialWriter, UnreadableSectorPolicy, WriteCompression,
+    WriteCompressionLevel, WriteCompressionValues, WriteFormat, WriteHashes, WriteMediaProfile,
+    WriteOptions, WriteResult,
 };
 
 #[cfg(feature = "verify")]

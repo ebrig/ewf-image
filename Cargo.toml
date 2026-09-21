@@ -39,6 +39,7 @@ include = [
     "/tests/verification.rs",
     "/tests/sources.rs",
     "/tests/recovery.rs",
+    "/tests/sequential.rs",
     "/docs/architecture.md",
     "/docs/acquisition.md",
     "/docs/cli.md",
@@ -67,6 +68,10 @@ parallel = ["verify", "dep:rayon"]
 serde = ["dep:serde"]
 external-fixtures = []
 cli = ["verify", "serde", "dep:clap", "dep:ctrlc", "dep:serde_json", "dep:rustix", "dep:windows-sys"]
+
+[[example]]
+name = "sequential"
+required-features = ["verify"]
 
 [dependencies]
 aes = "0.9"
