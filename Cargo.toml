@@ -94,7 +94,7 @@ tempfile = "3"
 thiserror = "2"
 zeroize = { version = "1.9", features = ["derive"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs"], optional = true }
 
 [target.'cfg(windows)'.dependencies]

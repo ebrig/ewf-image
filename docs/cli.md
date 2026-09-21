@@ -342,3 +342,47 @@ contain case metadata and local source paths; handle them with the evidence.
 Platform references: [Windows storage properties](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_storage_query_property),
 [volume disk extents](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_volume_get_volume_disk_extents),
 and [Linux sysfs block ABI](https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-block).
+# One-shot EWF2 acquisition and collection
+
+```text
+ewf-image acquire-sequential source.raw case.Ex01 --compression zlib --chunks-per-segment 1024
+ewf-image collect snapshot-directory case.Lx01 --case-number CASE-001
+ewf-image recover-publication case.Ex01
+```
+
+`acquire-sequential` uses the existing source identity and device overlap checks,
+then streams known-size input into Ex01 with bounded payload scratch. Sources
+must be nonempty and sector-aligned, as with E01 acquisition; a regular file's
+sector size defaults to 512. Source reads support cancellation and optional
+`--read-timeout-ms`, with no retries or zero substitution. Chunks are fixed at
+32 KiB; the default 1024 chunks per segment represents 32 MiB of raw capacity,
+not an encoded segment-size limit. `raw` and `zlib` are available. The new CLI
+requires `.Ex01` for physical output and `.Lx01` for logical output.
+
+`collect` inventories regular files and directories, records available basic
+timestamps and Unicode names, streams each file into a logical catalog, and
+verifies both the full media and every file after publication. It rejects links,
+Windows reparse points, special files, inaccessible entries, delimiter-containing
+names, and outputs within the source tree. Discovery is limited to 100,000
+entries including the root and 127 directory levels. Inventory, opened handles
+and named paths are checked for metadata changes; use a stable snapshot because
+these checks do not guarantee cross-file consistency or defeat every concurrent
+filesystem substitution. ADS, xattrs, ACLs, and sparse allocation are not captured.
+Collection cancellation is checked between buffers; blocking filesystem calls
+do not have a deadline. Collection metadata grows with entry count.
+
+Both commands create new outputs only, support case/evidence/examiner metadata,
+and report `resumable: false`. They use publication journals but do not create
+E01 checkpoint/history sessions, and have no mirror option. Source cancellation
+or a handled pre-publication failure removes staging. A finish error can leave
+the publication decision unresolved: JSON then has `published: null`,
+`publication_state: "unresolved"`, and a recovery command. After process death,
+run `recover-publication OUTPUT` to resolve/discard the transaction, then `verify`
+any retained output before use. Recovery itself does not verify evidence and
+does not continue the original source acquisition. A verification failure after
+publication retains the output and reports `published: true` with exit 3;
+cancellation returns 130. Successful acquisition and verification return 0.
+
+Fixed 32 KiB geometry is the independently validated CLI profile. Other library
+geometries retain their existing behavior, with no broader consumer-compatibility
+claim; tiny-chunk split logical output is not certified against libewf.

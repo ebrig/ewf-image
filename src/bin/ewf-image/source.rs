@@ -302,7 +302,7 @@ impl SourceIdentity {
     }
 }
 
-fn metadata_identity(metadata: &fs::Metadata) -> Result<String> {
+pub(super) fn metadata_identity(metadata: &fs::Metadata) -> Result<String> {
     let mut identity = format!(
         "file:{}:{:?}:{:?}",
         metadata.len(),

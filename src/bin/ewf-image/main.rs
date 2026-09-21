@@ -6,6 +6,7 @@ mod history;
 mod inspect;
 mod logical;
 mod recover;
+mod sequential;
 mod session;
 mod source;
 
@@ -83,6 +84,12 @@ enum Command {
     },
     /// Acquire a source, publish its E01 segments, then reopen and verify them.
     Acquire(Acquire),
+    /// One-shot Ex01 acquisition, with bounded scratch and post-write verification.
+    AcquireSequential(sequential::AcquireArgs),
+    /// Collect a directory snapshot into a new Lx01 image and verify every file.
+    Collect(sequential::CollectArgs),
+    /// Recover/discard an interrupted one-shot publication transaction.
+    RecoverPublication { output: PathBuf },
     /// Resume using the original source and options from the session manifest.
     Resume {
         output: PathBuf,
@@ -252,6 +259,9 @@ fn run(
 ) -> Result<()> {
     let mut progress = Progress::new(cli.quiet, stop);
     match &cli.command {
+        Command::AcquireSequential(args) => sequential::acquire(args, stop, &mut progress, report),
+        Command::Collect(args) => sequential::collect(args, &mut progress, report),
+        Command::RecoverPublication { output } => sequential::recover(output, report),
         Command::Info { image } => inspect::info(image, report),
         Command::Files {
             image,

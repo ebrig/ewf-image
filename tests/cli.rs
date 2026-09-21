@@ -11,6 +11,193 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 #[test]
+fn cli_sequential_acquires_split_images_and_verifies_source_hash() {
+    for codec in ["raw", "zlib"] {
+        let dir = tempfile::tempdir().unwrap();
+        let data: Vec<u8> = (0..131_072)
+            .map(|n| ((n * 71 + n / 257) % 251) as u8)
+            .collect();
+        fs::write(dir.path().join("source.raw"), &data).unwrap();
+        let report = result(
+            dir.path(),
+            &[
+                "acquire-sequential",
+                "source.raw",
+                "case.Ex01",
+                "--chunks-per-segment",
+                "1",
+                "--compression",
+                codec,
+            ],
+            0,
+        );
+        assert_eq!(report["status"], "complete");
+        assert_eq!(report["published"], true);
+        assert_eq!(report["resumable"], false);
+        assert_eq!(report["segments"].as_array().unwrap().len(), 4);
+        assert_eq!(report["verification"]["sha256"], hash(&data));
+        result(dir.path(), &["export", "case.Ex01", "export.raw"], 0);
+        assert_eq!(fs::read(dir.path().join("export.raw")).unwrap(), data);
+        result(
+            dir.path(),
+            &["acquire-sequential", "source.raw", "case.Ex01"],
+            1,
+        );
+        assert_eq!(fs::read(dir.path().join("source.raw")).unwrap(), data);
+    }
+}
+
+#[test]
+fn cli_collects_nested_empty_and_split_logical_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    fs::create_dir_all(source.join("nested/empty-directory")).unwrap();
+    fs::write(source.join("empty"), []).unwrap();
+    let data: Vec<u8> = (0..150_003).map(|n| (n % 251) as u8).collect();
+    fs::write(source.join("nested/data.bin"), &data).unwrap();
+    let report = result(
+        dir.path(),
+        &[
+            "collect",
+            "source",
+            "case.Lx01",
+            "--chunks-per-segment",
+            "1",
+        ],
+        0,
+    );
+    assert_eq!(report["status"], "complete");
+    assert_eq!(report["verified_files"], 2);
+    assert_eq!(report["collection"]["snapshot_guaranteed"], false);
+    assert_eq!(report["segments"].as_array().unwrap().len(), 5);
+    let image = Image::open(dir.path().join("case.Lx01")).unwrap();
+    let entry = image
+        .file_entry_by_path("nested\tdata.bin")
+        .unwrap()
+        .unwrap();
+    let mut actual = Vec::new();
+    image
+        .single_file_cursor(entry)
+        .read_to_end(&mut actual)
+        .unwrap();
+    assert_eq!(actual, data);
+    assert!(
+        image
+            .file_entry_by_path("nested\tempty-directory")
+            .unwrap()
+            .is_some()
+    );
+    result(dir.path(), &["collect", "source", "source/inside.Lx01"], 1);
+    result(dir.path(), &["collect", "source", "case.Lx01"], 1);
+    assert!(!source.join("inside.Lx01").exists());
+    fs::create_dir(dir.path().join("empty-source")).unwrap();
+    let empty = result(dir.path(), &["collect", "empty-source", "empty.Lx01"], 0);
+    assert_eq!(empty["verified_files"], 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_collection_rejects_links_and_special_files_without_output() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("source")).unwrap();
+    fs::write(dir.path().join("outside"), b"uncollected").unwrap();
+    symlink("../outside", dir.path().join("source/link")).unwrap();
+    result(dir.path(), &["collect", "source", "case.Lx01"], 1);
+    assert!(!dir.path().join("case.Lx01").exists());
+}
+
+#[test]
+fn cli_recovers_interrupted_sequential_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("case.Ex01");
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "cli_sequential_crash_worker"])
+        .env("EWF_CLI_SEQUENTIAL_CRASH", &path)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(73));
+    let recovered = result(dir.path(), &["recover-publication", "case.Ex01"], 0);
+    assert_eq!(recovered["recovered"], true);
+    assert_eq!(recovered["published"], false);
+    let again = result(dir.path(), &["recover-publication", "case.Ex01"], 0);
+    assert_eq!(again["recovered"], false);
+}
+
+#[test]
+fn cli_sequential_crash_worker() {
+    let Some(path) = std::env::var_os("EWF_CLI_SEQUENTIAL_CRASH") else {
+        return;
+    };
+    let mut options = ewf_image::SequentialOptions::new(131_072);
+    options.chunks_per_segment = 1;
+    let mut writer = ewf_image::SequentialWriter::create(path, options).unwrap();
+    writer.write_all(&vec![7; 65_536]).unwrap();
+    std::process::exit(73);
+}
+
+#[test]
+#[ignore = "requires pinned ewfexport"]
+fn external_cli_sequential_and_collection_match_libewf() {
+    let oracle = std::env::var_os("EWFEXPORT").expect("set EWFEXPORT");
+    let dir = tempfile::tempdir().unwrap();
+    let bytes: Vec<u8> = (0..262_144)
+        .map(|n| ((n * 71 + n / 257) % 251) as u8)
+        .collect();
+    fs::write(dir.path().join("source.raw"), &bytes).unwrap();
+    result(
+        dir.path(),
+        &[
+            "acquire-sequential",
+            "source.raw",
+            "case.Ex01",
+            "--chunks-per-segment",
+            "2",
+        ],
+        0,
+    );
+    let output = Command::new(&oracle)
+        .current_dir(dir.path())
+        .args(["-u", "-q", "-t", "physical", "case.Ex01"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(dir.path().join("physical.raw")).unwrap(), bytes);
+    fs::create_dir_all(dir.path().join("files/folder")).unwrap();
+    fs::write(dir.path().join("files/folder/data.bin"), &bytes).unwrap();
+    fs::write(dir.path().join("files/empty"), []).unwrap();
+    result(
+        dir.path(),
+        &["collect", "files", "case.Lx01", "--chunks-per-segment", "2"],
+        0,
+    );
+    let output = Command::new(&oracle)
+        .current_dir(dir.path())
+        .args(["-u", "-q", "-f", "files", "-t", "logical", "case.Lx01"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(dir.path().join("logical/folder/data.bin")).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        fs::metadata(dir.path().join("logical/empty"))
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[test]
 fn cli_logical_listing_verification_and_safe_selective_extraction() {
     use ewf_image::{
         EwfWriter, SingleFileEntry, SingleFileEntryType, SingleFileExtent, SingleFilesInfo,
