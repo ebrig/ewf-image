@@ -3,13 +3,13 @@
 use super::{
     ChunkDescriptor, ChunkSpool, EWF2_DONE_SECTION, EWF2_NEXT_SECTION, Ewf2SegmentWriteContext,
     WriteFormat, WriteHashState, WriteOptions, WriteResult, effective_write_hashes, encode_chunk,
-    ensure_secondary_segment_path_is_distinct, ewf2_segment_path, is_ewf2_format,
-    normalize_maximum_segment_size, normalize_media_size, publication_segment_paths,
-    validate_options, validate_secondary_segment_filename, validate_session_ranges,
-    write_ewf2_segment, writer_chunk_geometry,
+    ewf2_segment_path, is_ewf2_format, normalize_maximum_segment_size, normalize_media_size,
+    publication_segment_paths, validate_options, validate_secondary_segment_filename,
+    validate_session_ranges, write_ewf2_segment, writer_chunk_geometry,
 };
 use crate::publication::Publication;
 use crate::{EwfError, Result};
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -127,6 +127,15 @@ impl SequentialWriter {
         validate_session_ranges("sessions", &options.sessions, logical_size / sector)?;
         validate_session_ranges("tracks", &options.tracks, logical_size / sector)?;
         validate_secondary_segment_filename(&path, options.secondary_segment_filename.as_deref())?;
+        if let Some(secondary) = &options.secondary_segment_filename {
+            validate_namespaces(
+                &path,
+                secondary,
+                (total_chunks as usize)
+                    .div_ceil(settings.chunks_per_segment as usize)
+                    .max(1),
+            )?;
+        }
         let publication = Publication::begin(
             &path,
             options.secondary_segment_filename.as_deref(),
@@ -243,16 +252,6 @@ impl SequentialWriter {
         drop(file);
         if let Some(base) = &self.options.secondary_segment_filename {
             let mirror = ewf2_segment_path(base, number)?;
-            // Check the complete primary namespace, including segments not yet staged.
-            let count = (self.total_chunks as usize)
-                .div_ceil(self.per_segment)
-                .max(1);
-            for index in 1..=count {
-                ensure_secondary_segment_path_is_distinct(
-                    &[ewf2_segment_path(&self.path, index)?],
-                    &mirror,
-                )?;
-            }
             let destination = self.publication.stage(1, &mirror)?;
             fs::copy(staged, &destination)?;
             fs::OpenOptions::new()
@@ -306,6 +305,36 @@ impl SequentialWriter {
             computed_sha256: sha256,
         })
     }
+}
+
+// Validate the complete namespace once, before creating a journal or accepting
+// source bytes. Resolve parent aliases and use conservative Windows case folding.
+// O(n log n) comparisons replace the former per-segment O(n^2) filesystem work.
+fn validate_namespaces(primary: &Path, secondary: &Path, count: usize) -> Result<()> {
+    fn key(path: &Path) -> Result<PathBuf> {
+        let path = super::normalized_output_path(path)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| EwfError::Malformed("missing output parent".into()))?;
+        let key = parent.canonicalize()?.join(
+            path.file_name()
+                .ok_or_else(|| EwfError::Malformed("missing output name".into()))?,
+        );
+        #[cfg(windows)]
+        let key = PathBuf::from(key.to_string_lossy().to_lowercase());
+        Ok(key)
+    }
+    let primary: BTreeSet<_> = (1..=count)
+        .map(|n| key(&ewf2_segment_path(primary, n)?))
+        .collect::<Result<_>>()?;
+    for number in 1..=count {
+        if primary.contains(&key(&ewf2_segment_path(secondary, number)?)?) {
+            return Err(EwfError::Unsupported(
+                "secondary segment filename overlaps primary output".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl Write for SequentialWriter {

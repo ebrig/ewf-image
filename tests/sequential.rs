@@ -179,6 +179,42 @@ fn sequential_crash_worker() {
 }
 
 #[test]
+fn mirrored_namespace_collision_is_rejected_before_staging() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("case.Ex01");
+    let mut settings = options(4096);
+    settings.write.secondary_segment_filename = Some(dir.path().join("case.Ex02"));
+    assert!(SequentialWriter::create(&path, settings).is_err());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn mirrored_large_segment_set_is_byte_identical() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = options(512 * 256);
+    settings.chunks_per_segment = 1;
+    settings.write.secondary_segment_filename = Some(dir.path().join("mirror.Ex01"));
+    let mut writer = SequentialWriter::create(dir.path().join("case.Ex01"), settings).unwrap();
+    writer.write_all(&data(512 * 256)).unwrap();
+    let result = writer.finish().unwrap();
+    assert_eq!(result.segment_paths.len(), 256);
+    for (primary, mirror) in result
+        .segment_paths
+        .iter()
+        .zip(&result.secondary_segment_paths)
+    {
+        assert_eq!(
+            std::fs::read(primary).unwrap(),
+            std::fs::read(mirror).unwrap()
+        );
+    }
+    let image = Image::open(&result.secondary_segment_paths[0]).unwrap();
+    let mut decoded = Vec::new();
+    image.cursor().read_to_end(&mut decoded).unwrap();
+    assert_eq!(decoded, data(512 * 256));
+}
+
+#[test]
 fn sequential_process_interruption_recovers_unpublished_staging() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("case.Ex01");
