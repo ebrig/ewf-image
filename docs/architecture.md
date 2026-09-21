@@ -56,7 +56,8 @@ redundant, suspect, and zero-filled output provenance.
 
 ## Writer Flow
 
-`LogicalWriter` wraps `EwfWriter` for L01/Lx01 creation. Directory identifiers
+`LogicalWriter` uses either general spooling for L01/Lx01 or bounded sequential
+EWF2 staging through `create_sequential`. Directory identifiers
 select parents (root is 1); file inputs have caller-declared lengths and metadata.
 Each file receives contiguous extents and computed MD5/SHA1 references. Empty
 files are represented explicitly. Short reads, write errors, or cancellation
@@ -66,9 +67,13 @@ This convenience API records names and timestamps, not filesystem ACLs, extended
 attributes, alternate streams, sparse allocation, or source snapshot consistency.
 Use the lower-level catalog API for explicitly authored richer metadata.
 
-The writer accepts sequential writes, positioned writes, and chunk-oriented
-writes. Input data is spooled while complete chunks are encoded and tracked
-with enough metadata to emit EWF tables and segment descriptors at finish time.
+The general `EwfWriter` accepts sequential, positioned, and chunk-oriented writes.
+It retains a full raw spool, then an encoded spool and chunk descriptors before
+writing native segments at finish. `SequentialWriter` instead hashes and encodes
+chunks as they arrive, stages each native segment, and discards that segment's
+encoded spool. It holds one pending chunk and one segment's descriptors; paths
+and catalog metadata still grow with counts. Logical catalogs are emitted in the
+final segment. Both use the same recoverable publication transaction.
 
 `finish` writes complete images with `done` terminal sections.
 `finish_incomplete` writes an incomplete EWF1 acquisition with a `next`
