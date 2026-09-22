@@ -13,6 +13,7 @@ param(
     [string]$Directory = [IO.Path]::GetTempPath(),
     [string]$EwfExport,
     [string]$EwfVerify,
+    [switch]$SequentialOnly,
     [switch]$CheckPrerequisites
 )
 
@@ -209,73 +210,11 @@ function Test-ActiveRemoval([string]$Image, [string]$Expected) {
     $checks.Add('active VHDX removal: no zero substitution, retained checkpoint, verified resume')
 }
 
-try {
-    $raw = New-SyntheticSource
-    $expected = (Get-FileHash -LiteralPath $raw -Algorithm SHA256).Hash.ToLowerInvariant()
-    foreach ($sector in @(512, 4096)) {
-        $image = New-OwnedImage "source-$sector" $sector
-        Initialize-OwnedSource $image $raw
-        $disk = Attach-OwnedImage $image
-        $number = $disk.Number
-        $device = "\\.\PhysicalDrive$number"
-        $output = Join-Path $workRoot "sector-$sector.E01"
-        $wrongSector = if ($sector -eq 512) { 4096 } else { 512 }
-        $wrong = Invoke-Cli @('acquire', $device, (Join-Path $workRoot "wrong-$sector.E01"), '--sector-size', "$wrongSector") 1
-        if ($wrong.error -notmatch 'geometry') { throw "Expected device geometry mismatch: $($wrong.error)" }
-        $paused = Invoke-Cli @('acquire', $device, $output, '--stop-after', '4194304', '--chunks-per-segment', '32') 130
-        if ($paused.checkpoint_bytes -ne 4194304) { throw 'Incorrect checkpoint offset' }
-        Dismount-VHD -Path $image
-        $null = Invoke-Cli @('resume', $output) 1
-        $null = Invoke-Cli @('checkpoint', 'validate', $output)
-        $replacement = New-OwnedImage "replacement-$sector" $sector
-        $other = Attach-OwnedImage $replacement
-        if ($other.Number -ne $number) { throw 'Replacement did not reuse the test disk slot' }
-        $changed = Invoke-Cli @('resume', $output) 1
-        if ($changed.error -notmatch 'identity') { throw 'Expected replacement identity rejection' }
-        Dismount-VHD -Path $replacement
-        $disk = Attach-OwnedImage $image
-        if ($disk.Number -ne $number) { throw 'Source disk number changed during test' }
-        $done = Invoke-Cli @('resume', $output)
-        if ($done.status -ne 'complete' -or $done.verification.sha256 -ne $expected -or $done.source.sector_size -ne $sector) {
-            throw 'Resumed media does not match independent synthetic-source digest and geometry'
-        }
-        Assert-Oracle $output $expected
-        Assert-History $output $expected
-        # A second fresh acquisition checks that all source logical bytes are unchanged.
-        $again = Invoke-Cli @('acquire', $device, (Join-Path $workRoot "unchanged-$sector.E01"))
-        if ($again.verification.sha256 -ne $expected) { throw 'Source media changed' }
-        Dismount-VHD -Path $image
-        $checks.Add("$sector-byte VHDX: geometry, pause, detach, replacement rejection, resume, unchanged media")
-    }
-
-    Test-ActiveRemoval (Join-Path $workRoot 'source-512.vhdx') $expected
-
-    # Format only a new, ownership-checked test VHD to exercise destination overlap.
-    $image = New-OwnedImage 'overlap' 512 128MB
-    $disk = Attach-OwnedImage $image $false
-    $disk = Get-OwnedDisk $image
-    $null = Initialize-Disk -Number $disk.Number -PartitionStyle GPT
-    $disk = Get-OwnedDisk $image
-    $partition = New-Partition -DiskNumber $disk.Number -UseMaximumSize
-    $null = $partition | Format-Volume -FileSystem NTFS -Confirm:$false
-    $mountpoint = Join-Path $workRoot 'mounted'
-    $null = New-Item -ItemType Directory -Path $mountpoint
-    $access = $mountpoint + '\'
-    Assert-OwnedPath $access
-    Add-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber -AccessPath $access
-    $accessPaths.Add(@{ Image = $image; Partition = $partition.PartitionNumber; Path = $access })
-    $collision = Invoke-Cli @('acquire', "\\.\PhysicalDrive$($disk.Number)", (Join-Path $mountpoint 'case.E01')) 1
-    if ($collision.error -notmatch 'destination') { throw 'Expected destination overlap rejection' }
-    if (Get-ChildItem -LiteralPath $mountpoint -Force | Where-Object Name -Like '.case*') { throw 'Overlap created output state' }
-    $checks.Add('mounted-folder destination overlap rejected before state creation')
-
-    # Leave only 8 MiB free on this private NTFS volume. Allocation is performed
-    # by real writes; SetLength alone is not evidence that clusters were consumed.
-    $filler = Join-Path $mountpoint 'filler.bin'
+function Fill-OwnedVolume([string]$Access) {
+    $filler = Join-Path $Access 'filler.bin'
     Assert-OwnedPath $filler
-    $volume = Get-Volume -FilePath $access
-    $fillBytes = [long]$volume.SizeRemaining - 8MB
-    if ($fillBytes -lt 16MB) { throw 'Insufficient private volume capacity for the full-disk test' }
+    $fillBytes = [long](Get-Volume -FilePath $Access).SizeRemaining - 8MB
+    if ($fillBytes -lt 16MB) { throw 'Insufficient private capacity for full-disk acceptance' }
     $stream = [IO.File]::Open($filler, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try {
         $block = [byte[]]::new(65536)
@@ -286,35 +225,193 @@ try {
         }
         $stream.Flush($true)
     } finally { $stream.Dispose() }
-    $output = Join-Path $mountpoint 'full.E01'
-    $failed = Invoke-Cli @('acquire', $raw, $output, '--compression', 'raw', '--chunks-per-segment', '16') 1
-    if ($failed.checkpoint_bytes -le 0 -or $failed.checkpoint_bytes -ge $size -or $failed.error -notmatch '112|disk.*full|space') {
-        throw "Expected actual disk-full failure with retained checkpoint: $($failed | ConvertTo-Json -Compress)"
-    }
-    $null = Invoke-Cli @('checkpoint', 'validate', $output)
-    Assert-OwnedPath $filler
-    Remove-Item -LiteralPath $filler -Force
-    $done = Invoke-Cli @('resume', $output)
-    if ($done.verification.sha256 -ne $expected) { throw 'Disk-full resume changed media' }
-    # Stage verified byte-identical copies on the host filesystem. A WSL oracle
-    # cannot traverse a freshly mounted Windows NTFS volume through DrvFS.
-    if ($EwfExport) {
-        $oracleDirectory = Join-Path $workRoot 'full-oracle'
-        $null = New-Item -ItemType Directory -Path $oracleDirectory
-        foreach ($segment in $done.segments) {
-            Assert-OwnedPath $segment
-            $copy = Join-Path $oracleDirectory ([IO.Path]::GetFileName($segment))
-            Assert-OwnedPath $copy
-            Copy-Item -LiteralPath $segment -Destination $copy
-            if ((Get-FileHash -LiteralPath $segment).Hash -ne (Get-FileHash -LiteralPath $copy).Hash) {
-                throw 'Oracle staging changed segment bytes'
+    return $filler
+}
+
+function Test-SequentialVolumes([string]$Raw, [string]$Expected) {
+    $inputs = Join-Path $workRoot 'logical-input'
+    $null = New-Item -ItemType Directory -Path $inputs
+    Copy-Item -LiteralPath $Raw -Destination (Join-Path $inputs 'source.raw')
+    foreach ($filesystem in @('NTFS', 'exFAT')) {
+        $image = New-OwnedImage "sequential-$filesystem" 512 128MB
+        $null = Attach-OwnedImage $image $false
+        $disk = Get-OwnedDisk $image
+        $null = Initialize-Disk -Number $disk.Number -PartitionStyle GPT
+        $disk = Get-OwnedDisk $image
+        $partition = New-Partition -DiskNumber $disk.Number -UseMaximumSize
+        # Revalidate ownership immediately before formatting.
+        $disk = Get-OwnedDisk $image
+        if ($partition.DiskNumber -ne $disk.Number) { throw 'Partition ownership changed' }
+        $null = Format-Volume -Partition $partition -FileSystem $filesystem -Confirm:$false
+        $mountpoint = Join-Path $workRoot "mounted-$filesystem"
+        $null = New-Item -ItemType Directory -Path $mountpoint
+        $access = $mountpoint + '\'
+        Assert-OwnedPath $access
+        $disk = Get-OwnedDisk $image
+        Add-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber -AccessPath $access
+        $accessPaths.Add(@{ Image = $image; Partition = $partition.PartitionNumber; Path = $access })
+        if ((Get-Volume -FilePath $access).FileSystem -ne $filesystem) { throw 'Unexpected private filesystem' }
+        foreach ($mode in @('Ex01', 'Lx01')) {
+            $command = if ($mode -eq 'Ex01') { 'acquire-sequential' } else { 'collect' }
+            $inputPath = if ($mode -eq 'Ex01') { $Raw } else { $inputs }
+            $output = Join-Path $mountpoint "case.$mode"
+            $filler = Fill-OwnedVolume $access
+            $failed = Invoke-Cli @($command, $inputPath, $output, '--compression', 'raw', '--chunks-per-segment', '32') 1
+            if ((Test-Path -LiteralPath $output) -or $failed.error -notmatch '112|disk.*full|space') {
+                throw "Expected $filesystem $mode capacity failure without publication"
             }
+            Assert-OwnedPath $filler
+            Remove-Item -LiteralPath $filler -Force
+            $null = Invoke-Cli @('recover-publication', $output)
+
+            # Kill only this owned child after a real segment is staged.
+            $stdout = Join-Path $workRoot "$filesystem-$mode-kill.json"
+            $stderr = Join-Path $workRoot "$filesystem-$mode-kill.stderr"
+            $arguments = @('--quiet', $command, $inputPath, $output, '--compression', 'raw', '--chunks-per-segment', '1')
+            $quoted = $arguments | ForEach-Object { '"' + $_ + '"' }
+            $process = Start-Process -FilePath $Binary -ArgumentList $quoted -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            $activeProcesses.Add($process)
+            $journal = Join-Path $mountpoint ".case.$mode.ewf-publication"
+            $staged = Join-Path $journal "new/case.$mode"
+            $deadline = [DateTime]::UtcNow.AddSeconds(60)
+            while (-not (Test-Path -LiteralPath $staged) -or (Get-Item -LiteralPath $staged).Length -lt 32768) {
+                if ($process.HasExited -or [DateTime]::UtcNow -gt $deadline) { throw 'Owned child did not reach staging' }
+                Start-Sleep -Milliseconds 1
+            }
+            if ($process.HasExited -or (Test-Path -LiteralPath (Join-Path $journal 'ready'))) {
+                throw 'Missed pre-publication interruption window'
+            }
+            $process.Kill()
+            if (-not $process.WaitForExit(10000)) { throw 'Owned sequential child did not terminate' }
+            if (Test-Path -LiteralPath $output) { throw 'Interrupted staging exposed final output' }
+            $recovered = Invoke-Cli @('recover-publication', $output)
+            if ($recovered.published -or (Test-Path -LiteralPath $journal)) { throw 'Interrupted transaction did not roll back' }
+
+            $done = Invoke-Cli @($command, $inputPath, $output, '--compression', 'raw', '--chunks-per-segment', '32')
+            if (-not $done.published -or $done.verification.sha256 -ne $Expected -or
+                ($mode -eq 'Lx01' -and $done.verified_files -ne 1)) { throw 'Sequential retry verification differs from source' }
+            $again = Invoke-Cli @('verify', $output)
+            if ($again.verification.sha256 -ne $Expected) { throw 'Reopened sequential output differs from source' }
+            foreach ($segment in $done.segments) {
+                Assert-OwnedPath $segment
+                $segmentParent = [IO.Path]::GetFullPath([IO.Path]::GetDirectoryName($segment)).Replace('\\?\', '')
+                if (-not [string]::Equals($segmentParent, $mountpoint, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected segment location' }
+                Remove-Item -LiteralPath $segment -Force
+            }
+            $checks.Add("$filesystem ${mode}: actual disk full, killed staging, rollback, fresh retry, reopened source SHA256")
         }
-        Assert-Oracle (Join-Path $oracleDirectory 'full.E01') $expected
     }
-    $checks.Add('actual NTFS disk full, retained checkpoint, capacity restoration, verified resume')
-    Assert-History $output $expected
-    $checks.Add('persistent history and consolidated reports across device failures and disk-full resume')
+}
+
+try {
+    $raw = New-SyntheticSource
+    $expected = (Get-FileHash -LiteralPath $raw -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (-not $SequentialOnly) {
+        foreach ($sector in @(512, 4096)) {
+            $image = New-OwnedImage "source-$sector" $sector
+            Initialize-OwnedSource $image $raw
+            $disk = Attach-OwnedImage $image
+            $number = $disk.Number
+            $device = "\\.\PhysicalDrive$number"
+            $output = Join-Path $workRoot "sector-$sector.E01"
+            $wrongSector = if ($sector -eq 512) { 4096 } else { 512 }
+            $wrong = Invoke-Cli @('acquire', $device, (Join-Path $workRoot "wrong-$sector.E01"), '--sector-size', "$wrongSector") 1
+            if ($wrong.error -notmatch 'geometry') { throw "Expected device geometry mismatch: $($wrong.error)" }
+            $paused = Invoke-Cli @('acquire', $device, $output, '--stop-after', '4194304', '--chunks-per-segment', '32') 130
+            if ($paused.checkpoint_bytes -ne 4194304) { throw 'Incorrect checkpoint offset' }
+            Dismount-VHD -Path $image
+            $null = Invoke-Cli @('resume', $output) 1
+            $null = Invoke-Cli @('checkpoint', 'validate', $output)
+            $replacement = New-OwnedImage "replacement-$sector" $sector
+            $other = Attach-OwnedImage $replacement
+            if ($other.Number -ne $number) { throw 'Replacement did not reuse the test disk slot' }
+            $changed = Invoke-Cli @('resume', $output) 1
+            if ($changed.error -notmatch 'identity') { throw 'Expected replacement identity rejection' }
+            Dismount-VHD -Path $replacement
+            $disk = Attach-OwnedImage $image
+            if ($disk.Number -ne $number) { throw 'Source disk number changed during test' }
+            $done = Invoke-Cli @('resume', $output)
+            if ($done.status -ne 'complete' -or $done.verification.sha256 -ne $expected -or $done.source.sector_size -ne $sector) {
+                throw 'Resumed media does not match independent synthetic-source digest and geometry'
+            }
+            Assert-Oracle $output $expected
+            Assert-History $output $expected
+            # A second fresh acquisition checks that all source logical bytes are unchanged.
+            $again = Invoke-Cli @('acquire', $device, (Join-Path $workRoot "unchanged-$sector.E01"))
+            if ($again.verification.sha256 -ne $expected) { throw 'Source media changed' }
+            Dismount-VHD -Path $image
+            $checks.Add("$sector-byte VHDX: geometry, pause, detach, replacement rejection, resume, unchanged media")
+        }
+
+        Test-ActiveRemoval (Join-Path $workRoot 'source-512.vhdx') $expected
+
+        # Format only a new, ownership-checked test VHD to exercise destination overlap.
+        $image = New-OwnedImage 'overlap' 512 128MB
+        $disk = Attach-OwnedImage $image $false
+        $disk = Get-OwnedDisk $image
+        $null = Initialize-Disk -Number $disk.Number -PartitionStyle GPT
+        $disk = Get-OwnedDisk $image
+        $partition = New-Partition -DiskNumber $disk.Number -UseMaximumSize
+        $null = $partition | Format-Volume -FileSystem NTFS -Confirm:$false
+        $mountpoint = Join-Path $workRoot 'mounted'
+        $null = New-Item -ItemType Directory -Path $mountpoint
+        $access = $mountpoint + '\'
+        Assert-OwnedPath $access
+        Add-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber -AccessPath $access
+        $accessPaths.Add(@{ Image = $image; Partition = $partition.PartitionNumber; Path = $access })
+        $collision = Invoke-Cli @('acquire', "\\.\PhysicalDrive$($disk.Number)", (Join-Path $mountpoint 'case.E01')) 1
+        if ($collision.error -notmatch 'destination') { throw 'Expected destination overlap rejection' }
+        if (Get-ChildItem -LiteralPath $mountpoint -Force | Where-Object Name -Like '.case*') { throw 'Overlap created output state' }
+        $checks.Add('mounted-folder destination overlap rejected before state creation')
+
+        # Leave only 8 MiB free on this private NTFS volume. Allocation is performed
+        # by real writes; SetLength alone is not evidence that clusters were consumed.
+        $filler = Join-Path $mountpoint 'filler.bin'
+        Assert-OwnedPath $filler
+        $volume = Get-Volume -FilePath $access
+        $fillBytes = [long]$volume.SizeRemaining - 8MB
+        if ($fillBytes -lt 16MB) { throw 'Insufficient private volume capacity for the full-disk test' }
+        $stream = [IO.File]::Open($filler, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $block = [byte[]]::new(65536)
+            while ($fillBytes -gt 0) {
+                $count = [int][Math]::Min($fillBytes, $block.Length)
+                $stream.Write($block, 0, $count)
+                $fillBytes -= $count
+            }
+            $stream.Flush($true)
+        } finally { $stream.Dispose() }
+        $output = Join-Path $mountpoint 'full.E01'
+        $failed = Invoke-Cli @('acquire', $raw, $output, '--compression', 'raw', '--chunks-per-segment', '16') 1
+        if ($failed.checkpoint_bytes -le 0 -or $failed.checkpoint_bytes -ge $size -or $failed.error -notmatch '112|disk.*full|space') {
+            throw "Expected actual disk-full failure with retained checkpoint: $($failed | ConvertTo-Json -Compress)"
+        }
+        $null = Invoke-Cli @('checkpoint', 'validate', $output)
+        Assert-OwnedPath $filler
+        Remove-Item -LiteralPath $filler -Force
+        $done = Invoke-Cli @('resume', $output)
+        if ($done.verification.sha256 -ne $expected) { throw 'Disk-full resume changed media' }
+        # Stage verified byte-identical copies on the host filesystem. A WSL oracle
+        # cannot traverse a freshly mounted Windows NTFS volume through DrvFS.
+        if ($EwfExport) {
+            $oracleDirectory = Join-Path $workRoot 'full-oracle'
+            $null = New-Item -ItemType Directory -Path $oracleDirectory
+            foreach ($segment in $done.segments) {
+                Assert-OwnedPath $segment
+                $copy = Join-Path $oracleDirectory ([IO.Path]::GetFileName($segment))
+                Assert-OwnedPath $copy
+                Copy-Item -LiteralPath $segment -Destination $copy
+                if ((Get-FileHash -LiteralPath $segment).Hash -ne (Get-FileHash -LiteralPath $copy).Hash) {
+                    throw 'Oracle staging changed segment bytes'
+                }
+            }
+            Assert-Oracle (Join-Path $oracleDirectory 'full.E01') $expected
+        }
+        $checks.Add('actual NTFS disk full, retained checkpoint, capacity restoration, verified resume')
+        Assert-History $output $expected
+        $checks.Add('persistent history and consolidated reports across device failures and disk-full resume')
+    }
+    Test-SequentialVolumes $raw $expected
 } finally {
     # Cleanup uses only recorded images, and validates all paths before deletion.
     # Any cleanup failure retains the workspace instead of deleting attached files.
@@ -345,4 +442,4 @@ try {
         throw
     }
 }
-@{ schema_version = 1; status = 'passed'; checks = $checks.ToArray(); oracle_validation = $(if ($EwfExport) { 'passed' } else { 'not_run' }) } | ConvertTo-Json -Depth 5
+@{ schema_version = 1; status = 'passed'; checks = $checks.ToArray(); sequential_oracle_validation = 'not_run'; oracle_validation = $(if ($EwfExport -and -not $SequentialOnly) { 'passed' } else { 'not_run' }) } | ConvertTo-Json -Depth 5
