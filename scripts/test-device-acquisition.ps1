@@ -19,6 +19,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+. (Join-Path $PSScriptRoot 'assert-ewf2-oracle.ps1')
 $Binary = (Resolve-Path -LiteralPath $Binary).ProviderPath
 $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
 $missing = @('New-VHD', 'Mount-VHD', 'Dismount-VHD', 'Get-VHD', 'Get-Disk', 'Get-Volume',
@@ -232,6 +233,9 @@ function Test-SequentialVolumes([string]$Raw, [string]$Expected) {
     $inputs = Join-Path $workRoot 'logical-input'
     $null = New-Item -ItemType Directory -Path $inputs
     Copy-Item -LiteralPath $Raw -Destination (Join-Path $inputs 'source.raw')
+    $null = New-Item -ItemType Directory -Path (Join-Path $inputs 'folder')
+    [IO.File]::WriteAllBytes((Join-Path $inputs 'folder/empty.bin'), [byte[]]::new(0))
+    $logicalHashes = @{ 'source.raw' = $Expected; 'folder/empty.bin' = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' }
     foreach ($filesystem in @('NTFS', 'exFAT')) {
         $image = New-OwnedImage "sequential-$filesystem" 512 128MB
         $null = Attach-OwnedImage $image $false
@@ -289,9 +293,19 @@ function Test-SequentialVolumes([string]$Raw, [string]$Expected) {
 
             $done = Invoke-Cli @($command, $inputPath, $output, '--compression', 'raw', '--chunks-per-segment', '32')
             if (-not $done.published -or $done.verification.sha256 -ne $Expected -or
-                ($mode -eq 'Lx01' -and $done.verified_files -ne 1)) { throw 'Sequential retry verification differs from source' }
+                ($mode -eq 'Lx01' -and $done.verified_files -ne 2)) { throw 'Sequential retry verification differs from source' }
             $again = Invoke-Cli @('verify', $output)
             if ($again.verification.sha256 -ne $Expected) { throw 'Reopened sequential output differs from source' }
+            if ($EwfExport) {
+                $oracleDirectory = Join-Path $workRoot "oracle-$filesystem-$mode"
+                Assert-OwnedPath $oracleDirectory
+                foreach ($segment in $done.segments) { Assert-OwnedPath $segment }
+                $parameters = @{ Segments = $done.segments; StagingDirectory = $oracleDirectory; EwfExport = $EwfExport; EwfVerify = $EwfVerify }
+                if ($mode -eq 'Ex01') { $parameters.PhysicalSha256 = $Expected }
+                else { $parameters.LogicalHashes = $logicalHashes }
+                $null = Assert-Ewf2Oracle @parameters
+                $checks.Add("$filesystem ${mode}: pinned libewf export source comparison and ewfverify")
+            }
             foreach ($segment in $done.segments) {
                 Assert-OwnedPath $segment
                 $segmentParent = [IO.Path]::GetFullPath([IO.Path]::GetDirectoryName($segment)).Replace('\\?\', '')
@@ -442,4 +456,4 @@ try {
         throw
     }
 }
-@{ schema_version = 1; status = 'passed'; checks = $checks.ToArray(); sequential_oracle_validation = 'not_run'; oracle_validation = $(if ($EwfExport -and -not $SequentialOnly) { 'passed' } else { 'not_run' }) } | ConvertTo-Json -Depth 5
+@{ schema_version = 1; status = 'passed'; checks = $checks.ToArray(); sequential_oracle_validation = $(if ($EwfExport) { 'passed' } else { 'not_run' }); oracle_validation = $(if ($EwfExport -and -not $SequentialOnly) { 'passed' } else { 'not_run' }) } | ConvertTo-Json -Depth 5
