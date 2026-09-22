@@ -27,7 +27,11 @@ fn published_sync_error_keeps_path_and_verifiable_result() {
     let path = dir.path().join("case.aff4");
     let writer = writer(&path);
     FAIL_DIRECTORY_SYNC.set(true);
-    let outcome = writer.finish();
+    let outcome =
+        writer.finish_verified(
+            crate::Limits::default(),
+            |_, _, _| ControlFlow::Continue(()),
+        );
     FAIL_DIRECTORY_SYNC.set(false);
     let Err(Error::PublishedButUnsynced { result, .. }) = outcome else {
         panic!("expected published outcome");
@@ -43,6 +47,36 @@ fn published_sync_error_keeps_path_and_verifiable_result() {
             .all_match()
     );
     assert!(Writer::create(&path, Profile::Physical, WriteOptions::default()).is_err());
+}
+
+#[test]
+fn verified_finish_cancellation_and_late_collision_preserve_destination() {
+    for cancel_at in ["staged verification", "before publication"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("case.aff4");
+        let outcome = Writer::create(&path, Profile::Logical, WriteOptions::default())
+            .unwrap()
+            .finish_verified(crate::Limits::default(), |phase, _, _| {
+                if phase == cancel_at {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            });
+        assert!(matches!(outcome, Err(Error::Aborted)));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("case.aff4");
+    let outcome = writer(&path).finish_verified(crate::Limits::default(), |phase, _, _| {
+        if phase == "before publication" {
+            fs::write(&path, b"other owner").unwrap();
+        }
+        ControlFlow::Continue(())
+    });
+    assert!(matches!(outcome, Err(Error::Io(_))));
+    assert_eq!(fs::read(&path).unwrap(), b"other owner");
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
 }
 
 #[test]

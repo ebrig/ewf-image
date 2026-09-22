@@ -20,9 +20,81 @@ fn progress(_: u64, _: u64) -> ControlFlow<()> {
 #[derive(Parser)]
 #[command(about = "Inspect, verify, collect, and extract AFF4 evidence; JSON output")]
 struct Args {
+    #[command(flatten)]
+    limits: LimitArgs,
     #[command(subcommand)]
     command: Command,
 }
+/// Explicit resource budgets shared by all read and collect operations.
+#[derive(clap::Args)]
+struct LimitArgs {
+    #[arg(
+        long = "limit-directory-bytes",
+        global = true,
+        help = "Override directory_bytes reader budget"
+    )]
+    directory_bytes: Option<u64>,
+    #[arg(
+        long = "limit-archive-entries",
+        global = true,
+        help = "Override archive_entries reader budget"
+    )]
+    archive_entries: Option<usize>,
+    #[arg(
+        long = "limit-metadata-bytes",
+        global = true,
+        help = "Override metadata_bytes reader budget"
+    )]
+    metadata_bytes: Option<u64>,
+    #[arg(
+        long = "limit-member-bytes",
+        global = true,
+        help = "Override member_bytes reader budget"
+    )]
+    member_bytes: Option<u64>,
+    #[arg(
+        long = "limit-chunk-bytes",
+        global = true,
+        help = "Override chunk_bytes reader budget"
+    )]
+    chunk_bytes: Option<u64>,
+    #[arg(
+        long = "limit-triples",
+        global = true,
+        help = "Override triples reader budget"
+    )]
+    triples: Option<usize>,
+    #[arg(
+        long = "limit-map-bytes",
+        global = true,
+        help = "Override map_bytes reader budget"
+    )]
+    map_bytes: Option<usize>,
+    #[arg(
+        long = "limit-verification-bytes",
+        global = true,
+        help = "Override verification_bytes reader budget"
+    )]
+    verification_bytes: Option<u64>,
+}
+impl LimitArgs {
+    fn resolve(self) -> Limits {
+        let defaults = Limits::default();
+        Limits {
+            directory_bytes: self.directory_bytes.unwrap_or(defaults.directory_bytes),
+            archive_entries: self.archive_entries.unwrap_or(defaults.archive_entries),
+            metadata_bytes: self.metadata_bytes.unwrap_or(defaults.metadata_bytes),
+            member_bytes: self.member_bytes.unwrap_or(defaults.member_bytes),
+            chunk_bytes: self.chunk_bytes.unwrap_or(defaults.chunk_bytes),
+            triples: self.triples.unwrap_or(defaults.triples),
+            map_bytes: self.map_bytes.unwrap_or(defaults.map_bytes),
+            verification_bytes: self
+                .verification_bytes
+                .unwrap_or(defaults.verification_bytes),
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// List explicitly selectable resources.
@@ -73,30 +145,30 @@ enum Command {
 }
 
 fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
+    let limits = args.limits.resolve();
     match args.command {
         Command::Info { image } => {
-            let container = Container::open(image)?;
+            let container = Container::open_with_limits(image, limits)?;
             println!(
                 "{}",
                 json!({"version": container.version(), "volume": container.volume_id(), "resources": container.streams()?})
             );
         }
         Command::Metadata { image } => {
-            let result =
-                Container::scan_metadata(image, Limits::default(), |member, subject, property| {
-                    println!(
-                        "{}",
-                        json!({"member":member,"subject":subject,"property":property})
-                    );
-                    progress(0, 0)
-                })?;
+            let result = Container::scan_metadata(image, limits, |member, subject, property| {
+                println!(
+                    "{}",
+                    json!({"member":member,"subject":subject,"property":property})
+                );
+                progress(0, 0)
+            })?;
             println!("{}", json!({"summary":result}));
         }
         Command::Verify {
             image,
             expected_metadata_sha256,
         } => {
-            let result = Container::open(image)?
+            let result = Container::open_with_limits(image, limits)?
                 .verify_all(expected_metadata_sha256.as_deref(), |_, done, total| {
                     progress(done, total)
                 })?;
@@ -112,7 +184,7 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
             full,
         } => {
             if full {
-                let result = VolumeSet::open(&volumes)?.verify_full(
+                let result = VolumeSet::open_with_limits(&volumes, limits)?.verify_full(
                     &image,
                     expected_image_sha256.as_deref(),
                     |_, done, total| progress(done, total),
@@ -134,7 +206,7 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
                     4
                 });
             }
-            let result = VolumeSet::open(&volumes)?.verify_image(
+            let result = VolumeSet::open_with_limits(&volumes, limits)?.verify_image(
                 &image,
                 expected_image_sha256.as_deref(),
                 progress,
@@ -177,29 +249,24 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
             if progress(0, 0).is_break() {
                 return Err(aff4_image::Error::Aborted.into());
             }
-            let written = match writer.finish() {
-                Ok(written) => written,
+            let (written, verification) = match writer
+                .finish_verified(limits.clone(), |_, done, total| progress(done, total))
+            {
+                Ok(value) => value,
                 Err(aff4_image::Error::PublishedButUnsynced { result, source }) => {
                     println!(
                         "{}",
                         json!({"published":true,"output":result,"collection":collection,
-                        "durability_error":source.to_string(),"verification":"not started"})
+                        "limits":limits,"durability_error":source.to_string(),
+                        "verification_scope":"finalized staged container","verification_passed":true})
                     );
                     return Ok(4);
                 }
-                Err(error) => return Err(error.into()),
-            };
-            let verification = Container::open(&written.path).and_then(|mut container| {
-                container.verify_all(Some(&written.metadata_sha256), |_, done, total| {
-                    progress(done, total)
-                })
-            });
-            let verification = match verification {
-                Ok(value) => value,
                 Err(error) => {
                     println!(
                         "{}",
-                        json!({"published":true,"output":written,"collection":collection,"verification_error":error.to_string()})
+                        json!({"published":false,"collection":collection,"limits":limits,
+                        "phase":"finalize and verify before publication","verification_error":error.to_string()})
                     );
                     return Ok(if matches!(error, aff4_image::Error::Aborted) {
                         130
@@ -211,7 +278,8 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
             let complete = verification.all_match() && collection.issues.is_empty();
             println!(
                 "{}",
-                json!({"published":true,"output":written,"collection":collection,"verification":verification})
+                json!({"published":true,"output":written,"collection":collection,"verification":verification,"limits":limits,
+                "verification_scope":"finalized staged container"})
             );
             if !complete {
                 return Ok(4);
@@ -222,7 +290,7 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
             resource,
             output,
         } => {
-            let mut container = Container::open(image)?;
+            let mut container = Container::open_with_limits(image, limits)?;
             let filename = output.file_name().ok_or("missing output name")?;
             #[cfg(windows)]
             if filename.to_string_lossy().contains(':') {

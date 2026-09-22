@@ -453,7 +453,40 @@ impl Writer {
     /// Unix additionally synchronizes the parent directory. This API does not
     /// certify power-loss durability on every filesystem or device.
     /// `Error::PublishedButUnsynced` retains the result if that last sync fails.
-    pub fn finish(mut self) -> Result<WriteResult> {
+    pub fn finish(self) -> Result<WriteResult> {
+        self.finish_checked(|_, _| Ok(()))
+            .map(|(result, ())| result)
+    }
+
+    /// Verifies the finalized temporary container under explicit reader budgets
+    /// before exclusive publication. Limit, integrity, or cancellation failures
+    /// remove the temporary file and leave the destination absent.
+    /// `PublishedButUnsynced` means verification passed but directory sync failed.
+    pub fn finish_verified(
+        self,
+        limits: crate::Limits,
+        mut progress: impl FnMut(&str, u64, u64) -> ControlFlow<()>,
+    ) -> Result<(WriteResult, crate::ContainerVerification)> {
+        self.finish_checked(|path, digest| {
+            if progress("staged verification", 0, 0).is_break() {
+                return Err(Error::Aborted);
+            }
+            let verification = crate::Container::open_with_limits(path, limits)?
+                .verify_all(Some(digest), &mut progress)?;
+            if !verification.all_match() {
+                return Err(malformed("staged container verification failed"));
+            }
+            if progress("before publication", 0, 0).is_break() {
+                return Err(Error::Aborted);
+            }
+            Ok(verification)
+        })
+    }
+
+    fn finish_checked<T>(
+        mut self,
+        check: impl FnOnce(&Path, &str) -> Result<T>,
+    ) -> Result<(WriteResult, T)> {
         self.healthy()?;
         self.finish_logical_metadata();
         let mut zip = self.zip.take().unwrap();
@@ -473,6 +506,7 @@ impl Writer {
         drop(file);
         #[cfg(test)]
         failure_tests::boundary("file_synced");
+        let checked = check(self.temporary.path(), &metadata_sha256)?;
         self.temporary
             .persist_noclobber(&self.path)
             .map_err(|error| Error::Io(error.error))?;
@@ -493,7 +527,7 @@ impl Writer {
         })?;
         #[cfg(test)]
         failure_tests::boundary("directory_synced");
-        Ok(result)
+        Ok((result, checked))
     }
 
     fn healthy(&self) -> Result<()> {
