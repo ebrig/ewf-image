@@ -2,6 +2,9 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 #[path = "collect.rs"]
 mod collect;
+#[path = "collection_budget.rs"]
+mod collection_budget;
+pub use collection_budget::CollectionLimits;
 #[path = "logical_metadata.rs"]
 mod logical_metadata;
 pub use collect::{CollectionIssue, CollectionOptions, CollectionReport};
@@ -100,6 +103,7 @@ pub struct Writer {
     volume: String,
     options: WriteOptions,
     metadata: String,
+    archive_entries: u64,
     streams: Vec<AcquiredStream>,
     poisoned: bool,
     logical_zip_threshold: u64,
@@ -173,6 +177,7 @@ impl Writer {
             volume,
             options,
             metadata,
+            archive_entries: 2,
             streams: Vec::new(),
             poisoned: false,
             logical_zip_threshold: 1024 * 1024,
@@ -219,6 +224,16 @@ impl Writer {
         extra_properties: &str,
     ) -> Result<String> {
         self.poisoned = true;
+        let entries = size
+            .div_ceil(u64::from(self.options.chunk_bytes))
+            .div_ceil(u64::from(self.options.chunks_per_bevy))
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(if logical_path.is_some() { 0 } else { 2 }))
+            .ok_or_else(|| malformed("archive entry count overflow"))?;
+        self.archive_entries = self
+            .archive_entries
+            .checked_add(entries)
+            .ok_or_else(|| malformed("archive entry count overflow"))?;
         let id = if logical_path.is_some() {
             format!("{}/files/{}", self.volume, uuid::Uuid::new_v4())
         } else {
@@ -419,6 +434,10 @@ impl Writer {
         } else {
             zip::CompressionMethod::Deflated
         };
+        self.archive_entries = self
+            .archive_entries
+            .checked_add(1)
+            .ok_or_else(|| malformed("archive entry count overflow"))?;
         zip.start_file(&storage, stored().compression_method(method))?;
         let mut hashes = Hashes::new();
         let mut buffer = vec![0; 1024 * 1024];

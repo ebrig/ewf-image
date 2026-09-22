@@ -34,6 +34,39 @@ pub struct CollectionReport {
     pub issues: Vec<CollectionIssue>,
 }
 
+pub(super) fn issue_metadata(issue: &CollectionIssue) -> String {
+    format!(
+        "; a:collectionIssue {}",
+        oxrdf::Literal::new_simple_literal(format!("{}: {}", issue.path.display(), issue.reason))
+    )
+}
+
+pub(super) fn task_metadata(report: &CollectionReport) -> String {
+    let task = identifier();
+    let notes = oxrdf::Literal::new_simple_literal(
+        "Portable local collection; links not followed; cross-file snapshot consistency, automatic ADS/xattr/ACL capture not provided",
+    );
+    let mut text = format!(
+        "<{task}> a a:LogicalAcquisitionTask; a:notes {notes}; a:filesCollected {}; a:bytesCollected {}",
+        report.files, report.bytes
+    );
+    for issue in &report.issues {
+        text.push_str(&issue_metadata(issue));
+    }
+    text.push_str(" .\n");
+    text
+}
+
+fn record_issue(
+    report: &mut CollectionReport,
+    budget: &mut collection_budget::Budget<'_>,
+    issue: CollectionIssue,
+) -> Result<()> {
+    budget.issue(&issue)?;
+    report.issues.push(issue);
+    Ok(())
+}
+
 fn timestamp(value: std::io::Result<SystemTime>) -> Option<i128> {
     value
         .ok()
@@ -143,6 +176,20 @@ impl Writer {
         &mut self,
         root: impl AsRef<Path>,
         options: &CollectionOptions,
+        progress: impl FnMut(&Path, u64, u64) -> ControlFlow<()>,
+    ) -> Result<CollectionReport> {
+        self.add_directory_tree_with_limits(root, options, &CollectionLimits::default(), progress)
+    }
+
+    /// Collects with explicit discovery and incremental metadata/entry budgets.
+    /// Limits include excluded/skipped entries and deferred hierarchy/issue records.
+    /// Budget failures poison the writer even when partial collection is allowed.
+    /// Use the same reader limits with `finish_verified` for the full ZIP checks.
+    pub fn add_directory_tree_with_limits(
+        &mut self,
+        root: impl AsRef<Path>,
+        options: &CollectionOptions,
+        limits: &CollectionLimits,
         mut progress: impl FnMut(&Path, u64, u64) -> ControlFlow<()>,
     ) -> Result<CollectionReport> {
         self.logical_parent(None)?;
@@ -175,9 +222,11 @@ impl Writer {
             }
         }
         let operation = (|| {
+            let mut budget = collection_budget::Budget::new(self, limits)?;
+            budget.discover(0)?;
             let mut report = CollectionReport::default();
-            let mut pending = vec![(root.clone(), None)];
-            while let Some((path, parent)) = pending.pop() {
+            let mut pending = vec![(root.clone(), None, 0usize)];
+            while let Some((path, parent, depth)) = pending.pop() {
                 if progress(&path, 0, 0).is_break() {
                     return Err(Error::Aborted);
                 }
@@ -185,19 +234,27 @@ impl Writer {
                     .strip_prefix(&root)
                     .map_err(|_| malformed("source escaped root"))?;
                 if options.exclude.iter().any(|p| relative.starts_with(p)) {
-                    report.issues.push(CollectionIssue {
-                        path,
-                        reason: "excluded by collection policy".into(),
-                    });
+                    record_issue(
+                        &mut report,
+                        &mut budget,
+                        CollectionIssue {
+                            path,
+                            reason: "excluded by collection policy".into(),
+                        },
+                    )?;
                     continue;
                 }
                 let discovered = match fs::symlink_metadata(&path) {
                     Ok(meta) => meta,
                     Err(e) if options.allow_partial => {
-                        report.issues.push(CollectionIssue {
-                            path,
-                            reason: e.to_string(),
-                        });
+                        record_issue(
+                            &mut report,
+                            &mut budget,
+                            CollectionIssue {
+                                path,
+                                reason: e.to_string(),
+                            },
+                        )?;
                         continue;
                     }
                     Err(e) => return Err(e.into()),
@@ -217,31 +274,52 @@ impl Writer {
                     if !options.allow_partial {
                         return Err(Error::Unsupported(format!("{}: {reason}", path.display())));
                     }
-                    report.issues.push(CollectionIssue {
-                        path,
-                        reason: reason.into(),
-                    });
+                    record_issue(
+                        &mut report,
+                        &mut budget,
+                        CollectionIssue {
+                            path,
+                            reason: reason.into(),
+                        },
+                    )?;
                     continue;
                 }
                 if discovered.is_dir() {
-                    let id = self.add_folder(&source_metadata(&path, &discovered, parent)?)?;
+                    let id =
+                        self.add_folder(&source_metadata(&path, &discovered, parent.clone())?)?;
+                    budget.added(self, &id, true, parent.as_deref())?;
                     report.folders += 1;
-                    let children = fs::read_dir(&path).and_then(|entries| {
-                        entries
-                            .map(|e| e.map(|e| e.path()))
-                            .collect::<std::io::Result<Vec<_>>>()
-                    });
+                    let children = (|| -> Result<Vec<PathBuf>> {
+                        let mut children = Vec::new();
+                        for entry in fs::read_dir(&path)? {
+                            if progress(&path, 0, 0).is_break() {
+                                return Err(Error::Aborted);
+                            }
+                            let entry = entry?;
+                            budget.discover(depth + 1)?;
+                            children.push(entry.path());
+                        }
+                        Ok(children)
+                    })();
                     match children {
                         Ok(mut children) => {
                             children.sort();
-                            pending
-                                .extend(children.into_iter().rev().map(|p| (p, Some(id.clone()))));
+                            pending.extend(
+                                children
+                                    .into_iter()
+                                    .rev()
+                                    .map(|p| (p, Some(id.clone()), depth + 1)),
+                            );
                         }
-                        Err(e) if options.allow_partial => report.issues.push(CollectionIssue {
-                            path,
-                            reason: e.to_string(),
-                        }),
-                        Err(e) => return Err(e.into()),
+                        Err(Error::Io(e)) if options.allow_partial => record_issue(
+                            &mut report,
+                            &mut budget,
+                            CollectionIssue {
+                                path,
+                                reason: e.to_string(),
+                            },
+                        )?,
+                        Err(e) => return Err(e),
                     }
                 } else {
                     let mut file = open_regular(&path)?;
@@ -249,12 +327,14 @@ impl Writer {
                     if !same_source(&discovered, &before) {
                         return Err(malformed("source changed before opening"));
                     }
-                    self.add_file_with_metadata(
-                        &source_metadata(&path, &before, parent)?,
+                    budget.file(self, Some(before.len()))?;
+                    let id = self.add_file_with_metadata(
+                        &source_metadata(&path, &before, parent.clone())?,
                         before.len(),
                         &mut file,
                         |done, size| progress(&path, done, size),
                     )?;
+                    budget.added(self, &id, false, parent.as_deref())?;
                     let after = file.metadata()?;
                     if !same_source(&before, &after) {
                         return Err(malformed(format!(
@@ -263,19 +343,13 @@ impl Writer {
                         )));
                     }
                     report.files += 1;
-                    report.bytes += before.len();
+                    report.bytes = report
+                        .bytes
+                        .checked_add(before.len())
+                        .ok_or_else(|| malformed("collection byte count overflow"))?;
                 }
             }
-            let task = identifier();
-            let literal = |s: &str| oxrdf::Literal::new_simple_literal(s).to_string();
-            self.metadata.push_str(&format!("<{task}> a a:LogicalAcquisitionTask; a:notes {}; a:filesCollected {}; a:bytesCollected {}", literal("Portable local collection; links not followed; cross-file snapshot consistency, automatic ADS/xattr/ACL capture not provided"), report.files, report.bytes));
-            for issue in &report.issues {
-                self.metadata.push_str(&format!(
-                    "; a:collectionIssue {}",
-                    literal(&format!("{}: {}", issue.path.display(), issue.reason))
-                ));
-            }
-            self.metadata.push_str(" .\n");
+            self.metadata.push_str(&task_metadata(&report));
             Ok(report)
         })();
         if operation.is_err() {

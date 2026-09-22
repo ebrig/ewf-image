@@ -17,8 +17,9 @@ pub use reader::{
     SetVolumeVerification, StreamInfo, Verification, VolumeSet, VolumeSource,
 };
 pub use writer::{
-    AcquiredStream, CaseMetadata, CollectionIssue, CollectionOptions, CollectionReport,
-    Compression, LogicalMetadata, Profile, SubstreamKind, WriteOptions, WriteResult, Writer,
+    AcquiredStream, CaseMetadata, CollectionIssue, CollectionLimits, CollectionOptions,
+    CollectionReport, Compression, LogicalMetadata, Profile, SubstreamKind, WriteOptions,
+    WriteResult, Writer,
 };
 
 /// AFF4 operation result.
@@ -27,6 +28,16 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Malformed, unsupported, cancelled, or unreadable evidence.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Collection stopped before exceeding an explicit resource budget.
+    #[error("AFF4 collection limit {resource}: requires {required}, limit {limit}")]
+    ResourceLimit {
+        /// Budget name, matching the CLI report.
+        resource: &'static str,
+        /// Required bytes or count, including reserved final metadata.
+        required: u64,
+        /// Configured maximum bytes or count.
+        limit: u64,
+    },
     /// Backing I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),

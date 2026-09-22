@@ -1,6 +1,7 @@
 //! AFF4 inventory, verification, local collection, and selective extraction.
 use aff4_image::{
-    CaseMetadata, CollectionOptions, Container, Limits, Profile, VolumeSet, WriteOptions, Writer,
+    CaseMetadata, CollectionLimits, CollectionOptions, Container, Limits, Profile, VolumeSet,
+    WriteOptions, Writer,
 };
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -127,6 +128,12 @@ enum Command {
         exclude: Vec<PathBuf>,
         #[arg(long)]
         allow_partial: bool,
+        /// Bound discovered entries, including root, excluded and skipped entries.
+        #[arg(long, default_value_t = 100_000)]
+        limit_collection_entries: usize,
+        /// Bound directory depth; root has depth zero.
+        #[arg(long, default_value_t = 127)]
+        limit_collection_depth: usize,
         #[arg(long, default_value = "")]
         case_number: String,
         #[arg(long, default_value = "")]
@@ -226,6 +233,8 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
             output,
             exclude,
             allow_partial,
+            limit_collection_entries,
+            limit_collection_depth,
             case_number,
             evidence_number,
             examiner,
@@ -238,14 +247,42 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
                 examiner,
                 notes,
             })?;
-            let collection = writer.add_directory_tree(
+            let collection_limits = CollectionLimits {
+                reader: limits.clone(),
+                entries: limit_collection_entries,
+                depth: limit_collection_depth,
+            };
+            let collection = writer.add_directory_tree_with_limits(
                 source,
                 &CollectionOptions {
                     exclude,
                     allow_partial,
                 },
+                &collection_limits,
                 |_, done, total| progress(done, total),
-            )?;
+            );
+            let collection = match collection {
+                Ok(value) => value,
+                Err(error) => {
+                    let limit_error = match &error {
+                        aff4_image::Error::ResourceLimit {
+                            resource,
+                            required,
+                            limit,
+                        } => Some(json!({"resource":resource,"required":required,"limit":limit})),
+                        _ => None,
+                    };
+                    println!(
+                        "{}",
+                        json!({"published":false,"phase":"collection","error":error.to_string(),"limit_error":limit_error,"limits":limits,"collection_limits":collection_limits})
+                    );
+                    return Ok(match error {
+                        aff4_image::Error::Aborted => 130,
+                        aff4_image::Error::ResourceLimit { .. } => 4,
+                        _ => 1,
+                    });
+                }
+            };
             if progress(0, 0).is_break() {
                 return Err(aff4_image::Error::Aborted.into());
             }
@@ -257,7 +294,7 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
                     println!(
                         "{}",
                         json!({"published":true,"output":result,"collection":collection,
-                        "limits":limits,"durability_error":source.to_string(),
+                        "limits":limits,"collection_limits":collection_limits,"durability_error":source.to_string(),
                         "verification_scope":"finalized staged container","verification_passed":true})
                     );
                     return Ok(4);
@@ -265,7 +302,7 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
                 Err(error) => {
                     println!(
                         "{}",
-                        json!({"published":false,"collection":collection,"limits":limits,
+                        json!({"published":false,"collection":collection,"limits":limits,"collection_limits":collection_limits,
                         "phase":"finalize and verify before publication","verification_error":error.to_string()})
                     );
                     return Ok(if matches!(error, aff4_image::Error::Aborted) {
@@ -278,7 +315,7 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
             let complete = verification.all_match() && collection.issues.is_empty();
             println!(
                 "{}",
-                json!({"published":true,"output":written,"collection":collection,"verification":verification,"limits":limits,
+                json!({"published":true,"output":written,"collection":collection,"verification":verification,"limits":limits,"collection_limits":collection_limits,
                 "verification_scope":"finalized staged container"})
             );
             if !complete {

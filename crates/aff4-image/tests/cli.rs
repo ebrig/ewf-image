@@ -28,11 +28,21 @@ fn collection_limit_failure_never_publishes_and_explicit_budget_allows_retry() {
         ["--limit-archive-entries", "1"],
         ["--limit-directory-bytes", "1"],
         ["--limit-verification-bytes", "1"],
+        ["--limit-collection-entries", "1"],
+        ["--limit-collection-depth", "0"],
     ] {
         let result = collect(&source, &output, &limits);
         assert_eq!(result.status.code(), Some(4), "{result:?}");
         let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_eq!(report["published"], false);
+        if limits[0] != "--limit-directory-bytes" {
+            assert_eq!(report["phase"], "collection");
+            assert!(report["limit_error"]["resource"].is_string());
+            assert!(
+                report["limit_error"]["required"].as_u64().unwrap()
+                    > report["limit_error"]["limit"].as_u64().unwrap()
+            );
+        }
         assert!(!output.exists());
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
     }
