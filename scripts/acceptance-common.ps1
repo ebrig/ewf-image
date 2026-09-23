@@ -10,6 +10,26 @@ function Add-AcceptanceSkip($Manifest, [string]$Directory, [string]$Name, [strin
     Save-AcceptanceManifest $Manifest $Directory
 }
 
+function Set-AcceptanceToolVersion($Manifest, [string]$Directory, [string]$Name, [string]$Program, $Record) {
+    $tool = @{ status = $Record.status; program = $Program; stdout = $Record.stdout; stderr = $Record.stderr }
+    if ($Record.status -eq 'passed') {
+        $parts = foreach ($stream in @('stdout', 'stderr')) {
+            if ($Record[$stream]) {
+                $reader = [IO.File]::OpenText((Join-Path $Directory $Record[$stream].path))
+                try {
+                    $buffer = [char[]]::new(4096)
+                    $count = $reader.ReadBlock($buffer, 0, $buffer.Length)
+                    if ($count) { [string]::new($buffer, 0, $count) }
+                } finally { $reader.Dispose() }
+            }
+        }
+        $tool.version = ($parts -join "`n").Trim()
+        $tool.version_available = [bool]$tool.version
+    }
+    $Manifest.tools[$Name] = $tool
+    Save-AcceptanceManifest $Manifest $Directory
+}
+
 function Invoke-AcceptanceCheck {
     param(
         $Manifest, [string]$Directory, [string]$Name, [string]$Program,

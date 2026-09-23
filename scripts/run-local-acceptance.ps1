@@ -61,11 +61,7 @@ function Check([string]$Name, [string]$Program, [string[]]$Arguments, [hashtable
 }
 function Version([string]$Name, [string]$Program, [string[]]$Arguments) {
     $result = Check "version-$Name" $Program $Arguments $buildEnvironment
-    $manifest.tools[$Name] = @{ status = $result.status; program = $Program; log = $result.stdout }
-    if ($result.status -eq 'passed') {
-        $text = Get-Content -LiteralPath (Join-Path $output $result.stdout.path) -Raw
-        $manifest.tools[$Name].version = $text.Substring(0, [Math]::Min($text.Length, 4096)).Trim()
-    }
+    Set-AcceptanceToolVersion $manifest $output $Name $Program $result
     return $result
 }
 function Wsl-Check([string]$Name, [string[]]$Arguments) {
@@ -143,7 +139,10 @@ try {
         Copy-Item -LiteralPath (Join-Path $build "release/aff4-image$suffix") -Destination $artifactDirectory
         Copy-Item -LiteralPath (Join-Path $build "release/examples/acquire$suffix") -Destination (Join-Path $artifactDirectory "aff4-acquire$suffix")
     }
-} catch { $manifest.runner_error = $_.Exception.Message }
+} catch {
+    $manifest.runner_error = $_.Exception.Message
+    $manifest.runner_error_location = $_.InvocationInfo.PositionMessage
+}
 finally {
     try {
         $manifest.source_end = Get-SourceState
