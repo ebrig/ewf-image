@@ -103,6 +103,36 @@ fn discovery_groups_by_identity_from_either_volume_and_reopens() {
 }
 
 #[test]
+fn discovery_keeps_each_primary_and_cursor_in_a_shared_set() {
+    use std::io::Read;
+    let dir = tempfile::tempdir().unwrap();
+    let companion = format!(
+        "{COMPANION}\n<aff4://v2/disk> a <http://aff4.org/Schema#DiskImage>; <http://aff4.org/Schema#dataStream> <aff4://v2/b> ."
+    );
+    let paths = pair(
+        dir.path(),
+        PRIMARY,
+        &companion,
+        &[map(0, 4, 0, 0), map(4, 4, 0, 1)].concat(),
+    );
+    let mut readers = aff4_image::DiskImageSet::discover(&paths[..1], &paths[1..])
+        .unwrap()
+        .into_readers();
+    assert_eq!(readers.len(), 2);
+    let mut bytes = [0; 4];
+    readers[0].read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"abcd");
+    readers[1].read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"EFGH");
+    readers[0].read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"EFGH");
+    assert_eq!(
+        readers[1].info().reopen().unwrap().info(),
+        readers[1].info()
+    );
+}
+
+#[test]
 fn companion_metadata_and_directory_budgets_are_shared() {
     let directory = tempfile::tempdir().unwrap();
     let paths = pair(

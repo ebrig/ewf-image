@@ -57,6 +57,9 @@ fn dependencies(
     if symbolic(id) {
         return Ok(());
     }
+    if container.inline_data(id)?.is_some() {
+        return Ok(());
+    }
     if stack.len() >= 32 || stack.iter().any(|previous| previous == id) {
         return Err(malformed("cyclic or excessive disk dependency depth"));
     }
@@ -221,6 +224,11 @@ impl DiskImageSet {
             }
         }
         for &index in &selected {
+            for owned in &inventory[index].owned {
+                if providers[owned].len() != 1 {
+                    return Err(malformed(format!("ambiguous AFF4 owner for {owned}")));
+                }
+            }
             for need in &inventory[index].needs {
                 match providers.get(need).map(Vec::len).unwrap_or(0) {
                     1 => (),

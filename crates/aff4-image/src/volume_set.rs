@@ -198,6 +198,8 @@ impl VolumeSet {
             .ok_or_else(|| malformed("image has no dataStream"))?;
         self.volumes[primary].load_map(&target)?;
         let map = self.volumes[primary].maps[&target].clone();
+        // The set retains one validated map, not one map per primary container.
+        self.volumes[primary].maps.clear();
         let size = self.volumes[primary].number(&target, "size")?;
         if self.volumes[primary].value(id, "size")?.is_some()
             && self.volumes[primary].number(id, "size")? != size
