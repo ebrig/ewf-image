@@ -523,6 +523,11 @@ impl Writer {
         failure_tests::boundary("zip_closed");
         file.sync_all()?;
         drop(file);
+        // The finalized ZIP now owns these bytes. Release the write-side graph
+        // before staged verification allocates its bounded read-side graph.
+        self.metadata = String::new();
+        self.folders.clear();
+        self.roots = Vec::new();
         #[cfg(test)]
         failure_tests::boundary("file_synced");
         let checked = check(self.temporary.path(), &metadata_sha256)?;

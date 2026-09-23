@@ -5,11 +5,23 @@ use aff4_image::{
 };
 use clap::{Parser, Subcommand};
 use serde_json::json;
+use std::io::Write;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static CANCELLED: AtomicBool = AtomicBool::new(false);
+
+#[derive(serde::Serialize)]
+struct CollectionOutput<'a> {
+    published: bool,
+    output: &'a aff4_image::WriteResult,
+    collection: &'a aff4_image::CollectionReport,
+    verification: &'a aff4_image::ContainerVerification,
+    limits: &'a Limits,
+    collection_limits: &'a CollectionLimits,
+    verification_scope: &'static str,
+}
 fn progress(_: u64, _: u64) -> ControlFlow<()> {
     if CANCELLED.load(Ordering::Relaxed) {
         ControlFlow::Break(())
@@ -313,11 +325,23 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
                 }
             };
             let complete = verification.all_match() && collection.issues.is_empty();
-            println!(
-                "{}",
-                json!({"published":true,"output":written,"collection":collection,"verification":verification,"limits":limits,"collection_limits":collection_limits,
-                "verification_scope":"finalized staged container"})
-            );
+            // Serialize borrowed reports directly; a second JSON tree duplicates
+            // hundreds of thousands of digest records in large collections.
+            let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
+            serde_json::to_writer(
+                &mut stdout,
+                &CollectionOutput {
+                    published: true,
+                    output: &written,
+                    collection: &collection,
+                    verification: &verification,
+                    limits: &limits,
+                    collection_limits: &collection_limits,
+                    verification_scope: "finalized staged container",
+                },
+            )?;
+            writeln!(stdout)?;
+            stdout.flush()?;
             if !complete {
                 return Ok(4);
             }
