@@ -1,8 +1,23 @@
 # EWF command line
 
-Build with `cargo build --release --features cli`, or install with
+Build this checkout with `cargo build --release --features cli --locked`, or install with
 `cargo install --path . --features cli --locked`. The optional CLI dependencies
 are excluded from ordinary library builds.
+
+Choose an operation below. Commands emit JSON results; progress goes to stderr.
+Read [results and exit codes](#results) before automating decisions based on output.
+The CLI has no password option for encrypted EWF1 images.
+
+| Task | Commands |
+| --- | --- |
+| Inspect or check an image | `info`, `verify`, `analyze` |
+| Export decoded media | `export` |
+| Browse or extract logical files | `files`, `verify-file`, `extract-file` |
+| Acquire/resume physical E01 | `acquire`, `resume`, `checkpoint inspect`, `checkpoint validate` |
+| Create one-shot EWF2 output | `acquire-sequential`, `collect` |
+| Resolve EWF2 publication | `recover-publication` |
+| Export damaged EWF1 with provenance | `recover` |
+| Read saved E01 acquisition history | `report` |
 
 ```text
 ewf-image acquire disk.raw case.E01 --case-number CASE-123 --examiner "A. Examiner"
@@ -158,7 +173,6 @@ the map still records every emitted chunk.
 
 ## Acquisition
 
-
 Regular-file sources must be nonempty and sector aligned. The default
 sector size is 512; `--sector-size` accepts 512, 1024, 2048, or 4096. Output is
 physical E01 with raw (`--compression raw`) or default zlib compression.
@@ -175,8 +189,8 @@ stable, appropriately write-protected source.
 
 Windows queries the exact opened source handle for device number, size, sector
 size, and device-associated storage identifiers (falling back to a device serial).
-It uses native volume queries for destination disk extents; acquisition no longer
-requires PowerShell or the Storage module.
+It uses native volume queries for destination disk extents; acquisition does not
+require PowerShell or the Storage module.
 Linux uses sysfs geometry and WWID/serial/DM UUID metadata; loop devices use the
 backing file identity and mapping geometry. The opened Linux handle is checked
 against the named device and kernel-reported size/sector size. Missing identifiers
@@ -199,18 +213,60 @@ relationships are outside that check. Network destinations and
 unresolved storage layouts are unsupported for device acquisition. File sources
 can use any destination supported by the writer.
 
-Linux loop/DM acquisition, isolated kernel read errors, and real filesystem-full
-recovery have passed the [virtual-device suite](device-acceptance.md), as have
-Windows VHDX acquisition/resume, active virtual-device removal without zero
-substitution, mounted-folder overlap checks, and real NTFS-full recovery. Physical
-hot-unplug and hardware write-blocker behavior remain acceptance gaps. The CLI
-does not make a power-loss durability claim.
+See [device acceptance](device-acceptance.md) for Linux loop/device-mapper and
+Windows VHDX validation. Physical hot-unplug, hardware write blockers, and
+power-loss behavior require separate acceptance.
 
 `acquire` automatically reopens the published image, decodes all media, and
 compares its hashes with embedded references and the acquisition SHA256.
 `verify` performs a fresh read using the same library, not an independent
 implementation; libewf interoperability is tested separately. Successful hashes
 cover zero substitutions too and do not establish recovery of unreadable data.
+
+## One-shot EWF2 acquisition and collection
+
+```text
+ewf-image acquire-sequential source.raw case.Ex01 --compression zlib --chunks-per-segment 1024
+ewf-image collect snapshot-directory case.Lx01 --case-number CASE-001
+ewf-image recover-publication case.Ex01
+```
+
+`acquire-sequential` uses the existing source identity and device overlap checks,
+then streams known-size input into Ex01 with bounded payload scratch. Sources
+must be nonempty and sector-aligned, as with E01 acquisition; a regular file's
+sector size defaults to 512. Source reads support cancellation and optional
+`--read-timeout-ms`, with no retries or zero substitution. Chunks are fixed at
+32 KiB; the default 1024 chunks per segment represents 32 MiB of raw capacity,
+not an encoded segment-size limit. `raw` and `zlib` are available. The CLI
+requires `.Ex01` for physical output and `.Lx01` for logical output.
+
+`collect` inventories regular files and directories, records available basic
+timestamps and Unicode names, streams each file into a logical catalog, and
+verifies both the full media and every file after publication. It rejects links,
+Windows reparse points, special files, inaccessible entries, delimiter-containing
+names, and outputs within the source tree. Discovery is limited to 100,000
+entries including the root and 127 directory levels. Inventory, opened handles
+and named paths are checked for metadata changes; use a stable snapshot because
+these checks do not guarantee cross-file consistency or defeat every concurrent
+filesystem substitution. ADS, xattrs, ACLs, and sparse allocation are not captured.
+Collection cancellation is checked between buffers; blocking filesystem calls
+do not have a deadline. Collection metadata grows with entry count.
+
+Both commands create new outputs only, support case/evidence/examiner metadata,
+and report `resumable: false`. They use publication journals but do not create
+E01 checkpoint/history sessions, and have no mirror option. Source cancellation
+or a handled pre-publication failure removes staging. A finish error can leave
+the publication decision unresolved: JSON then has `published: null`,
+`publication_state: "unresolved"`, and a recovery command. After process death,
+run `recover-publication OUTPUT` to resolve/discard the transaction, then `verify`
+any retained output before use. Recovery itself does not verify evidence and
+does not continue the original source acquisition. A verification failure after
+publication retains the output and reports `published: true` with exit 3;
+cancellation returns 130. Successful acquisition and verification return 0.
+
+Fixed 32 KiB geometry is the independently validated CLI profile. Other library
+geometries retain their existing behavior, with no broader consumer-compatibility
+claim; tiny-chunk split logical output is not certified against libewf.
 
 ## Cancellation and resume
 
@@ -330,8 +386,8 @@ finish may still need recovery to resolve publication state.
 | 0 | Operation succeeded; analysis/recovery reported no findings |
 | 1 | Operational failure or result-output failure |
 | 2 | Invalid command-line arguments |
-| 3 | `verify` failed, export found a stored-digest mismatch, or analysis found errors |
-| 4 | Acquisition/verification/export succeeded with substitutions, analysis found only warnings, or recovery completed with findings |
+| 3 | Verification/extraction mismatch or unreadable selected file, export digest mismatch, or analysis errors |
+| 4 | Substitutions, missing logical-file references, analysis warnings, or recovery findings; inspect the command result |
 | 130 | Cancelled, including a requested `--stop-after` pause |
 
 For example, `ewf-image acquire disk.raw case.E01 > result.json` retains the
@@ -342,47 +398,3 @@ contain case metadata and local source paths; handle them with the evidence.
 Platform references: [Windows storage properties](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_storage_query_property),
 [volume disk extents](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_volume_get_volume_disk_extents),
 and [Linux sysfs block ABI](https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-block).
-# One-shot EWF2 acquisition and collection
-
-```text
-ewf-image acquire-sequential source.raw case.Ex01 --compression zlib --chunks-per-segment 1024
-ewf-image collect snapshot-directory case.Lx01 --case-number CASE-001
-ewf-image recover-publication case.Ex01
-```
-
-`acquire-sequential` uses the existing source identity and device overlap checks,
-then streams known-size input into Ex01 with bounded payload scratch. Sources
-must be nonempty and sector-aligned, as with E01 acquisition; a regular file's
-sector size defaults to 512. Source reads support cancellation and optional
-`--read-timeout-ms`, with no retries or zero substitution. Chunks are fixed at
-32 KiB; the default 1024 chunks per segment represents 32 MiB of raw capacity,
-not an encoded segment-size limit. `raw` and `zlib` are available. The new CLI
-requires `.Ex01` for physical output and `.Lx01` for logical output.
-
-`collect` inventories regular files and directories, records available basic
-timestamps and Unicode names, streams each file into a logical catalog, and
-verifies both the full media and every file after publication. It rejects links,
-Windows reparse points, special files, inaccessible entries, delimiter-containing
-names, and outputs within the source tree. Discovery is limited to 100,000
-entries including the root and 127 directory levels. Inventory, opened handles
-and named paths are checked for metadata changes; use a stable snapshot because
-these checks do not guarantee cross-file consistency or defeat every concurrent
-filesystem substitution. ADS, xattrs, ACLs, and sparse allocation are not captured.
-Collection cancellation is checked between buffers; blocking filesystem calls
-do not have a deadline. Collection metadata grows with entry count.
-
-Both commands create new outputs only, support case/evidence/examiner metadata,
-and report `resumable: false`. They use publication journals but do not create
-E01 checkpoint/history sessions, and have no mirror option. Source cancellation
-or a handled pre-publication failure removes staging. A finish error can leave
-the publication decision unresolved: JSON then has `published: null`,
-`publication_state: "unresolved"`, and a recovery command. After process death,
-run `recover-publication OUTPUT` to resolve/discard the transaction, then `verify`
-any retained output before use. Recovery itself does not verify evidence and
-does not continue the original source acquisition. A verification failure after
-publication retains the output and reports `published: true` with exit 3;
-cancellation returns 130. Successful acquisition and verification return 0.
-
-Fixed 32 KiB geometry is the independently validated CLI profile. Other library
-geometries retain their existing behavior, with no broader consumer-compatibility
-claim; tiny-chunk split logical output is not certified against libewf.

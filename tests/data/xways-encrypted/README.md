@@ -5,10 +5,14 @@ Beta 2 from the same deterministic 1 MiB source. They cross AES-128/AES-256
 with compatible Deflate and X-Ways Zstandard compression. Imaging reports are
 intentionally excluded because they contain workstation and license metadata.
 
-The source media hashes are:
+## Source identity
+
+All fixtures decode to the same source media. Its hashes are:
 
 - MD5: `C31109DB97E3B19811D76C4AA06C9142`
 - SHA-256: `A4A3EC30D6388244DED06C36C1C7F501EE42FD7940C04350C6E367A644220313`
+
+## Native and derived fixtures
 
 The authentic fixture password is not stored in this repository. The
 `known-password` files retain the authentic compatible EWF1 structure and
@@ -21,7 +25,14 @@ Native uncompressed and verifier-less images were unavailable in the tested
 X-Ways imaging workflow. The integration tests derive a verifier-less variant
 in a temporary file to exercise structural validation.
 
-## SHA-256
+## Running the tests
+
+Public-password derived vectors run in the self-contained encryption tests.
+Native readback requires an operator-supplied password; use the
+[testing instructions](../../../docs/testing.md#x-ways-encrypted-fixtures).
+Never commit that password or the excluded imaging reports.
+
+## Container SHA256
 
 - `aes128-compatible.E01`: `626D864EA4186927B0235CCBD3A701E7A2678AB821019E9FFD23B7FFFBBCE49A`
 - `aes128-zstd.E01`: `5D7B2CF4E95E2E63FF5F16FCE632AE885824517E5D7E897C014F12C880A23AAB`

@@ -1,14 +1,25 @@
 # Verification, analysis, and recovery
 
+Use verification to check bytes against references, analysis to inspect integrity
+findings, and recovery to export damaged media with provenance. These operations
+have different completion and success criteria.
+
+| Operation | Scope | Result when data is incomplete |
+| --- | --- | --- |
+| Media verification | Complete decoded media and supported references | Error; no completed verification report |
+| Single-file verification | One selected logical file and its file references | Error; does not verify all image media |
+| Analysis | Readable media, redundant tables, and integrity findings | Explicit incomplete/unavailable coverage; no whole-media digest |
+| Recovery | Supported damaged EWF1 media | Output with explicit recovered, suspect, and substituted provenance |
+
 ## Media verification
 
 `Image::verify()` returns MD5/SHA1/SHA256 results. It reads backing
 chunks without consulting the decoded-chunk cache or the zero-fill recovery
 policy. Corrupt media cannot pass verification using cached substitute bytes.
 
-`verify_with_options` and `verify_with_progress` additionally compute SHA256
-and compare caller-supplied reference digests. Recognized embedded SHA256
-references in EWF1 xhash sections are also compared. Supported digest identifiers
+`verify_with_options` and `verify_with_progress` also accept caller-supplied
+reference digests. Recognized embedded SHA256 references in EWF1 xhash sections
+are also compared. Supported digest identifiers
 are case-insensitive; malformed values and conflicting references cause opening
 to fail, including in lenient mode. Unknown hash identifiers remain available in
 the generic metadata map and are not verified. Embedded and external references
@@ -18,20 +29,22 @@ supported reference exists, rather than treating the absence of references as
 a successful match. SHA256 is computed over logical media; no additional EWF
 stored-hash section layout is implied.
 
-```rust
-use std::ops::ControlFlow;
+```rust,no_run
 use ewf_image::{Image, VerifyOptions};
+use std::ops::ControlFlow;
 
-# fn verify(image: &Image, acquisition_sha256: [u8; 32]) -> ewf_image::Result<()> {
-let options = VerifyOptions::default()
-    .with_expected_sha256(acquisition_sha256);
-let report = image.verify_with_progress(&options, |progress| {
-    println!("{} / {} bytes", progress.bytes_verified, progress.bytes_total);
-    ControlFlow::Continue(())
-})?;
-println!("references match: {:?}", report.references_match());
-# Ok(())
-# }
+fn verify(image: &Image, acquisition_sha256: [u8; 32]) -> ewf_image::Result<()> {
+    let options = VerifyOptions::default().with_expected_sha256(acquisition_sha256);
+    let report = image.verify_with_progress(&options, |progress| {
+        println!(
+            "{} / {} bytes",
+            progress.bytes_verified, progress.bytes_total
+        );
+        ControlFlow::Continue(())
+    })?;
+    println!("references match: {:?}", report.references_match());
+    Ok(())
+}
 ```
 
 Progress starts at zero and advances in logical chunk order on the calling
@@ -100,14 +113,14 @@ rejected. Native file backings use positioned reads on Windows and Unix, with a
 serialized fallback on other platforms. Backings must remain immutable while
 the image is open.
 
-```rust
-use std::fs::File;
+```rust,no_run
 use ewf_image::{Image, SegmentSource};
+use std::fs::File;
 
-# fn embedded(container: File, offset: u64, length: u64) -> ewf_image::Result<Image> {
-let source = SegmentSource::from_file(container)?.subrange(offset, length)?;
-Image::open_sources([("embedded.E01", source)])
-# }
+fn embedded(container: File, offset: u64, length: u64) -> ewf_image::Result<Image> {
+    let source = SegmentSource::from_file(container)?.subrange(offset, length)?;
+    Image::open_sources([("embedded.E01", source)])
+}
 ```
 
 `Image::sections()` exposes accepted descriptor summaries with segment-relative
@@ -123,15 +136,15 @@ prefix and validated first-segment geometry, tries primary and matching
 redundant tables, and writes a logical raw image with explicit provenance.
 It does not change normal image-opening behavior.
 
-```rust
+```rust,no_run
 use ewf_image::{EwfRecovery, RecoveryOptions};
 
-# fn recover() -> ewf_image::Result<()> {
-let recovery = EwfRecovery::open("damaged.E01", RecoveryOptions::default())?;
-let report = recovery.recover_to_path("recovered.raw")?;
-println!("{} bytes substituted", report.bytes_zero_filled);
-# Ok(())
-# }
+fn recover() -> ewf_image::Result<()> {
+    let recovery = EwfRecovery::open("damaged.E01", RecoveryOptions::default())?;
+    let report = recovery.recover_to_path("recovered.raw")?;
+    println!("{} bytes substituted", report.bytes_zero_filled);
+    Ok(())
+}
 ```
 
 `recover_to_path` exclusively creates a new file, refusing existing paths and
@@ -156,3 +169,23 @@ families are rejected. Recovery does not carve lost descriptors or reconstruct
 missing table headers. A missing final range is zero-filled when its placement
 is unambiguous. EWF2, logical/SMART images, encryption, X-Ways Zstandard, and
 table-resident media recovery are outside this implementation's supported scope.
+
+## Password-protected X-Ways EWF1
+
+```rust,no_run
+fn main() -> ewf_image::Result<()> {
+    let password = ewf_image::EwfPassword::utf8("operator-supplied-password");
+    let image = ewf_image::Image::open_with_password("case.E01", &password)?;
+    let result = image.verify()?;
+    println!("MD5 match: {:?}", result.md5_match);
+    Ok(())
+}
+```
+
+`EwfPassword` zeroizes owned password bytes; `from_bytes` accepts other encodings.
+AES-128 accepts at most 16 password bytes and AES-256 at most 32. Each open accepts
+one password. Owned key material is zeroized and excluded from diagnostics.
+A stored verifier checks the password; verifier-less images require the first
+decrypted chunk to pass structural validation. AES-CTR is not authenticated
+encryption, so later media still requires integrity verification. Encrypted EWF2
+is detected and rejected. The CLI does not accept passwords.

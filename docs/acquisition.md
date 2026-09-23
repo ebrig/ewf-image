@@ -1,4 +1,24 @@
-# Streaming acquisition
+# Acquisition and writing
+
+Choose a writer according to input access, output family, and resume needs.
+The CLI uses these APIs with additional source checks and JSON reporting; see
+[CLI acquisition](cli.md#acquisition).
+
+## Choose a writer
+
+| API | Use when | Main constraint |
+| --- | --- | --- |
+| `EwfWriter` | You need seek/patch, encoded chunks, or general EWF1/EWF2 authoring | Full-source spooling; EWF1 resume rewrites output |
+| `AcquisitionWriter` | You need resumable physical E01 acquisition | Known aligned size, raw/zlib, one destination, hard links |
+| `SequentialWriter` | You need append-only Ex01/Lx01 with bounded payload scratch | Known size; no checkpoint resume |
+| `LogicalWriter` | You are supplying files and metadata for L01/Lx01 | Retained catalog; general or sequential EWF2 backend |
+
+Library finalization computes hashes but does not independently reread output.
+EWF CLI acquisition/collection verifies after publication. AFF4 is a separate
+[sibling crate](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image)
+with its own single-volume writer and opt-in verification before publication.
+
+## Resumable E01 acquisition
 
 `AcquisitionWriter` creates physical E01 images from an append-only source with
 a known, nonzero, sector-aligned size. It supports raw and zlib compression,
@@ -7,8 +27,8 @@ for positioned writes, other container families, mirroring, and rewrite-based
 resume.
 
 ```rust,no_run
-use std::fs::File;
 use ewf_image::{AcquisitionOptions, AcquisitionWriter};
+use std::fs::File;
 
 fn main() -> ewf_image::Result<()> {
     let mut source = File::open("disk.raw")?;
@@ -24,10 +44,11 @@ fn main() -> ewf_image::Result<()> {
 }
 ```
 
-After an interruption, reopen the source and reconstruct the same options and
-identity, then use:
+After an interruption, reopen the source and reconstruct the same `options` and
+`identity`. In the acquisition application, continue from the sealed offset:
 
-```rust
+```rust,ignore
+// Continuation: source, options, and identity come from the acquisition session.
 use std::io::{Seek, SeekFrom};
 let mut writer = AcquisitionWriter::resume("case.E01", &options, identity)?;
 source.seek(SeekFrom::Start(writer.checkpoint_offset()))?;
@@ -43,7 +64,8 @@ every read attempt, including after resume; callers do not need to position the
 source themselves. Device opening, privileges, source-size discovery, and stable
 source identification remain the application's responsibility.
 
-```rust
+```rust,ignore
+// Continuation: writer and source are the open acquisition handles.
 use std::ops::ControlFlow;
 use ewf_image::{AcquisitionReadOptions, AcquisitionStatus, UnreadableSectorPolicy};
 
@@ -111,7 +133,8 @@ still apply. Changing read policy after resume affects only new input.
 Close the writer before calling these functions so inspection can acquire the
 output lock. Supply the original acquisition options and source identity:
 
-```rust
+```rust,ignore
+// Supply the original acquisition options and identity.
 let checkpoint = AcquisitionWriter::inspect_checkpoint("case.E01", &options, identity)?;
 // Metadata-only: records, segment lengths, geometry, and recorded bad-sector ranges.
 assert!(!checkpoint.segment_hashes_validated);
@@ -185,7 +208,7 @@ directory entries. Windows power-loss durability, network filesystems, and
 devices that disregard flushes are not certified. This API does not open
 device handles itself, perform positioned output writes, replace an existing
 image, mirror targets, or resume arbitrary E01 files from other producers.
-# Bounded EWF2 writing
+## Bounded EWF2 writing
 
 `SequentialWriter` accepts an exact known source length and streams physical
 Ex01 or logical Lx01 output into staged native segments. Select
@@ -212,4 +235,3 @@ to discard uncommitted staging or recover interrupted publication. Existing
 The E01 `AcquisitionWriter` remains the resumable path. The sequential EWF2
 transaction uses renames rather than hard links; removable filesystems still
 need their own durability acceptance tests.
-

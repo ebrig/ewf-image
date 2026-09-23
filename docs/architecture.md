@@ -1,127 +1,95 @@
 # Architecture
 
-`ewf-image` reads and writes Expert Witness Format images through a small,
-explicit public API centered on immutable `Image` values and a dedicated writer
-type:
+The workspace contains two independent format libraries. `ewf-image` exposes EWF
+media streams and file catalogs; `aff4-image` exposes identified AFF4 resources,
+RDF metadata, Maps, and volume sets. Each has its own CLI and verification model.
+AFF4 remains experimental and is not a dependency of the EWF package.
 
-- `Image` opens one or more EWF segments and provides `read_at`, `Read + Seek`
-  cursors, metadata accessors, logical single-file access, and optional hash
-  verification.
-- `ImageInfo` collects format, geometry, segment, metadata, hash, acquisition,
-  session, track, memory, and logical single-file details.
-- `EwfWriter` creates EWF output from streamed writes, positioned writes, or
-  decoded/encoded chunk values.
-- `WriteOptions` selects output format, compression, segment sizing, media
-  profile, metadata, hashes, and optional logical single-file catalogs.
+## EWF reading
 
-## Reader Flow
+`Image` is an immutable shared handle. Opening discovers sibling segments or uses
+an explicit ordered list, validates signatures and section records, and builds a
+lazy chunk index. Table ranges avoid allocating one record per media chunk.
+`ImageInfo` exposes geometry, metadata, digests, acquisition errors, sessions,
+tracks, memory extents, and logical-file details.
 
-Opening starts with sibling segment discovery or an explicit segment list. Each
-segment is signature-checked, parsed into EWF1 or EWF2 section records, and
-assembled into a lazy logical chunk index. The lazy index keeps large image
-opens bounded by storing table ranges instead of eagerly materializing one
-record per logical chunk.
+A positioned read locates the chunk, reads encoded bytes from its segment,
+decrypts X-Ways EWF1 when configured, validates applicable checksums, and decodes
+the payload. Codecs include raw, zlib, X-Ways Zstandard, BZip2, and pattern-fill.
+Decoded chunks and table pages use bounded caches shared by clones and cursors.
+Table checksums use a fixed 64 KiB streaming buffer.
 
-Reads go through `Image::read_at` or a cursor. The reader locates the logical
-chunk, reads the encoded bytes from the owning segment, decrypts X-Ways EWF1
-chunks when an encryption context is present, validates checksums where
-applicable, decodes raw/zlib/Zstandard/BZip2/pattern-fill payloads, and caches
-the decoded chunk in a bounded LRU cache. Table-range lookup uses binary
-search, and segment lengths are cached after their first lookup.
+`OpenOptions` controls caches and open handles. Optional `ReaderStatistics`
+records cumulative I/O, cache, parsing, checksum, and decompression counters;
+`ReaderCacheInfo` exposes retained cache usage. Statistics are disabled by default.
+`SegmentSource` also supports immutable files, memory, and bounded subranges.
+After opening, supplied sources serve positioned reads directly.
 
-Table entries are loaded through a byte-bounded page cache shared by every
-clone and cursor from the same `Image`. A zero-byte limit disables page
-retention and preserves exact-size table reads. Table-entry checksums use a
-fixed 64 KiB streaming buffer rather than allocating the complete entry
-region.
+Verification bypasses decoded caches and zero-fill policies, decodes strictly,
+and hashes media in order. Optional workers process bounded batches. Analysis
+adds findings and redundant-table comparisons; incomplete scans have no whole-media
+digests. `EwfRecovery` is a separate physical raw/zlib EWF1 recovery path with
+explicit provenance. See [verification and recovery](reader-analysis.md).
 
-`OpenOptions` controls chunk-cache and table-cache capacities. Optional
-`ReaderStatistics` snapshots expose cumulative cache, I/O, parsing, segment
-handle, checksum, and decompression counters. `ReaderCacheInfo` reports cache
-capacity plus current and peak retained table-page payload bytes. Statistics
-collection is disabled by default; cache limits remain enforced regardless.
+## EWF writing
 
-`SegmentSource` adds independent positioned reads over immutable file, memory,
-and bounded-subrange backings. Supplied sources use cursor adapters only while
-opening; subsequent chunk and table reads access the positioned backend
-directly. They retain the same table-page cache. `Image::sections` retains
-descriptor summaries without retaining section payloads.
+| API | Input model | Retained state | Publication / resume |
+| --- | --- | --- | --- |
+| `EwfWriter` | Sequential, positioned, or chunk writes | Full raw spool, then encoded spool and descriptors | Recoverable replacement/mirroring transaction; incomplete EWF1 resume rewrites output |
+| `SequentialWriter` | Exact known length, append-only EWF2 | One encoded segment, pending chunk, current descriptors, output paths | Same transaction; no checkpoint resume |
+| `AcquisitionWriter` | Known, sector-aligned physical E01 source | One segment's scratch and descriptors; growing checkpoint records | Exclusive hard-link publication; sealed-prefix resume |
+| `LogicalWriter` | Declared-length files with authored metadata | Catalog plus selected backend's state | General L01/Lx01 or sequential Lx01 backend; no checkpoint resume |
 
-Verification uses strict uncached chunk decoding, bounded optional worker
-batches, and ordered MD5/SHA1/SHA256 hashing. Analysis builds typed findings on
-that scan and checks matching redundant table entries in bounded blocks.
-Incomplete scans have no complete-media hashes. A separate EWF1 recovery path
-accepts a reliable descriptor prefix, validates geometry, and records primary,
-redundant, suspect, and zero-filled output provenance.
+`LogicalWriter` assigns identifiers and contiguous extents and computes per-file
+MD5/SHA1. Root identifier is 1. Empty files are explicit; nesting is limited to
+128. Names containing NUL, tab, CR, or LF are rejected. Short reads, write errors,
+and cancellation poison the builder. The library accepts caller-authored metadata;
+it does not capture filesystem ACLs, ADS, xattrs, sparse allocation, or snapshots.
+Sequential logical output emits its catalog in the final segment.
 
-## Writer Flow
+The general and sequential writers stage native segments and use a publication
+journal with backups for replacement. Recovery rolls back uncommitted work or
+retains committed output and completes cleanup. This is not an atomic multi-file
+switch for other software. Caller-owned destinations bypass the transaction.
 
-`LogicalWriter` uses either general spooling for L01/Lx01 or bounded sequential
-EWF2 staging through `create_sequential`. Directory identifiers
-select parents (root is 1); file inputs have caller-declared lengths and metadata.
-Each file receives contiguous extents and computed MD5/SHA1 references. Empty
-files are represented explicitly. Short reads, write errors, or cancellation
-poison the builder, preventing finalization. Catalog nesting is limited to 128.
-Names containing NUL, tab, CR, or LF are rejected rather than altered.
-This convenience API records names and timestamps, not filesystem ACLs, extended
-attributes, alternate streams, sparse allocation, or source snapshot consistency.
-Use the lower-level catalog API for explicitly authored richer metadata.
+Acquisition checkpoints bind configuration and caller-supplied source identity
+to sealed segment sizes and SHA256 values. Resume validates those files and
+rehashes their logical media to rebuild digest state without rewriting the prefix.
+A private reader accepts exactly that checkpointed prefix; public opens still
+require complete media coverage. See [acquisition](acquisition.md) for limits.
 
-The general `EwfWriter` accepts sequential, positioned, and chunk-oriented writes.
-It retains a full raw spool, then an encoded spool and chunk descriptors before
-writing native segments at finish. `SequentialWriter` instead hashes and encodes
-chunks as they arrive, stages each native segment, and discards that segment's
-encoded spool. It holds one pending chunk and one segment's descriptors; paths
-and catalog metadata still grow with counts. Logical catalogs are emitted in the
-final segment. Both use the same recoverable publication transaction.
+## AFF4 reading and writing
 
-`finish` writes complete images with `done` terminal sections.
-`finish_incomplete` writes an incomplete EWF1 acquisition with a `next`
-terminal section, and `resume` reopens that image, preserves compatible media
-values, appends data, and rewrites a complete image. File-backed finishes can
-also mirror the completed primary segment set to a secondary/shadow target.
+AFF4 opens preflight ZIP directory allocation and enforce metadata, entry, member,
+chunk, Map, and verification-work budgets. RDF resources remain identified by URI;
+original paths are metadata. `VolumeSet` preserves each volume's graph and resolves
+cross-volume ImageStreams by ownership, using a complete Map in the primary volume.
 
-## Internal Boundaries
+The writer streams declared-length payloads into one temporary ZIP and retains
+metadata until finish. `finish_verified` verifies finalized staging under reader
+budgets before exclusive publication; `finish` does not verify. The collector
+adds discovery and incremental metadata budgets. Multi-volume writing and resume
+are unsupported. See the
+[AFF4 guide](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image).
 
-- `segment`: segment discovery, ordering, and handle pooling.
-- `source`: positioned segment backings and bounded views.
-- `sections`: public descriptor summaries.
-- `format`: low-level EWF1/EWF2 descriptors, tables, signatures, and primitive
-  parsing.
-- `metadata`: EWF header/case/device/hash/range metadata parsing.
-- `index`: lazy logical chunk lookup across table ranges.
-- `decode`: bounded raw, zlib, Zstandard, BZip2, and pattern-fill decoding.
-- `encryption`: zeroizing password storage, X-Ways metadata and verifier
-  handling, key derivation, and AES-CTR chunk transforms.
-- `image`: open flow, immutable image state, cache ownership, and read APIs.
-- `writer`: EWF output generation, segment splitting, secondary target
-  mirroring, metadata emission, and resume support.
-- `single_files`: logical single-file catalog parsing and lookup.
-- `integrity`: bounded findings, media coverage, and redundant-table analysis.
-- `image::recovery`: restricted EWF1 recovery with explicit output provenance.
-- `verify`: optional streamed MD5/SHA1/SHA256 verification and ordered scan workers;
-  stored hash parsing, EWF2 section integrity checks, and writer hash support
-  are part of the normal reader/writer implementation.
+## Code boundaries
 
-## Error Model
+| EWF module | Responsibility |
+| --- | --- |
+| `segment`, `source` | Segment discovery, handles, and positioned backings |
+| `format`, `sections`, `metadata` | On-disk structures, descriptor summaries, and metadata |
+| `index`, `decode`, `encryption` | Chunk lookup, bounded decoding, and X-Ways password handling |
+| `image`, `reader_cache`, `reader_statistics` | Shared reader state, caches, diagnostics |
+| `single_files`, `logical_verify` | Catalog parsing and per-file reads/verification |
+| `writer`, `publication` | Format emission, writer backends, and transaction recovery |
+| `verify`, `integrity`, `image::recovery` | Media checks, findings, and recovery provenance |
+| `bin/ewf-image` | CLI, device access, source policy, sessions, and history |
 
-The crate uses `ewf_image::Result<T>` and `EwfError` for all fallible public APIs.
-Malformed images, unimplemented format features, invalid signatures, I/O
-errors, and aborts are reported without panics. Bounds checks are applied to
-offsets, section chains, chunk sizes, decompression limits, table coverage,
-segment references, and media geometry arithmetic.
+Both libraries forbid unsafe Rust. The EWF CLI has a narrow native Windows
+boundary for read-only device queries and source-I/O cancellation. Application
+code owns source consistency, privileges, and interpretation of results.
 
-## Append-only acquisition
-
-`AcquisitionWriter` encodes chunks directly into one segment's scratch spool,
-seals native EWF1 segments, and checkpoints their byte lengths and SHA256 values.
-Its options and caller-supplied source identity are bound to a versioned
-configuration fingerprint. Resume validates sealed files and uses a private
-reader path that accepts exactly the checkpointed prefix of the declared media
-size; public image opens still require full table coverage. Rehashing that prefix
-restores MD5, SHA1, and SHA256 without serializing hash-library internals.
-
-Exclusive hard links publish a completed set without copying payloads. The
-acquisition sidecar remains present until every output segment is installed and
-synchronized, and the shared output lock excludes the general writer. See
-[streaming acquisition](acquisition.md) for the API and filesystem requirements.
+EWF APIs use `Result<T>` and `EwfError`; AFF4 has its own result/error types.
+Bounds and integrity checks reject malformed structures and unsupported profiles.
+Successful opening, readable bytes, matching references, completed publication,
+and storage durability are distinct outcomes.
