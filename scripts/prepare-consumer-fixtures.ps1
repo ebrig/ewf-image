@@ -1,9 +1,12 @@
 param(
     [Parameter(Mandatory)][string]$SourceDirectory,
-    [Parameter(Mandatory)][string]$OutputDirectory
+    [Parameter(Mandatory)][string]$OutputDirectory,
+    [string]$TargetDirectory
 )
 $ErrorActionPreference = 'Stop'
 $repository = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+if (-not $TargetDirectory) { $TargetDirectory = Join-Path $repository 'target' }
+$TargetDirectory = [IO.Path]::GetFullPath($TargetDirectory, $PWD.ProviderPath)
 $sourceRoot = (Resolve-Path -LiteralPath $SourceDirectory).Path
 $outputRoot = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $outputRoot) { throw 'Output directory must be new' }
@@ -28,13 +31,13 @@ try {
     & git diff --quiet HEAD -- src crates Cargo.toml Cargo.lock
     if ($LASTEXITCODE -ne 0) { throw 'Commit runtime source changes before preparing attributed fixtures' }
     $revision = (& git rev-parse HEAD).Trim()
-    & cargo build --release --locked --features cli --bin ewf-image
+    & cargo build --release --locked --features cli --bin ewf-image --target-dir $TargetDirectory
     if ($LASTEXITCODE -ne 0) { throw 'EWF build failed' }
-    & cargo build --release --locked -p aff4-image --bin aff4-image --example acquire
+    & cargo build --release --locked -p aff4-image --bin aff4-image --example acquire --target-dir $TargetDirectory
     if ($LASTEXITCODE -ne 0) { throw 'AFF4 build failed' }
-    $ewf = Join-Path $repository 'target/release/ewf-image.exe'
-    $aff4 = Join-Path $repository 'target/release/aff4-image.exe'
-    $acquire = Join-Path $repository 'target/release/examples/acquire.exe'
+    $ewf = Join-Path $TargetDirectory 'release/ewf-image.exe'
+    $aff4 = Join-Path $TargetDirectory 'release/aff4-image.exe'
+    $acquire = Join-Path $TargetDirectory 'release/examples/acquire.exe'
     New-Item -ItemType Directory -Path $outputRoot | Out-Null
     function Invoke-Recorded([string]$program, [string]$name, [string[]]$arguments) {
         $text = (& $program @arguments 2> (Join-Path $outputRoot "$name.stderr.txt")) | Out-String
