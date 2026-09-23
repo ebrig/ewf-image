@@ -28,6 +28,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Malformed, unsupported, cancelled, or unreadable evidence.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Finalized staging failed verification and was not published.
+    #[error("staged AFF4 container verification failed; inspect the retained verification report")]
+    VerificationFailed {
+        /// Complete available checks, resource errors and metadata diagnostics.
+        /// The temporary container is removed; this report retains the evidence
+        /// needed to distinguish mismatches, unreadable data and incomplete checks.
+        report: Box<ContainerVerification>,
+    },
     /// Collection stopped before exceeding an explicit resource budget.
     #[error("AFF4 collection limit {resource}: requires {required}, limit {limit}")]
     ResourceLimit {

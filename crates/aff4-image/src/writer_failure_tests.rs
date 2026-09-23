@@ -80,6 +80,57 @@ fn verified_finish_cancellation_and_late_collision_preserve_destination() {
 }
 
 #[test]
+fn verification_failure_preserves_mismatch_unreadable_and_unsupported_details() {
+    for outcome in [
+        crate::CheckOutcome::Mismatch,
+        crate::CheckOutcome::Unreadable,
+        crate::CheckOutcome::Unsupported,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("case.aff4");
+        let mut writer = writer(&path);
+        let mut limits = crate::Limits::default();
+        match outcome {
+            crate::CheckOutcome::Mismatch => {
+                writer.metadata = writer
+                    .metadata
+                    .replace(&writer.streams[0].md5, &"0".repeat(32));
+            }
+            crate::CheckOutcome::Unreadable => limits.verification_bytes = 0,
+            crate::CheckOutcome::Unsupported => {
+                writer.metadata.push_str(&format!(
+                    "<{}> a:hash \"opaque\"^^a:FutureHash .\n",
+                    writer.streams[0].id
+                ));
+            }
+            _ => unreachable!(),
+        }
+        let error = writer
+            .finish_verified(limits, |_, _, _| ControlFlow::Continue(()))
+            .unwrap_err();
+        let Error::VerificationFailed { report } = error else {
+            panic!("unexpected error: {error}");
+        };
+        assert!(!report.all_match());
+        assert!(report.metadata.as_ref().unwrap().all_match());
+        assert!(
+            report.checks.iter().any(|check| check.outcome == outcome),
+            "{report:?}"
+        );
+        if outcome == crate::CheckOutcome::Unreadable {
+            assert!(report.resources.iter().any(|resource| {
+                resource
+                    .error
+                    .as_deref()
+                    .is_some_and(|message| message.contains("limit"))
+            }));
+        }
+        assert!(!path.exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
 fn crash_worker() {
     let Some(path) = std::env::var_os("AFF4_TEST_CRASH_PATH") else {
         return;

@@ -480,6 +480,7 @@ impl Writer {
     /// Verifies the finalized temporary container under explicit reader budgets
     /// before exclusive publication. Limit, integrity, or cancellation failures
     /// remove the temporary file and leave the destination absent.
+    /// `VerificationFailed` retains the complete available verification report.
     /// `PublishedButUnsynced` means verification passed but directory sync failed.
     pub fn finish_verified(
         self,
@@ -493,7 +494,9 @@ impl Writer {
             let verification = crate::Container::open_with_limits(path, limits)?
                 .verify_all(Some(digest), &mut progress)?;
             if !verification.all_match() {
-                return Err(malformed("staged container verification failed"));
+                return Err(Error::VerificationFailed {
+                    report: Box::new(verification),
+                });
             }
             if progress("before publication", 0, 0).is_break() {
                 return Err(Error::Aborted);

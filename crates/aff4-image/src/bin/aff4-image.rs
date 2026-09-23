@@ -22,6 +22,26 @@ struct CollectionOutput<'a> {
     collection_limits: &'a CollectionLimits,
     verification_scope: &'static str,
 }
+
+#[derive(serde::Serialize)]
+struct CollectionVerificationFailure<'a> {
+    published: bool,
+    phase: &'static str,
+    collection: &'a aff4_image::CollectionReport,
+    limits: &'a Limits,
+    collection_limits: &'a CollectionLimits,
+    verification_error: String,
+    verification: Option<&'a aff4_image::ContainerVerification>,
+    verification_scope: &'static str,
+}
+
+fn print_json(value: &impl serde::Serialize) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
+    serde_json::to_writer(&mut stdout, value)?;
+    writeln!(stdout)?;
+    stdout.flush()?;
+    Ok(())
+}
 fn progress(_: u64, _: u64) -> ControlFlow<()> {
     if CANCELLED.load(Ordering::Relaxed) {
         ControlFlow::Break(())
@@ -312,11 +332,20 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
                     return Ok(4);
                 }
                 Err(error) => {
-                    println!(
-                        "{}",
-                        json!({"published":false,"collection":collection,"limits":limits,"collection_limits":collection_limits,
-                        "phase":"finalize and verify before publication","verification_error":error.to_string()})
-                    );
+                    let verification = match &error {
+                        aff4_image::Error::VerificationFailed { report } => Some(report.as_ref()),
+                        _ => None,
+                    };
+                    print_json(&CollectionVerificationFailure {
+                        published: false,
+                        phase: "finalize and verify before publication",
+                        collection: &collection,
+                        limits: &limits,
+                        collection_limits: &collection_limits,
+                        verification_error: error.to_string(),
+                        verification,
+                        verification_scope: "finalized staged container",
+                    })?;
                     return Ok(if matches!(error, aff4_image::Error::Aborted) {
                         130
                     } else {
@@ -327,21 +356,15 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
             let complete = verification.all_match() && collection.issues.is_empty();
             // Serialize borrowed reports directly; a second JSON tree duplicates
             // hundreds of thousands of digest records in large collections.
-            let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
-            serde_json::to_writer(
-                &mut stdout,
-                &CollectionOutput {
-                    published: true,
-                    output: &written,
-                    collection: &collection,
-                    verification: &verification,
-                    limits: &limits,
-                    collection_limits: &collection_limits,
-                    verification_scope: "finalized staged container",
-                },
-            )?;
-            writeln!(stdout)?;
-            stdout.flush()?;
+            print_json(&CollectionOutput {
+                published: true,
+                output: &written,
+                collection: &collection,
+                verification: &verification,
+                limits: &limits,
+                collection_limits: &collection_limits,
+                verification_scope: "finalized staged container",
+            })?;
             if !complete {
                 return Ok(4);
             }
