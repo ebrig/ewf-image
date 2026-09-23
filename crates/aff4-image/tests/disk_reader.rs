@@ -29,6 +29,33 @@ fn metadata() -> String {
 }
 
 #[test]
+fn automatic_discovery_returns_all_disks_with_independent_cursors() {
+    let text = format!(
+        "{}\n<aff4://volume/other> a <http://aff4.org/Schema#DiskImage>; <http://aff4.org/Schema#dataStream> <aff4://volume/data> .",
+        metadata()
+    );
+    let file = fixture(&text);
+    let mut readers = aff4_image::DiskImageSet::discover(&[file.path().to_owned()], &[])
+        .unwrap()
+        .into_readers();
+    assert_eq!(readers.len(), 2);
+    assert_ne!(
+        readers[0].info().image.resource_id,
+        readers[1].info().image.resource_id
+    );
+    let mut bytes = [0; 2];
+    readers[0].read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"ab");
+    readers[1].seek(SeekFrom::Start(4)).unwrap();
+    readers[1].read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"ef");
+    readers[0].read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"cd");
+    let descriptor = readers[0].info().clone();
+    assert_eq!(descriptor.reopen().unwrap().info(), &descriptor);
+}
+
+#[test]
 fn selects_disk_not_storage_and_supports_seek_and_positioned_reads() {
     let file = fixture(&metadata());
     let container = Container::open(file.path()).unwrap();

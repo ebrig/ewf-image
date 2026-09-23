@@ -78,6 +78,14 @@ impl VolumeSet {
             }
             volumes.push(volume);
         }
+        Self::from_containers(volumes, paths.to_vec())
+    }
+
+    pub(super) fn from_containers(volumes: Vec<Container>, paths: Vec<PathBuf>) -> Result<Self> {
+        let ids: BTreeSet<_> = volumes.iter().map(|volume| volume.volume.clone()).collect();
+        if ids.len() != volumes.len() {
+            return Err(malformed("duplicate volume identifier"));
+        }
         let mut owners = BTreeMap::new();
         for (index, volume) in volumes.iter().enumerate() {
             for id in volume
@@ -144,7 +152,7 @@ impl VolumeSet {
         }
         Ok(Self {
             volumes,
-            paths: paths.to_vec(),
+            paths,
             owners,
             validated: BTreeMap::new(),
             cached_owner: None,
@@ -175,24 +183,28 @@ impl VolumeSet {
 
     /// Opens a primary map and validates all referenced storage before reading.
     fn image_map(&mut self, id: &str) -> Result<(Arc<Map>, u64)> {
+        self.image_map_in(0, id)
+    }
+
+    fn image_map_in(&mut self, primary: usize, id: &str) -> Result<(Arc<Map>, u64)> {
         if let Some(result) = self.validated.get(id) {
             return Ok(result.clone());
         }
-        if !self.volumes[0].has_type(id, "DiskImage") {
+        if !self.volumes[primary].has_type(id, "DiskImage") {
             return Err(Error::Unsupported("select a primary DiskImage".into()));
         }
-        let target = self.volumes[0]
+        let target = self.volumes[primary]
             .value(id, "dataStream")?
             .ok_or_else(|| malformed("image has no dataStream"))?;
-        self.volumes[0].load_map(&target)?;
-        let map = self.volumes[0].maps[&target].clone();
-        let size = self.volumes[0].number(&target, "size")?;
-        if self.volumes[0].value(id, "size")?.is_some()
-            && self.volumes[0].number(id, "size")? != size
+        self.volumes[primary].load_map(&target)?;
+        let map = self.volumes[primary].maps[&target].clone();
+        let size = self.volumes[primary].number(&target, "size")?;
+        if self.volumes[primary].value(id, "size")?.is_some()
+            && self.volumes[primary].number(id, "size")? != size
         {
             return Err(malformed("image/map size mismatch"));
         }
-        let contiguous = self.volumes[0].has_type(id, "ContiguousImage");
+        let contiguous = self.volumes[primary].has_type(id, "ContiguousImage");
         let mut end = 0;
         for range in &map.ranges {
             if contiguous && range.start != end {
@@ -234,7 +246,30 @@ impl VolumeSet {
     /// Reads assembled image bytes using the primary Map and explicit owners.
     /// Unknown/unreadable symbolic data and missing companions fail closed.
     pub fn read_at(&mut self, id: &str, buffer: &mut [u8], offset: u64) -> Result<usize> {
-        let (map, size) = self.image_map(id)?;
+        self.read_disk_at(0, true, id, buffer, offset)
+    }
+
+    pub(super) fn disk_size(&mut self, primary: usize, mapped: bool, id: &str) -> Result<u64> {
+        if mapped {
+            self.image_map_in(primary, id).map(|(_, size)| size)
+        } else {
+            self.volumes[primary].size(id)
+        }
+    }
+
+    pub(super) fn read_disk_at(
+        &mut self,
+        primary: usize,
+        mapped: bool,
+        id: &str,
+        buffer: &mut [u8],
+        offset: u64,
+    ) -> Result<usize> {
+        if !mapped {
+            self.clear_previous_cache(primary);
+            return self.volumes[primary].read_at(id, buffer, offset);
+        }
+        let (map, size) = self.image_map_in(primary, id)?;
         if offset >= size {
             return Ok(0);
         }
@@ -260,13 +295,7 @@ impl VolumeSet {
                     .get(target)
                     .ok_or_else(|| malformed("missing target volume"))?
             };
-            if self.cached_owner != Some(owner) {
-                if let Some(previous) = self.cached_owner {
-                    self.volumes[previous].cache = None;
-                    self.volumes[previous].index_cache = None;
-                }
-                self.cached_owner = Some(owner);
-            }
+            self.clear_previous_cache(owner);
             self.volumes[owner].read_inner(
                 target,
                 &mut buffer[done..done + take],
@@ -276,6 +305,17 @@ impl VolumeSet {
             done += take;
         }
         Ok(length)
+    }
+
+    fn clear_previous_cache(&mut self, owner: usize) {
+        if self.cached_owner != Some(owner) {
+            if let Some(previous) = self.cached_owner {
+                self.volumes[previous].cache = None;
+                self.volumes[previous].index_cache = None;
+                self.volumes[previous].maps.clear();
+            }
+            self.cached_owner = Some(owner);
+        }
     }
 
     /// Computes whole-image SHA256 across companions. This does not certify the
@@ -362,7 +402,7 @@ impl VolumeSet {
     }
 }
 
-fn is_symbolic(id: &str) -> bool {
+pub(super) fn is_symbolic(id: &str) -> bool {
     id == format!("{NS}Zero")
         || id.starts_with(&format!("{NS}SymbolicStream"))
         || id == format!("{NS}UnknownData")

@@ -34,6 +34,10 @@ mod archive;
 mod volume_set;
 pub use volume_set::{SetDigest, SetVerification, SetVolumeVerification, VolumeSet, VolumeSource};
 
+#[path = "discovery.rs"]
+mod discovery;
+pub use discovery::{BackingVolume, DiskImageSet, PhysicalDisk, PhysicalDiskReader};
+
 const NS: &str = "http://aff4.org/Schema#";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const LOGICAL_NS: &str = "https://aff4.org/Schema/2022/#";

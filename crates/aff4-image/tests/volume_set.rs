@@ -45,6 +45,64 @@ const COMPANION: &str = r#"@prefix a: <http://aff4.org/Schema#> .
 <aff4://v2/b> a a:ImageStream; a:stored <aff4://v2>; a:size 4; a:chunkSize 4; a:chunksInSegment 1 ."#;
 
 #[test]
+fn discovery_groups_by_identity_from_either_volume_and_reopens() {
+    use aff4_image::DiskImageSet;
+    use std::io::Read;
+    let dir = tempfile::tempdir().unwrap();
+    let paths = pair(
+        dir.path(),
+        PRIMARY,
+        COMPANION,
+        &[
+            map(0, 2, 0, 0),
+            map(2, 2, 0, 1),
+            map(4, 2, 2, 0),
+            map(6, 2, 2, 1),
+        ]
+        .concat(),
+    );
+    let unrelated = dir.path().join("unrelated.aff4");
+    fixture(
+        &unrelated,
+        "aff4://unrelated",
+        &COMPANION.replace("v2", "unrelated"),
+        &[("b/00000000", b"1234"), ("b/00000000.index", &index(4))],
+    );
+    for start in &paths {
+        let mut candidates = paths.clone();
+        candidates.push(unrelated.clone());
+        let mut readers = DiskImageSet::discover(std::slice::from_ref(start), &candidates)
+            .unwrap()
+            .into_readers();
+        assert_eq!(readers.len(), 1);
+        let reader = &mut readers[0];
+        assert_eq!(reader.info().volumes.len(), 2);
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"abEFcdGH");
+        let mut reopened = reader.info().reopen().unwrap();
+        bytes.clear();
+        reopened.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"abEFcdGH");
+    }
+    assert!(DiskImageSet::discover(&paths[..1], &[]).is_err());
+    let duplicate = dir.path().join("duplicate.aff4");
+    std::fs::copy(&paths[1], &duplicate).unwrap();
+    assert!(DiskImageSet::discover(&paths[..1], &[paths[1].clone(), duplicate]).is_err());
+    assert!(
+        DiskImageSet::discover_with_limits(
+            &paths,
+            &[],
+            Limits {
+                metadata_bytes: PRIMARY.len() as u64,
+                ..Limits::default()
+            }
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn companion_metadata_and_directory_budgets_are_shared() {
     let directory = tempfile::tempdir().unwrap();
     let paths = pair(

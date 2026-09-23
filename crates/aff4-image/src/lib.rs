@@ -15,9 +15,10 @@ pub use disk::{DiskImageInfo, DiskImageReader};
 #[cfg(feature = "write")]
 mod writer;
 pub use reader::{
-    ByteCoverage, CheckOutcome, Container, ContainerVerification, IntegrityCheck, Limits,
-    MetadataScan, MetadataVerification, Property, ResourceVerification, SetDigest, SetVerification,
-    SetVolumeVerification, StreamInfo, Verification, VolumeSet, VolumeSource,
+    BackingVolume, ByteCoverage, CheckOutcome, Container, ContainerVerification, DiskImageSet,
+    IntegrityCheck, Limits, MetadataScan, MetadataVerification, PhysicalDisk, PhysicalDiskReader,
+    Property, ResourceVerification, SetDigest, SetVerification, SetVolumeVerification, StreamInfo,
+    Verification, VolumeSet, VolumeSource,
 };
 #[cfg(feature = "write")]
 pub use writer::{
