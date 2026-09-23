@@ -250,6 +250,15 @@ impl DiskImageSet {
                     break;
                 }
             }
+            if component
+                .iter()
+                .all(|&member| inventory[member].disks.is_empty())
+            {
+                return Err(Error::Unsupported(format!(
+                    "no physical DiskImage found for input {}",
+                    inventory[index].path.display()
+                )));
+            }
             let mut volumes: Vec<_> = component
                 .iter()
                 .map(|&member| BackingVolume {

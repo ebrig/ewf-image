@@ -86,6 +86,8 @@ fn discovery_groups_by_identity_from_either_volume_and_reopens() {
         assert_eq!(bytes, b"abEFcdGH");
     }
     assert!(DiskImageSet::discover(&paths[..1], &[]).is_err());
+    // An explicitly supplied orphan cannot disappear beside a valid image.
+    assert!(DiskImageSet::discover(&[paths[0].clone(), paths[1].clone(), unrelated], &[]).is_err());
     let duplicate = dir.path().join("duplicate.aff4");
     std::fs::copy(&paths[1], &duplicate).unwrap();
     assert!(DiskImageSet::discover(&paths[..1], &[paths[1].clone(), duplicate]).is_err());
@@ -364,6 +366,7 @@ fn full_set_report_retains_missing_references_coverage_and_cancellation() {
     #[cfg(feature = "cli")]
     {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image"))
+            .arg("--json")
             .arg("verify-set")
             .args(&paths)
             .args(["--image", "aff4://v1/image", "--full"])
@@ -476,7 +479,8 @@ fn set_cli_distinguishes_computed_matched_and_mismatched_hashes() {
         .unwrap()
         .sha256;
     for (expected, code) in [(None, 4), (Some(digest), 0), (Some("0".repeat(64)), 3)] {
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image"));
+        let mut command =
+            std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image")).arg("--json");
         command
             .arg("verify-set")
             .args(&paths)
