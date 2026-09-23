@@ -273,18 +273,21 @@ fn full_set_report_retains_missing_references_coverage_and_cancellation() {
         set.verify_full("aff4://v1/image", None, |_, _, _| ControlFlow::Break(())),
         Err(Error::Aborted)
     ));
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image"))
-        .arg("verify-set")
-        .args(&paths)
-        .args(["--image", "aff4://v1/image", "--full"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(4));
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(
-        report["scope"],
-        "selected image and supplied-volume integrity"
-    );
+    #[cfg(feature = "cli")]
+    {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image"))
+            .arg("verify-set")
+            .args(&paths)
+            .args(["--image", "aff4://v1/image", "--full"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(4));
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            report["scope"],
+            "selected image and supplied-volume integrity"
+        );
+    }
 }
 
 #[test]
@@ -370,6 +373,7 @@ fn full_set_verifies_foreign_block_references_and_metadata_in_their_own_context(
 }
 
 #[test]
+#[cfg(feature = "cli")]
 fn set_cli_distinguishes_computed_matched_and_mismatched_hashes() {
     let dir = tempfile::tempdir().unwrap();
     let paths = pair(

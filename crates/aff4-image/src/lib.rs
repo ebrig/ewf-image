@@ -9,13 +9,17 @@
 //! internal hashes nor matching bytes establish independent authenticity.
 #![forbid(unsafe_code)]
 
+mod disk;
 mod reader;
+pub use disk::{DiskImageInfo, DiskImageReader};
+#[cfg(feature = "write")]
 mod writer;
 pub use reader::{
     ByteCoverage, CheckOutcome, Container, ContainerVerification, IntegrityCheck, Limits,
     MetadataScan, MetadataVerification, Property, ResourceVerification, SetDigest, SetVerification,
     SetVolumeVerification, StreamInfo, Verification, VolumeSet, VolumeSource,
 };
+#[cfg(feature = "write")]
 pub use writer::{
     AcquiredStream, CaseMetadata, CollectionIssue, CollectionLimits, CollectionOptions,
     CollectionReport, Compression, LogicalMetadata, Profile, SubstreamKind, WriteOptions,
@@ -52,6 +56,7 @@ pub enum Error {
     /// Output was published, but synchronizing its parent directory failed.
     /// Preserve the result and independently verify it before further use.
     #[error("AFF4 output published at {path}, but directory synchronization failed: {source}", path = result.path.display())]
+    #[cfg(feature = "write")]
     PublishedButUnsynced {
         /// Published path and source digests; output must not be overwritten.
         result: Box<WriteResult>,
