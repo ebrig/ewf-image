@@ -240,7 +240,6 @@ impl DiskImageSet {
             }
         }
         let mut descriptions = Vec::new();
-        let mut images = BTreeSet::new();
         for (primary, &index) in selected.iter().enumerate() {
             let mut component = BTreeSet::from([index]);
             loop {
@@ -270,9 +269,6 @@ impl DiskImageSet {
                 .collect();
             volumes.sort_by(|left, right| left.volume_id.cmp(&right.volume_id));
             for (image, mapped) in &inventory[index].disks {
-                if !images.insert(image.resource_id.clone()) {
-                    return Err(malformed("ambiguous physical image identifier"));
-                }
                 if descriptions.len() >= 128 {
                     return Err(malformed("more than 128 physical disk images"));
                 }
@@ -300,17 +296,33 @@ impl DiskImageSet {
             }
         }
         let mut backing = VolumeSet::from_containers(containers, paths)?;
-        for (primary, mapped, info) in &descriptions {
-            if backing.disk_size(*primary, *mapped, &info.image.resource_id)?
+        let mut unique: BTreeMap<String, (usize, bool, PhysicalDisk)> = BTreeMap::new();
+        for (primary, mapped, info) in descriptions {
+            if backing.disk_size(primary, mapped, &info.image.resource_id)?
                 != info.image.logical_size
             {
                 return Err(malformed("physical image length changed during discovery"));
             }
+            if let Some((previous, _, original)) = unique.get(&info.image.resource_id) {
+                if original.image.logical_size != info.image.logical_size
+                    || original.image.block_size != info.image.block_size
+                    || original.volumes != info.volumes
+                    || !backing.equivalent_disk_maps(*previous, primary, &info.image.resource_id)?
+                {
+                    return Err(malformed("conflicting definitions of physical image"));
+                }
+                // Producers may replicate a disk with differently split Maps.
+                // Choose a stable primary only after proving equivalent ranges.
+                if original.image.volume_id < info.image.volume_id {
+                    continue;
+                }
+            }
+            unique.insert(info.image.resource_id.clone(), (primary, mapped, info));
         }
         let backing = Arc::new(Mutex::new(backing));
         Ok(Self {
-            readers: descriptions
-                .into_iter()
+            readers: unique
+                .into_values()
                 .map(|(primary, mapped, info)| PhysicalDiskReader {
                     backing: backing.clone(),
                     primary,

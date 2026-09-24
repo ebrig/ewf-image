@@ -39,7 +39,7 @@ pub struct VolumeSet {
     volumes: Vec<Container>,
     paths: Vec<PathBuf>,
     owners: BTreeMap<String, usize>,
-    validated: BTreeMap<String, (Arc<Map>, u64)>,
+    validated: BTreeMap<(usize, String), (Arc<Map>, u64)>,
     cached_owner: Option<usize>,
 }
 
@@ -187,7 +187,7 @@ impl VolumeSet {
     }
 
     fn image_map_in(&mut self, primary: usize, id: &str) -> Result<(Arc<Map>, u64)> {
-        if let Some(result) = self.validated.get(id) {
+        if let Some(result) = self.validated.get(&(primary, id.to_owned())) {
             return Ok(result.clone());
         }
         if !self.volumes[primary].has_type(id, "DiskImage") {
@@ -236,8 +236,32 @@ impl VolumeSet {
             return Err(Error::Unsupported("external/nested gap stream".into()));
         }
         self.validated.clear();
-        self.validated.insert(id.into(), (map.clone(), size));
+        self.validated
+            .insert((primary, id.into()), (map.clone(), size));
         Ok((map, size))
+    }
+
+    pub(super) fn equivalent_disk_maps(
+        &mut self,
+        left: usize,
+        right: usize,
+        id: &str,
+    ) -> Result<bool> {
+        let (left, size) = self.image_map_in(left, id)?;
+        let (right, other_size) = self.image_map_in(right, id)?;
+        if size != other_size {
+            return Ok(false);
+        }
+        let mut position = 0;
+        while position < size {
+            let (a, a_offset, a_end) = map_interval(&left, position, size);
+            let (b, b_offset, b_end) = map_interval(&right, position, size);
+            if a != b || (!is_symbolic(a) && a_offset != b_offset) {
+                return Ok(false);
+            }
+            position = a_end.min(b_end);
+        }
+        Ok(true)
     }
 
     /// Logical size of a selected primary image, after dependency validation.
@@ -409,4 +433,16 @@ pub(super) fn is_symbolic(id: &str) -> bool {
         || id.starts_with(&format!("{NS}SymbolicStream"))
         || id == format!("{NS}UnknownData")
         || id == format!("{NS}UnreadableData")
+}
+
+fn map_interval(map: &Map, position: u64, size: u64) -> (&str, u64, u64) {
+    let next = map.ranges.partition_point(|range| range.end <= position);
+    match map.ranges.get(next) {
+        Some(range) if range.start <= position => (
+            &range.target,
+            range.offset + position - range.start,
+            range.end,
+        ),
+        next => (&map.gap, position, next.map_or(size, |range| range.start)),
+    }
 }
