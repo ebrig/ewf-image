@@ -204,6 +204,28 @@ impl Writer {
         self.add_chunked(size, input, progress, None, "")
     }
 
+    /// Adds a physical image with its known logical sector size (`blockSize`).
+    /// The size must be nonzero, sector aligned, and the sector size a power of two.
+    pub fn add_image_with_sector_size(
+        &mut self,
+        size: u64,
+        sector_size: u32,
+        input: &mut impl Read,
+        progress: impl FnMut(u64, u64) -> ControlFlow<()>,
+    ) -> Result<String> {
+        self.healthy()?;
+        if !sector_size.is_power_of_two()
+            || size == 0
+            || !size.is_multiple_of(u64::from(sector_size))
+        {
+            return Err(malformed("invalid physical sector geometry"));
+        }
+        let id = self.add_image(size, input, progress)?;
+        self.metadata
+            .push_str(&format!("<{id}> a:blockSize {sector_size} .\n"));
+        Ok(id)
+    }
+
     /// Sets the largest logical file stored as one ZIP segment (at most 1 GiB).
     /// Larger files use chunked ImageStreams with Maps and block integrity hashes.
     pub fn set_logical_zip_threshold(&mut self, bytes: u64) -> Result<()> {

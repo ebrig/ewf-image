@@ -7,6 +7,30 @@ use std::ops::ControlFlow;
 fn proceed(_: u64, _: u64) -> ControlFlow<()> {
     ControlFlow::Continue(())
 }
+
+#[test]
+fn physical_sector_geometry_is_validated_before_consuming_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("geometry.aff4");
+    let mut writer = Writer::create(&path, Profile::Physical, WriteOptions::default()).unwrap();
+    let mut bytes = Cursor::new(vec![7; 8192]);
+    for (size, sector) in [(8192, 0), (8192, 513), (8191, 4096), (0, 512)] {
+        assert!(
+            writer
+                .add_image_with_sector_size(size, sector, &mut bytes, proceed)
+                .is_err()
+        );
+        assert_eq!(bytes.position(), 0);
+    }
+    writer
+        .add_image_with_sector_size(8192, 4096, &mut bytes, proceed)
+        .unwrap();
+    writer
+        .finish_verified(Default::default(), |_, _, _| ControlFlow::Continue(()))
+        .unwrap();
+    let c = Container::open(path).unwrap();
+    assert_eq!(c.disk_images().unwrap()[0].block_size, Some(4096));
+}
 fn data() -> Vec<u8> {
     (0..131079usize)
         .map(|i| {
