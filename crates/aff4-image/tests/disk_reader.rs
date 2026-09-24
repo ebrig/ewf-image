@@ -23,6 +23,7 @@ fn fixture(metadata: &str) -> tempfile::NamedTempFile {
 
 fn metadata() -> String {
     "@prefix a: <http://aff4.org/Schema#> .
+    <aff4://volume> a a:ZipVolume; a:stored \"original-filename.aff4\" .
     <aff4://volume/disk> a a:DiskImage, a:Image; a:dataStream <aff4://volume/map>; a:size 8; a:blockSize 512 .
     <aff4://volume/map> a a:Image, a:ZipSegment; a:size 8; a:dataStream <aff4://volume/data> .
     <aff4://volume/data> a a:ZipSegment; a:size 8 .".into()
@@ -151,7 +152,7 @@ fn canonical_physical_cursor_uses_mapped_disk_size_and_sector_geometry() {
             .collect::<String>(),
         "bcde3297ae95cd9df214bfb79821334628dad08f21ef38374a2c091481e391c0"
     );
-    let mut reader = Container::open(path)
+    let mut reader = Container::open(&path)
         .unwrap()
         .into_disk_reader(None)
         .unwrap();
@@ -162,4 +163,13 @@ fn canonical_physical_cursor_uses_mapped_disk_size_and_sector_geometry() {
     assert_eq!(&sector[510..], &[0x55, 0xaa]);
     reader.seek(SeekFrom::End(-512)).unwrap();
     reader.read_exact(&mut sector).unwrap();
+    let mut discovered = aff4_image::DiskImageSet::discover(&[path.into()], &[])
+        .unwrap()
+        .into_readers();
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(&discovered[0].info().image, reader.info());
+    discovered[0].seek(SeekFrom::End(-512)).unwrap();
+    let mut assembled = [0; 512];
+    discovered[0].read_exact(&mut assembled).unwrap();
+    assert_eq!(assembled, sector);
 }

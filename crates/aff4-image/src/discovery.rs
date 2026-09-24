@@ -100,12 +100,14 @@ impl Inventory {
         let mut owned = BTreeSet::from([container.volume.clone()]);
         let mut needs = BTreeSet::new();
         for id in container.graph.keys() {
-            if let Some(stored) = container.value(id, "stored")?
-                && stored != container.volume
-            {
-                needs.insert(stored);
-            }
             if container.has_type(id, "ImageStream") {
+                // ZipVolume::stored may be an original filename, and case
+                // metadata is not a disk dependency. Resolve storage owners.
+                if let Some(stored) = container.value(id, "stored")?
+                    && stored != container.volume
+                {
+                    needs.insert(stored);
+                }
                 let member = format!("{}/00000000", container.path(id)?);
                 if container.archive.index_for_name(&member).is_some()
                     || (container.number(id, "size").ok() == Some(0)
