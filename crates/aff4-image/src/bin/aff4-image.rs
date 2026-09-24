@@ -1,11 +1,13 @@
 //! AFF4 inventory, verification, local collection, and selective extraction.
+#[path = "aff4-image/output.rs"]
+mod output;
 use aff4_image::{
     CaseMetadata, CollectionLimits, CollectionOptions, Container, Limits, Profile, VolumeSet,
     WriteOptions, Writer,
 };
 use clap::{Parser, Subcommand};
+use output::{Output, clean};
 use serde_json::json;
-use std::io::Write;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,13 +37,6 @@ struct CollectionVerificationFailure<'a> {
     verification_scope: &'static str,
 }
 
-fn print_json(value: &impl serde::Serialize) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
-    serde_json::to_writer(&mut stdout, value)?;
-    writeln!(stdout)?;
-    stdout.flush()?;
-    Ok(())
-}
 fn progress(_: u64, _: u64) -> ControlFlow<()> {
     if CANCELLED.load(Ordering::Relaxed) {
         ControlFlow::Break(())
@@ -51,157 +46,164 @@ fn progress(_: u64, _: u64) -> ControlFlow<()> {
 }
 
 #[derive(Parser)]
-#[command(about = "Inspect, verify, collect, and extract AFF4 evidence; JSON output")]
+#[command(
+    version,
+    about = "Read, collect, and verify AFF4 evidence",
+    disable_help_subcommand = true,
+    after_help = "Use aff4-image <command> --help for details."
+)]
 struct Args {
-    #[command(flatten)]
-    limits: LimitArgs,
+    /// Print machine-readable results.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
-}
-/// Explicit resource budgets shared by all read and collect operations.
-#[derive(clap::Args)]
-struct LimitArgs {
-    #[arg(
-        long = "limit-directory-bytes",
-        global = true,
-        help = "Override directory_bytes reader budget"
-    )]
-    directory_bytes: Option<u64>,
-    #[arg(
-        long = "limit-archive-entries",
-        global = true,
-        help = "Override archive_entries reader budget"
-    )]
-    archive_entries: Option<usize>,
-    #[arg(
-        long = "limit-metadata-bytes",
-        global = true,
-        help = "Override metadata_bytes reader budget"
-    )]
-    metadata_bytes: Option<u64>,
-    #[arg(
-        long = "limit-member-bytes",
-        global = true,
-        help = "Override member_bytes reader budget"
-    )]
-    member_bytes: Option<u64>,
-    #[arg(
-        long = "limit-chunk-bytes",
-        global = true,
-        help = "Override chunk_bytes reader budget"
-    )]
-    chunk_bytes: Option<u64>,
-    #[arg(
-        long = "limit-triples",
-        global = true,
-        help = "Override triples reader budget"
-    )]
-    triples: Option<usize>,
-    #[arg(
-        long = "limit-map-bytes",
-        global = true,
-        help = "Override map_bytes reader budget"
-    )]
-    map_bytes: Option<usize>,
-    #[arg(
-        long = "limit-verification-bytes",
-        global = true,
-        help = "Override verification_bytes reader budget"
-    )]
-    verification_bytes: Option<u64>,
-}
-impl LimitArgs {
-    fn resolve(self) -> Limits {
-        let defaults = Limits::default();
-        Limits {
-            directory_bytes: self.directory_bytes.unwrap_or(defaults.directory_bytes),
-            archive_entries: self.archive_entries.unwrap_or(defaults.archive_entries),
-            metadata_bytes: self.metadata_bytes.unwrap_or(defaults.metadata_bytes),
-            member_bytes: self.member_bytes.unwrap_or(defaults.member_bytes),
-            chunk_bytes: self.chunk_bytes.unwrap_or(defaults.chunk_bytes),
-            triples: self.triples.unwrap_or(defaults.triples),
-            map_bytes: self.map_bytes.unwrap_or(defaults.map_bytes),
-            verification_bytes: self
-                .verification_bytes
-                .unwrap_or(defaults.verification_bytes),
-        }
-    }
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// List explicitly selectable resources.
-    Info { image: PathBuf },
-    /// Stream metadata as JSON lines without retaining the RDF graph.
-    Metadata { image: PathBuf },
-    /// Verify all resources, recorded integrity structures, and metadata hashes.
-    Verify {
+    /// List evidence resources.
+    Info {
+        /// Container path.
         image: PathBuf,
-        #[arg(long)]
+    },
+    /// Show metadata records.
+    Metadata {
+        /// Container path.
+        image: PathBuf,
+    },
+    /// Verify container metadata and content.
+    Verify {
+        /// Container path.
+        image: PathBuf,
+        /// Compare an independently recorded metadata digest.
+        #[arg(
+            long = "metadata-sha256",
+            alias = "expected-metadata-sha256",
+            value_name = "HASH"
+        )]
         expected_metadata_sha256: Option<String>,
     },
-    /// Hash a physical image across explicitly supplied volumes (primary first).
+    /// Verify an image across supplied volumes.
     VerifySet {
-        #[arg(required = true)]
+        /// Container paths, primary volume first.
+        #[arg(required = true, value_name = "VOLUME")]
         volumes: Vec<PathBuf>,
-        #[arg(long)]
+        /// Image resource ID from info.
+        #[arg(long, value_name = "ID")]
         image: String,
-        #[arg(long)]
+        /// Compare an independently recorded image digest.
+        #[arg(long = "sha256", alias = "expected-image-sha256", value_name = "HASH")]
         expected_image_sha256: Option<String>,
-        /// Also check per-volume metadata, owned streams, maps and striped roots.
+        /// Also check each volume and its integrity references.
         #[arg(long)]
         full: bool,
     },
-    /// Acquire a local directory. Use a stable snapshot for cross-file consistency.
+    /// Collect a directory into a verified container.
     Collect {
+        /// Directory to collect; use a stable snapshot.
         source: PathBuf,
+        /// New .aff4 container path.
         output: PathBuf,
-        #[arg(long)]
+        /// Skip a relative path; repeat for multiple exclusions.
+        #[arg(long, value_name = "PATH")]
         exclude: Vec<PathBuf>,
+        /// Record and skip inaccessible or unsupported entries.
         #[arg(long)]
         allow_partial: bool,
-        /// Bound discovered entries, including root, excluded and skipped entries.
-        #[arg(long, default_value_t = 100_000)]
-        limit_collection_entries: usize,
-        /// Bound directory depth; root has depth zero.
-        #[arg(long, default_value_t = 127)]
-        limit_collection_depth: usize,
-        #[arg(long, default_value = "")]
+        /// Case identifier.
+        #[arg(
+            long,
+            default_value = "",
+            hide_default_value = true,
+            value_name = "ID",
+            help_heading = "Case details"
+        )]
         case_number: String,
-        #[arg(long, default_value = "")]
+        /// Evidence identifier.
+        #[arg(
+            long,
+            default_value = "",
+            hide_default_value = true,
+            value_name = "ID",
+            help_heading = "Case details"
+        )]
         evidence_number: String,
-        #[arg(long, default_value = "")]
+        /// Examiner name.
+        #[arg(
+            long,
+            default_value = "",
+            hide_default_value = true,
+            value_name = "NAME",
+            help_heading = "Case details"
+        )]
         examiner: String,
-        #[arg(long, default_value = "")]
+        /// Evidence notes.
+        #[arg(
+            long,
+            default_value = "",
+            hide_default_value = true,
+            value_name = "TEXT",
+            help_heading = "Case details"
+        )]
         notes: String,
     },
-    /// Extract one resource to a caller-chosen new file, checking linear hashes.
+    /// Extract and check one evidence resource.
     Extract {
+        /// Container path.
         image: PathBuf,
+        /// Resource ID from info.
         resource: String,
+        /// New destination file.
         output: PathBuf,
     },
 }
 
 fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
-    let limits = args.limits.resolve();
+    let limits = Limits::unrestricted();
+    let display = Output::new(args.json);
     match args.command {
         Command::Info { image } => {
             let container = Container::open_with_limits(image, limits)?;
-            println!(
-                "{}",
-                json!({"version": container.version(), "volume": container.volume_id(), "resources": container.streams()?})
-            );
+            let streams = container.streams()?;
+            display.emit(&json!({"version": container.version(), "volume": container.volume_id(), "resources": streams}), || {
+                let (major, minor) = container.version();
+                let mut text = format!("AFF4 {major}.{minor}\nVolume: {}\nResources: {}\n", clean(container.volume_id()), streams.len());
+                for stream in &streams {
+                    text.push_str(&format!("{}  {}\n", clean(&stream.id), stream.size.map_or_else(|| "size unknown".into(), |size| format!("{size} bytes"))));
+                }
+                text
+            })?;
         }
         Command::Metadata { image } => {
+            let mut output_error = None;
             let result = Container::scan_metadata(image, limits, |member, subject, property| {
-                println!(
-                    "{}",
-                    json!({"member":member,"subject":subject,"property":property})
-                );
+                if let Err(error) = display.emit(
+                    &json!({"member":member,"subject":subject,"property":property}),
+                    || {
+                        format!(
+                            "{}  {}  {}",
+                            clean(subject),
+                            clean(&property.predicate),
+                            clean(&property.value)
+                        )
+                    },
+                ) {
+                    output_error = Some(error);
+                    return ControlFlow::Break(());
+                }
                 progress(0, 0)
+            });
+            if let Some(error) = output_error {
+                return Err(error.into());
+            }
+            let result = result?;
+            display.emit(&json!({"summary":result}), || {
+                format!(
+                    "{} records in {} metadata stores",
+                    result.triples, result.stores
+                )
             })?;
-            println!("{}", json!({"summary":result}));
         }
         Command::Verify {
             image,
@@ -211,7 +213,7 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
                 .verify_all(expected_metadata_sha256.as_deref(), |_, done, total| {
                     progress(done, total)
                 })?;
-            println!("{}", serde_json::to_string(&result)?);
+            display.emit(&result, || output::container(&result))?;
             if !result.all_match() {
                 return Ok(4);
             }
@@ -233,10 +235,7 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
                     .assembled
                     .as_ref()
                     .is_some_and(|v| v.external_match == Some(false));
-                println!(
-                    "{}",
-                    json!({"scope":"selected image and supplied-volume integrity", "result":result})
-                );
+                display.emit(&json!({"scope":"selected image and supplied-volume integrity", "result":result}), || output::set(&result))?;
                 return Ok(if external_mismatch {
                     3
                 } else if matched {
@@ -250,10 +249,10 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
                 expected_image_sha256.as_deref(),
                 progress,
             )?;
-            println!(
-                "{}",
-                json!({"scope":"assembled image bytes only", "result":result})
-            );
+            display.emit(&json!({"scope":"assembled image bytes only", "result":result}), || {
+                format!("Scope: assembled image bytes\nBytes checked: {}\nExternal SHA256: {}\nSHA256: {}", result.bytes,
+                    match result.external_match { Some(true) => "match", Some(false) => "mismatch", None => "not supplied; verification incomplete" }, result.sha256)
+            })?;
             match result.external_match {
                 Some(true) => {}
                 Some(false) => return Ok(3),
@@ -265,8 +264,6 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
             output,
             exclude,
             allow_partial,
-            limit_collection_entries,
-            limit_collection_depth,
             case_number,
             evidence_number,
             examiner,
@@ -281,8 +278,8 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
             })?;
             let collection_limits = CollectionLimits {
                 reader: limits.clone(),
-                entries: limit_collection_entries,
-                depth: limit_collection_depth,
+                entries: usize::MAX,
+                depth: usize::MAX,
             };
             let collection = writer.add_directory_tree_with_limits(
                 source,
@@ -304,10 +301,9 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
                         } => Some(json!({"resource":resource,"required":required,"limit":limit})),
                         _ => None,
                     };
-                    println!(
-                        "{}",
-                        json!({"published":false,"phase":"collection","error":error.to_string(),"limit_error":limit_error,"limits":limits,"collection_limits":collection_limits})
-                    );
+                    display.emit(&json!({"published":false,"phase":"collection","error":error.to_string(),"limit_error":limit_error,"limits":limits,"collection_limits":collection_limits}), || {
+                        format!("Collection failed: {}\nPublished: no", clean(&error.to_string()))
+                    })?;
                     return Ok(match error {
                         aff4_image::Error::Aborted => 130,
                         aff4_image::Error::ResourceLimit { .. } => 4,
@@ -323,12 +319,11 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
             {
                 Ok(value) => value,
                 Err(aff4_image::Error::PublishedButUnsynced { result, source }) => {
-                    println!(
-                        "{}",
-                        json!({"published":true,"output":result,"collection":collection,
+                    display.emit(&json!({"published":true,"output":result,"collection":collection,
                         "limits":limits,"collection_limits":collection_limits,"durability_error":source.to_string(),
-                        "verification_scope":"finalized staged container","verification_passed":true})
-                    );
+                        "verification_scope":"finalized staged container","verification_passed":true}), || {
+                            format!("Published and verified: {}\nDirectory synchronization failed: {}", clean(&result.path.display().to_string()), clean(&source.to_string()))
+                        })?;
                     return Ok(4);
                 }
                 Err(error) => {
@@ -336,16 +331,28 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
                         aff4_image::Error::VerificationFailed { report } => Some(report.as_ref()),
                         _ => None,
                     };
-                    print_json(&CollectionVerificationFailure {
-                        published: false,
-                        phase: "finalize and verify before publication",
-                        collection: &collection,
-                        limits: &limits,
-                        collection_limits: &collection_limits,
-                        verification_error: error.to_string(),
-                        verification,
-                        verification_scope: "finalized staged container",
-                    })?;
+                    display.emit(
+                        &CollectionVerificationFailure {
+                            published: false,
+                            phase: "finalize and verify before publication",
+                            collection: &collection,
+                            limits: &limits,
+                            collection_limits: &collection_limits,
+                            verification_error: error.to_string(),
+                            verification,
+                            verification_scope: "finalized staged container",
+                        },
+                        || {
+                            let mut text = format!(
+                                "Collection failed: {}\nPublished: no",
+                                clean(&error.to_string())
+                            );
+                            if let Some(report) = verification {
+                                text.push_str(&format!("\n{}", output::container(report)));
+                            }
+                            text
+                        },
+                    )?;
                     return Ok(if matches!(error, aff4_image::Error::Aborted) {
                         130
                     } else {
@@ -356,15 +363,40 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
             let complete = verification.all_match() && collection.issues.is_empty();
             // Serialize borrowed reports directly; a second JSON tree duplicates
             // hundreds of thousands of digest records in large collections.
-            print_json(&CollectionOutput {
-                published: true,
-                output: &written,
-                collection: &collection,
-                verification: &verification,
-                limits: &limits,
-                collection_limits: &collection_limits,
-                verification_scope: "finalized staged container",
-            })?;
+            display.emit(
+                &CollectionOutput {
+                    published: true,
+                    output: &written,
+                    collection: &collection,
+                    verification: &verification,
+                    limits: &limits,
+                    collection_limits: &collection_limits,
+                    verification_scope: "finalized staged container",
+                },
+                || {
+                    let mut text = format!(
+                        "Collected: {}\nFiles: {}\nBytes: {}\nPublished: yes\n{}",
+                        clean(&written.path.display().to_string()),
+                        collection.files,
+                        collection.bytes,
+                        output::container(&verification)
+                    );
+                    if !collection.issues.is_empty() {
+                        text.push_str(&format!("\nOmitted entries: {}", collection.issues.len()));
+                        for issue in collection.issues.iter().take(5) {
+                            text.push_str(&format!(
+                                "\n  {}: {}",
+                                clean(&issue.path.display().to_string()),
+                                clean(&issue.reason)
+                            ));
+                        }
+                        if collection.issues.len() > 5 {
+                            text.push_str("\nUse --json for all omissions.");
+                        }
+                    }
+                    text
+                },
+            )?;
             if !complete {
                 return Ok(4);
             }
@@ -395,7 +427,15 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
                 .tempfile_in(&parent)?;
             let verification = container.copy_verified(&resource, &mut staged, progress)?;
             if verification.references_match == Some(false) {
-                println!("{}", json!({"published":false,"verification":verification}));
+                display.emit(
+                    &json!({"published":false,"verification":verification}),
+                    || {
+                        format!(
+                            "Extraction failed\nPublished: no\n{}",
+                            output::linear(&verification)
+                        )
+                    },
+                )?;
                 return Ok(3);
             }
             staged.as_file().sync_all()?;
@@ -407,10 +447,9 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
             std::fs::File::open(&parent)?.sync_all()?;
             let complete = verification.references_match == Some(true)
                 && verification.unsupported_hashes.is_empty();
-            println!(
-                "{}",
-                json!({"published":true,"output":output,"scope":"resource linear bytes","verification":verification})
-            );
+            display.emit(&json!({"published":true,"output":output,"scope":"resource linear bytes","verification":verification}), || {
+                format!("Extracted: {}\nScope: selected resource\nPublished: yes\n{}", clean(&output.display().to_string()), output::linear(&verification))
+            })?;
             if !complete {
                 return Ok(4);
             }
@@ -421,6 +460,7 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
 
 fn main() {
     let args = Args::parse();
+    let json = args.json;
     if let Err(error) = ctrlc::set_handler(|| CANCELLED.store(true, Ordering::Relaxed)) {
         eprintln!("{error}");
         std::process::exit(1);
@@ -428,7 +468,11 @@ fn main() {
     match run(args) {
         Ok(code) => std::process::exit(code),
         Err(error) => {
-            eprintln!("{}", json!({"error":error.to_string()}));
+            if json {
+                eprintln!("{}", json!({"error":error.to_string()}));
+            } else {
+                eprintln!("Error: {}", clean(&error.to_string()));
+            }
             std::process::exit(if CANCELLED.load(Ordering::Relaxed) {
                 130
             } else {

@@ -479,8 +479,8 @@ fn set_cli_distinguishes_computed_matched_and_mismatched_hashes() {
         .unwrap()
         .sha256;
     for (expected, code) in [(None, 4), (Some(digest), 0), (Some("0".repeat(64)), 3)] {
-        let mut command =
-            std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image")).arg("--json");
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image"));
+        command.arg("--json");
         command
             .arg("verify-set")
             .args(&paths)

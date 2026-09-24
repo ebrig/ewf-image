@@ -502,7 +502,7 @@ impl Container {
             return Err(malformed("invalid block hash geometry"));
         }
         let count = size.div_ceil(chunk);
-        let mut buffer = vec![0; chunk as usize];
+        let mut buffer = chunk_buffer(chunk as usize)?;
         for (suffix, algorithm, width) in [
             ("md5", "MD5", 16),
             ("sha1", "SHA1", 20),

@@ -121,6 +121,7 @@ fn cli_collect_verify_and_extract_do_not_overwrite() {
     fs::write(root.join("file"), b"abc").unwrap();
     let output = dir.path().join("case.aff4");
     let collected = std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image"))
+        .arg("--json")
         .arg("collect")
         .arg(&root)
         .arg(&output)
@@ -137,6 +138,7 @@ fn cli_collect_verify_and_extract_do_not_overwrite() {
     let destination = dir.path().join("recovered");
     let extract = || {
         std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image"))
+            .arg("--json")
             .arg("extract")
             .arg(&output)
             .arg(id)
@@ -150,6 +152,7 @@ fn cli_collect_verify_and_extract_do_not_overwrite() {
     assert!(!extract().status.success());
     assert_eq!(fs::read(destination).unwrap(), b"keep");
     let verify = std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image"))
+        .arg("--json")
         .arg("verify")
         .arg(output)
         .arg("--expected-metadata-sha256")
@@ -208,6 +211,7 @@ fn cli_collects_and_verifies_an_empty_directory() {
     fs::create_dir(&root).unwrap();
     let output = dir.path().join("empty.aff4");
     let result = std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image"))
+        .arg("--json")
         .arg("collect")
         .arg(root)
         .arg(&output)

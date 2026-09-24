@@ -80,6 +80,27 @@ impl Default for Limits {
     }
 }
 
+impl Limits {
+    /// Uses platform capacity instead of application resource quotas.
+    ///
+    /// Intended for local CLI operations. This does not reserve memory or promise
+    /// recovery from process-wide memory exhaustion. Format validation, checked
+    /// arithmetic, and dependency-cycle checks still apply. Library callers
+    /// processing untrusted inputs should normally retain explicit limits.
+    pub const fn unrestricted() -> Self {
+        Self {
+            directory_bytes: isize::MAX as u64,
+            archive_entries: isize::MAX as usize,
+            metadata_bytes: isize::MAX as u64,
+            member_bytes: isize::MAX as u64,
+            chunk_bytes: isize::MAX as u64,
+            triples: isize::MAX as usize,
+            map_bytes: isize::MAX as usize,
+            verification_bytes: u64::MAX,
+        }
+    }
+}
+
 /// Preserved RDF property; values remain associated with their subject.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Property {
@@ -585,7 +606,10 @@ impl Container {
         if records > self.limits.map_bytes / std::mem::size_of::<Range>() {
             return Err(malformed("retained map byte limit exceeded"));
         }
-        let mut ranges = Vec::with_capacity(records);
+        let mut ranges = Vec::new();
+        ranges
+            .try_reserve_exact(records)
+            .map_err(allocation_error)?;
         let mut retained = 0_usize;
         let mut previous = 0;
         let size = self.number(id, "size")?;
@@ -874,12 +898,33 @@ fn member(archive: &mut ZipArchive<File>, name: &str, limit: u64) -> Result<Vec<
     if file.size() > limit {
         return Err(malformed(format!("member exceeds resource limit: {name}")));
     }
+    // Grow from bytes actually decoded, not an untrusted advertised size.
+    read_buffer(file, limit)
+}
+
+fn allocation_error(error: std::collections::TryReserveError) -> Error {
+    std::io::Error::new(std::io::ErrorKind::OutOfMemory, error).into()
+}
+
+fn read_buffer(mut reader: impl Read, limit: u64) -> Result<Vec<u8>> {
     let mut data = Vec::new();
-    file.take(limit.saturating_add(1)).read_to_end(&mut data)?;
-    if data.len() as u64 > limit {
-        return Err(malformed("decoded member exceeds limit"));
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let take = (limit.saturating_sub(data.len() as u64).saturating_add(1))
+            .min(buffer.len() as u64) as usize;
+        let count = match reader.read(&mut buffer[..take]) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            value => value?,
+        };
+        if count == 0 {
+            return Ok(data);
+        }
+        if count as u64 > limit.saturating_sub(data.len() as u64) {
+            return Err(malformed("decoded member exceeds limit"));
+        }
+        data.try_reserve(count).map_err(allocation_error)?;
+        data.extend_from_slice(&buffer[..count]);
     }
-    Ok(data)
 }
 fn decode(data: &[u8], method: Option<&str>, size: usize) -> Result<Vec<u8>> {
     match method {
@@ -887,29 +932,35 @@ fn decode(data: &[u8], method: Option<&str>, size: usize) -> Result<Vec<u8>> {
             if snap::raw::decompress_len(data).map_err(|e| malformed(e.to_string()))? != size {
                 return Err(malformed("snappy size mismatch"));
             }
-            snap::raw::Decoder::new()
-                .decompress_vec(data)
-                .map_err(|e| malformed(e.to_string()))
+            let mut decoded = chunk_buffer(size)?;
+            let count = snap::raw::Decoder::new()
+                .decompress(data, &mut decoded)
+                .map_err(|e| malformed(e.to_string()))?;
+            decoded.truncate(count);
+            Ok(decoded)
         }
         Some("https://www.ietf.org/rfc/rfc1950.txt") => {
-            let mut decoded = Vec::new();
-            flate2::read::ZlibDecoder::new(data)
-                .take(size as u64 + 1)
-                .read_to_end(&mut decoded)?;
-            Ok(decoded)
+            read_buffer(flate2::read::ZlibDecoder::new(data), size as u64)
         }
         Some("https://tools.ietf.org/html/rfc1951") => {
-            let mut decoded = Vec::new();
-            flate2::read::DeflateDecoder::new(data)
-                .take(size as u64 + 1)
-                .read_to_end(&mut decoded)?;
-            Ok(decoded)
+            read_buffer(flate2::read::DeflateDecoder::new(data), size as u64)
         }
         Some("https://code.google.com/p/lz4/") => {
-            lz4_flex::block::decompress(data, size).map_err(|e| malformed(e.to_string()))
+            let mut decoded = chunk_buffer(size)?;
+            let count = lz4_flex::block::decompress_into(data, &mut decoded)
+                .map_err(|e| malformed(e.to_string()))?;
+            decoded.truncate(count);
+            Ok(decoded)
         }
         _ => Err(Error::Unsupported("chunk compression method".into())),
     }
+}
+
+fn chunk_buffer(size: usize) -> Result<Vec<u8>> {
+    let mut buffer = Vec::new();
+    buffer.try_reserve_exact(size).map_err(allocation_error)?;
+    buffer.resize(size, 0);
+    Ok(buffer)
 }
 pub(crate) fn hex(data: &[u8]) -> String {
     data.iter().map(|b| format!("{b:02x}")).collect()
