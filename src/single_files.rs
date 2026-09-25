@@ -453,6 +453,14 @@ impl SingleFileAttribute {
 }
 
 pub(crate) fn parse_ewf2_single_files_data(data: &[u8]) -> Result<SingleFilesInfo> {
+    parse_single_files_data(data, false)
+}
+
+pub(crate) fn parse_ewf1_single_files_data(data: &[u8]) -> Result<SingleFilesInfo> {
+    parse_single_files_data(data, true)
+}
+
+fn parse_single_files_data(data: &[u8], require_record_size: bool) -> Result<SingleFilesInfo> {
     let lines = decode_utf16le_lines(data)?;
     if lines.first().map(String::as_str) != Some("5") {
         return Err(EwfError::Malformed(
@@ -490,10 +498,16 @@ pub(crate) fn parse_ewf2_single_files_data(data: &[u8]) -> Result<SingleFilesInf
         "EWF2 single files entry category types",
     )?;
 
-    let data_size = data_size.unwrap_or(
-        u64::try_from(data.len())
+    let data_size = match data_size {
+        Some(size) => size,
+        None if require_record_size => {
+            return Err(EwfError::Malformed(
+                "EWF1 ltree record has no total data size".into(),
+            ));
+        }
+        None => u64::try_from(data.len())
             .map_err(|_| EwfError::Malformed("single files data size overflow".into()))?,
-    );
+    };
     let root = parse_entry(&lines, &types, &mut cursor)?;
     require_empty_category_terminator(
         &lines,

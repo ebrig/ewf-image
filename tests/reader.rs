@@ -2862,6 +2862,25 @@ fn single_files_stream_with_single_extent(offset: u64, size: u64) -> Vec<u8> {
     utf16le_lines(lines)
 }
 
+fn single_files_stream_with_ewf1_sparse_entry(
+    size: u64,
+    extent: &str,
+    duplicate_offset: &str,
+) -> Vec<u8> {
+    let mut lines = default_single_files_prefix();
+    lines.extend([
+        "entry".to_owned(),
+        "0\t1".to_owned(),
+        "id\tp\tn\tls\tbe\tdu\topr".to_owned(),
+        "26\t1".to_owned(),
+        "1\td\troot\t0\t\t\t".to_owned(),
+        "26\t0".to_owned(),
+        format!("2\tf\tsparse.bin\t{size}\t{extent}\t{duplicate_offset}\t67108864"),
+        String::new(),
+    ]);
+    utf16le_lines(lines)
+}
+
 fn single_files_stream_with_duplicate_data(offset: i64, size: u64) -> Vec<u8> {
     let mut lines = default_single_files_prefix();
     lines.extend([
@@ -6785,9 +6804,111 @@ fn image_open_parses_ewf1_ltree_single_files_data() {
 
     let read = image.read_single_file_at(child, &mut decoded, 0).unwrap();
 
+    assert_eq!(image.media_size(), 4096);
+    assert_eq!(image.info().media.sector_count, Some(64));
+    assert_eq!(image.number_of_chunks(), Some(1));
+    assert_eq!(image.read_at(&mut [0; 1], 4096).unwrap(), 0);
     assert_eq!(child.name.as_deref(), Some("report.bin"));
     assert_eq!(read, data.len());
     assert_eq!(decoded, data);
+}
+
+#[test]
+fn image_reads_ewf1_sparse_entry_from_duplicate_offset_before_extent() {
+    let file = synthetic_l01_with_ltree(
+        b"XbadHELLOtail",
+        &single_files_stream_with_ewf1_sparse_entry(5, "1 0 1", "4"),
+    );
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    let child = &image.info().single_files.as_ref().unwrap().root.children[0];
+    let mut full = [0; 5];
+    let mut middle = [0; 3];
+
+    assert_eq!(image.read_single_file_at(child, &mut full, 0).unwrap(), 5);
+    assert_eq!(&full, b"HELLO");
+    assert_eq!(
+        image
+            .read_single_file_at_strict(child, &mut middle, 1)
+            .unwrap(),
+        3
+    );
+    assert_eq!(&middle, b"ELL");
+}
+
+#[test]
+fn image_reads_ewf1_sparse_entry_as_repeated_stored_byte() {
+    let file = synthetic_l01_with_ltree(
+        b"Qother-data",
+        &single_files_stream_with_ewf1_sparse_entry(7, "1 0 1", ""),
+    );
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    let child = &image.info().single_files.as_ref().unwrap().root.children[0];
+    let mut buf = [0; 4];
+
+    assert_eq!(image.read_single_file_at(child, &mut buf, 2).unwrap(), 4);
+    assert_eq!(&buf, b"QQQQ");
+}
+
+#[test]
+fn image_rejects_ewf1_sparse_entry_without_stored_data() {
+    let file = synthetic_l01_with_ltree(
+        b"other-data",
+        &single_files_stream_with_ewf1_sparse_entry(7, "0", ""),
+    );
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    let child = &image.info().single_files.as_ref().unwrap().root.children[0];
+    let error = image
+        .read_single_file_at(child, &mut [0; 1], 0)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("has no stored byte"));
+}
+
+#[test]
+fn image_rejects_ewf1_ltree_text_with_bad_md5_and_valid_header_checksum() {
+    let data = b"catalog text";
+    let file = synthetic_l01_with_ltree(
+        data,
+        &single_files_stream_with_single_extent(0, data.len() as u64),
+    );
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    let ltree = image
+        .sections()
+        .iter()
+        .find(|section| section.kind == ewf_image::SectionKind::Ewf1("ltree".into()))
+        .unwrap();
+    let offset = ltree.data_offset as usize;
+    drop(image);
+
+    let mut bytes = std::fs::read(file.path()).unwrap();
+    bytes[offset] ^= 1;
+    bytes[offset + 24..offset + 28].fill(0);
+    let checksum = adler32(&bytes[offset..offset + 48]);
+    bytes[offset + 24..offset + 28].copy_from_slice(&checksum.to_le_bytes());
+    std::fs::write(file.path(), bytes).unwrap();
+
+    let error = ewf_image::Image::open(file.path()).unwrap_err();
+    assert!(error.to_string().contains("ltree text MD5 mismatch"));
+}
+
+#[test]
+fn image_rejects_ewf1_ltree_without_recorded_media_size() {
+    let data = b"catalog text";
+    let mut catalog = single_files_stream_with_single_extent(0, data.len() as u64);
+    let field = utf16le("tb");
+    let offset = catalog
+        .windows(field.len())
+        .position(|window| window == field)
+        .unwrap();
+    catalog[offset..offset + field.len()].copy_from_slice(&utf16le("xx"));
+    let file = synthetic_l01_with_ltree(data, &catalog);
+
+    let error = ewf_image::Image::open(file.path()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("ltree record has no total data size")
+    );
 }
 
 #[test]

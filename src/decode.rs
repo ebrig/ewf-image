@@ -22,6 +22,20 @@ pub(crate) fn decode_chunk(
     encoding: ChunkEncoding,
     logical_size: usize,
 ) -> Result<Vec<u8>> {
+    decode_chunk_with_padding(encoded, encoding, logical_size, logical_size)
+}
+
+pub(crate) fn decode_chunk_with_padding(
+    encoded: &[u8],
+    encoding: ChunkEncoding,
+    logical_size: usize,
+    maximum_decoded_size: usize,
+) -> Result<Vec<u8>> {
+    if maximum_decoded_size < logical_size {
+        return Err(EwfError::Malformed(
+            "decoded chunk size bound is too small".into(),
+        ));
+    }
     match encoding {
         ChunkEncoding::Raw => {
             if encoded.len() < logical_size {
@@ -32,9 +46,15 @@ pub(crate) fn decode_chunk(
             }
             Ok(encoded[..logical_size].to_vec())
         }
-        ChunkEncoding::Zlib => decode_compressed(ZlibDecoder::new(encoded), logical_size),
-        ChunkEncoding::Zstd => decode_xways_zstd(encoded, logical_size),
-        ChunkEncoding::Bzip2 => decode_compressed(BzDecoder::new(encoded), logical_size),
+        ChunkEncoding::Zlib => decode_compressed(
+            ZlibDecoder::new(encoded),
+            logical_size,
+            maximum_decoded_size,
+        ),
+        ChunkEncoding::Zstd => decode_xways_zstd(encoded, logical_size, maximum_decoded_size),
+        ChunkEncoding::Bzip2 => {
+            decode_compressed(BzDecoder::new(encoded), logical_size, maximum_decoded_size)
+        }
         ChunkEncoding::PatternFill(pattern) => Ok(pattern_fill(pattern, logical_size)),
     }
 }
@@ -66,7 +86,11 @@ pub(crate) fn validate_encoded_size(
     Ok(())
 }
 
-fn decode_xways_zstd(encoded: &[u8], logical_size: usize) -> Result<Vec<u8>> {
+fn decode_xways_zstd(
+    encoded: &[u8],
+    logical_size: usize,
+    maximum_decoded_size: usize,
+) -> Result<Vec<u8>> {
     if encoded == [0] {
         return Ok(vec![0; logical_size]);
     }
@@ -79,7 +103,7 @@ fn decode_xways_zstd(encoded: &[u8], logical_size: usize) -> Result<Vec<u8>> {
 
     const ZSTD_FRAME_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
     let framed = ZSTD_FRAME_MAGIC.as_slice().chain(encoded);
-    let max_window_size = u64::try_from(logical_size)
+    let max_window_size = u64::try_from(maximum_decoded_size)
         .map_err(|_| EwfError::Malformed("logical chunk size does not fit u64".into()))?
         .max(MIN_ZSTD_WINDOW_LIMIT);
     let decoder =
@@ -88,11 +112,15 @@ fn decode_xways_zstd(encoded: &[u8], logical_size: usize) -> Result<Vec<u8>> {
                 "chunk Zstandard decoder initialization failed: {err}"
             ))
         })?;
-    decode_compressed(decoder, logical_size)
+    decode_compressed(decoder, logical_size, maximum_decoded_size)
 }
 
-fn decode_compressed(mut reader: impl Read, logical_size: usize) -> Result<Vec<u8>> {
-    let limit = logical_size
+fn decode_compressed(
+    mut reader: impl Read,
+    logical_size: usize,
+    maximum_decoded_size: usize,
+) -> Result<Vec<u8>> {
+    let limit = maximum_decoded_size
         .checked_add(1)
         .ok_or_else(|| EwfError::Malformed("logical chunk size overflow".into()))?;
     let mut decoded = Vec::with_capacity(logical_size);
@@ -102,12 +130,18 @@ fn decode_compressed(mut reader: impl Read, logical_size: usize) -> Result<Vec<u
         .read_to_end(&mut decoded)
         .map_err(|err| EwfError::Malformed(format!("chunk decompression failed: {err}")))?;
 
-    if decoded.len() != logical_size {
+    if decoded.len() < logical_size || decoded.len() > maximum_decoded_size {
+        let expected = if logical_size == maximum_decoded_size {
+            logical_size.to_string()
+        } else {
+            format!("between {logical_size} and {maximum_decoded_size}")
+        };
         return Err(EwfError::Malformed(format!(
-            "decoded chunk has {} bytes, expected {logical_size}",
+            "decoded chunk has {} bytes, expected {expected}",
             decoded.len()
         )));
     }
+    decoded.truncate(logical_size);
     Ok(decoded)
 }
 
@@ -199,6 +233,18 @@ mod tests {
         let decoded = decode_chunk(&encoded, ChunkEncoding::Zlib, "compressed data".len()).unwrap();
 
         assert_eq!(decoded, b"compressed data");
+    }
+
+    #[test]
+    fn compressed_logical_tail_accepts_only_bounded_padding() {
+        let encoded = zlib(b"content plus padding");
+        assert_eq!(
+            decode_chunk_with_padding(&encoded, ChunkEncoding::Zlib, 7, 32).unwrap(),
+            b"content"
+        );
+        assert!(decode_chunk_with_padding(&encoded, ChunkEncoding::Zlib, 7, 18).is_err());
+        assert!(decode_chunk_with_padding(&encoded, ChunkEncoding::Zlib, 30, 32).is_err());
+        assert!(decode_chunk(&encoded, ChunkEncoding::Zlib, 7).is_err());
     }
 
     #[test]

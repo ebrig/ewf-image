@@ -15,7 +15,7 @@ use md5::Digest as _;
 
 use crate::codepage::decode_header_bytes;
 use crate::decode::{
-    ChunkEncoding, decode_chunk, raw_chunk_size_cap, validate_encoded_size,
+    ChunkEncoding, decode_chunk_with_padding, raw_chunk_size_cap, validate_encoded_size,
     zlib_compressed_chunk_size_cap,
 };
 use crate::encryption::EncryptionContext;
@@ -31,7 +31,7 @@ use crate::reader_cache::{TABLE_PAGE_SIZE, TablePageCache, TablePageKey};
 use crate::reader_statistics::{ReaderCacheInfo, ReaderStatistics, ReaderStatisticsCollector};
 use crate::segment::discover_segments;
 use crate::signature::{check_segment_files_corruption, check_segment_files_encryption};
-use crate::single_files::parse_ewf2_single_files_data;
+use crate::single_files::{parse_ewf1_single_files_data, parse_ewf2_single_files_data};
 use crate::types::{
     AcquisitionError, ChunkCacheCapacity, CompressionLevel, CompressionMethod, CompressionValues,
     DataChunk, DataChunkEncoding, EncodedDataChunk, EwfMetadata, Format, FormatProfile,
@@ -49,6 +49,7 @@ const MAX_CHUNK_SIZE: u64 = 128 * 1024 * 1024;
 const EWF1_HASH_SECTION_SIZE: u64 = 36;
 const EWF1_DIGEST_SECTION_SIZE: u64 = 80;
 const EWF1_LTREE_HEADER_SIZE: usize = 48;
+const EWF1_LOGICAL_SPARSE_FLAG: u32 = 0x0400_0000;
 const EWF2_HASH_SECTION_SIZE: u64 = 32;
 const EWF2_TABLE_HEADER_V2_SIZE: u64 = 32;
 const EWF2_TABLE_FOOTER_SIZE: u64 = 16;
@@ -663,6 +664,19 @@ impl Image {
         }
 
         let format = format.ok_or_else(|| EwfError::Malformed("image has no segments".into()))?;
+        if format == Format::Ewf1
+            && matches!(
+                format_profile,
+                Some(
+                    FormatProfile::LogicalEnCase5
+                        | FormatProfile::LogicalEnCase6
+                        | FormatProfile::LogicalEnCase7
+                )
+            )
+            && let Some(catalog) = single_files.as_ref()
+        {
+            logical_size = catalog.data_size;
+        }
         if format == Format::Ewf2
             && expected_ewf2_device_information.is_none()
             && expected_ewf2_case_data.is_none()
@@ -1209,8 +1223,8 @@ impl Image {
 
     /// Reads bytes from a logical single-file catalog entry.
     ///
-    /// Sparse extents read as zeroes. Duplicate-data entries read from their
-    /// referenced media offset.
+    /// Sparse extents read as zeroes. EWF1 logical sparse entries repeat a
+    /// stored byte or read from their duplicate offset.
     ///
     /// # Errors
     ///
@@ -1227,7 +1241,7 @@ impl Image {
     }
 
     /// Reads a logical file with strict chunk validation, bypassing decoded
-    /// caches and the zero-on-error policy. Sparse extents still read as zeroes.
+    /// caches and the zero-on-error policy. Sparse entry handling is unchanged.
     /// Does not verify stored file hashes; use `verify_single_file` for that.
     pub fn read_single_file_at_strict(
         &self,
@@ -1260,8 +1274,18 @@ impl Image {
         let to_read = requested.min(file_size - offset);
         let mut copied = 0_usize;
         let mut file_position = 0_u64;
+        let ewf1_logical_sparse = self.inner.info.format == Format::Ewf1
+            && matches!(
+                self.inner.info.format_profile,
+                FormatProfile::LogicalEnCase5
+                    | FormatProfile::LogicalEnCase6
+                    | FormatProfile::LogicalEnCase7
+            )
+            && entry
+                .flags
+                .is_some_and(|flags| flags & EWF1_LOGICAL_SPARSE_FLAG != 0);
 
-        if entry.extents.is_empty()
+        if (entry.extents.is_empty() || ewf1_logical_sparse)
             && let Some(duplicate_data_offset) = entry.duplicate_data_offset
             && duplicate_data_offset >= 0
         {
@@ -1282,6 +1306,27 @@ impl Image {
                 ));
             }
             return Ok(read);
+        }
+
+        if ewf1_logical_sparse {
+            let extent = entry
+                .extents
+                .first()
+                .filter(|extent| !extent.sparse && extent.data_size >= 1)
+                .ok_or_else(|| {
+                    EwfError::Malformed("single file sparse entry has no stored byte".into())
+                })?;
+            let mut byte = [0_u8; 1];
+            if self.read_at_impl(&mut byte, extent.data_offset, strict)? != 1 {
+                return Err(EwfError::Malformed(
+                    "single file sparse entry stored byte was truncated".into(),
+                ));
+            }
+            let read_size = usize::try_from(to_read).map_err(|_| {
+                EwfError::Malformed("single file sparse read size does not fit usize".into())
+            })?;
+            buf[..read_size].fill(byte[0]);
+            return Ok(read_size);
         }
 
         for extent in &entry.extents {
@@ -1947,7 +1992,24 @@ impl Image {
                 ChunkEncoding::Zlib | ChunkEncoding::Zstd | ChunkEncoding::Bzip2
             ))
         .then(Instant::now);
-        let decoded = decode_chunk(&encoded, chunk.encoding, chunk.logical_size)?;
+        let maximum_decoded_size = if self.inner.info.format == Format::Ewf1
+            && matches!(
+                self.inner.info.format_profile,
+                FormatProfile::LogicalEnCase5
+                    | FormatProfile::LogicalEnCase6
+                    | FormatProfile::LogicalEnCase7
+            ) {
+            usize::try_from(self.inner.info.chunk_size)
+                .map_err(|_| EwfError::Malformed("chunk size does not fit usize".into()))?
+        } else {
+            chunk.logical_size
+        };
+        let decoded = decode_chunk_with_padding(
+            &encoded,
+            chunk.encoding,
+            chunk.logical_size,
+            maximum_decoded_size,
+        )?;
         if let Some(started) = decompression_started {
             self.inner
                 .statistics
@@ -3567,7 +3629,12 @@ fn parse_ewf1_ltree_data(data: &[u8]) -> Result<SingleFilesInfo> {
     header[24..28].fill(0);
     validate_adler32_checksum_value(stored, &header, "EWF1 ltree header")?;
 
-    parse_ewf2_single_files_data(&data[EWF1_LTREE_HEADER_SIZE..single_files_data_end])
+    let text = &data[EWF1_LTREE_HEADER_SIZE..single_files_data_end];
+    let computed = md5::Md5::digest(text);
+    if computed[..] != data[..16] {
+        return Err(EwfError::Malformed("EWF1 ltree text MD5 mismatch".into()));
+    }
+    parse_ewf1_single_files_data(text)
 }
 
 fn parse_ewf2_single_files_aux_u64_table(data: &[u8], label: &str) -> Result<Vec<u64>> {
