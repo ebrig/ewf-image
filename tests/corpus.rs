@@ -914,6 +914,102 @@ fn external_logical_single_files_fixtures_match_ewfinfo_hierarchy() -> Result<()
 }
 
 #[test]
+#[cfg(feature = "verify")]
+#[ignore = "requires external logical images and independently computed media hash sidecars"]
+fn external_logical_entry_bytes_and_media_match_references() -> Result<(), Box<dyn Error>> {
+    let image_root = PathBuf::from(
+        env::var_os("EWF_LOGICAL_SINGLE_FILES_DIR")
+            .ok_or("set EWF_LOGICAL_SINGLE_FILES_DIR to the external image directory")?,
+    );
+    let reference_root = PathBuf::from(
+        env::var_os("EWF_LOGICAL_MEDIA_HASH_DIR")
+            .ok_or("set EWF_LOGICAL_MEDIA_HASH_DIR to independent media hash sidecars")?,
+    );
+    let paths = logical_single_file_fixture_paths_from_root(&image_root)?;
+    assert!(!paths.is_empty(), "external logical corpus is empty");
+
+    let mut hashed_files = 0_usize;
+    let mut split_images = 0_usize;
+    for path in &paths {
+        let image = ewf_image::Image::open(path)?;
+        split_images += usize::from(image.number_of_segments() > 1);
+        let relative = path.strip_prefix(&image_root)?;
+        let mut sidecar_name = relative
+            .file_name()
+            .ok_or("logical image path has no file name")?
+            .to_os_string();
+        sidecar_name.push(".media.sha256");
+        let sidecar = reference_root
+            .join(relative.parent().unwrap_or_else(|| Path::new("")))
+            .join(sidecar_name);
+        let reference = fs::read_to_string(&sidecar)?;
+        let mut fields = reference.split_whitespace();
+        let expected_sha256 = fields.next().ok_or("media reference has no SHA256")?;
+        let expected_bytes: u64 = fields
+            .next()
+            .ok_or("media reference has no byte count")?
+            .parse()?;
+        assert!(fields.next().is_none(), "media reference has extra fields");
+        assert_eq!(expected_sha256.len(), 64, "invalid media SHA256 length");
+        assert!(
+            expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "invalid media SHA256"
+        );
+
+        let media = image.verify_with_options(&ewf_image::VerifyOptions::default())?;
+        assert_eq!(media.bytes_verified, expected_bytes, "media size differs");
+        assert_eq!(
+            hex_lower(&media.hashes.sha256),
+            expected_sha256.to_ascii_lowercase(),
+            "media SHA256 differs"
+        );
+
+        let root = image
+            .root_file_entry()
+            .ok_or("logical image has no entry root")?;
+        let mut stack = root.children.iter().collect::<Vec<_>>();
+        let mut entries = 0_usize;
+        while let Some(entry) = stack.pop() {
+            entries += 1;
+            stack.extend(entry.children.iter());
+            if entry.file_entry_type == Some(ewf_image::SingleFileEntryType::File) {
+                let result = image.verify_single_file(entry)?;
+                assert_ne!(
+                    result.references_match(),
+                    Some(false),
+                    "stored hash mismatch at entry {entries}"
+                );
+                hashed_files += usize::from(result.references_match() == Some(true));
+            } else if let Some(size) = entry.size
+                && size > 0
+            {
+                let mut buffer = vec![0_u8; BUFFER_SIZE];
+                let mut offset = 0_u64;
+                while offset < size {
+                    let length = (size - offset).min(BUFFER_SIZE as u64) as usize;
+                    let read =
+                        image.read_single_file_at_strict(entry, &mut buffer[..length], offset)?;
+                    assert_eq!(read, length, "short read at entry {entries}");
+                    offset += read as u64;
+                }
+            }
+        }
+        assert!(entries > 0, "logical image has no entries");
+    }
+    assert!(hashed_files > 0, "corpus has no stored file hashes");
+    if env::var_os("EWF_LOGICAL_REQUIRE_SPLIT").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        assert!(split_images > 0, "corpus has no split logical image");
+    }
+    eprintln!(
+        "validated {} logical images, {} split sets, and {} stored file hashes",
+        paths.len(),
+        split_images,
+        hashed_files
+    );
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires ewfacquirestream, ewfexport, ewfinfo, and ewfverify"]
 fn ewf_tool_generated_fixture_matrix_matches_oracles() -> Result<(), Box<dyn Error>> {
     let tools = EwfToolchain::from_env();
