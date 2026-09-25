@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Measure a CLI's synthetic large-catalog collection and verification on Linux.
 
-The optional AFF4 mode records bounded-reader rejection as a failed verification,
-not successful acceptance. Uses a new temporary tree and never real evidence.
+Uses a new temporary tree and checks publication, file hashes, and verification.
 """
 import argparse
 import hashlib
@@ -19,8 +18,6 @@ def main():
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--files", type=int, default=50000)
     parser.add_argument("--aff4", action="store_true")
-    parser.add_argument("--limit-metadata-bytes", type=int)
-    parser.add_argument("--limit-triples", type=int)
     args = parser.parse_args()
     if not 1 <= args.files <= 99999:
         parser.error("file count must be between 1 and 99999")
@@ -35,14 +32,8 @@ def main():
             (source / f"file-{index:06}").write_bytes(block)
             expected.update(block)
         destination = root / ("case.aff4" if args.aff4 else "case.Lx01")
-        command = [str(binary)] + ([] if args.aff4 else ["--quiet"])
+        command = [str(binary), "--json"] + ([] if args.aff4 else ["--quiet"])
         command += ["collect", str(source), str(destination)]
-        for option in ["metadata_bytes", "triples"]:
-            value = getattr(args, "limit_" + option)
-            if value is not None:
-                if not args.aff4:
-                    parser.error("limit overrides require --aff4")
-                command += ["--limit-" + option.replace("_", "-"), str(value)]
         start = time.monotonic()
         with (root / "stdout.json").open("w") as output, (root / "stderr.log").open("w") as error:
             child = subprocess.Popen(command, stdout=output, stderr=error)

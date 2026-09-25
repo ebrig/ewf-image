@@ -25,7 +25,7 @@ def measure(binary, directory, name, arguments, expected_code):
     start = time.monotonic()
     with report_path.open("wb") as report, log_path.open("wb") as log:
         process = subprocess.Popen(
-            [str(binary), "--quiet", *arguments], cwd=directory, stdout=report, stderr=log,
+            [str(binary), "--json", "--quiet", *arguments], cwd=directory, stdout=report, stderr=log,
             start_new_session=True)
         try:
             while True:

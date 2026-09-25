@@ -64,14 +64,14 @@ def main():
             output_dir.mkdir()
             path = output_dir / "case.Ex01"
             metrics[f"ewf2_{codec}_write_and_verify"] = measure(root, f"ewf-{codec}", [release / "examples/sequential", source, path, codec])
-            measure(root, "ewf-verify", [release / "ewf-image", "--quiet", "verify", path])
+            measure(root, "ewf-verify", [release / "ewf-image", "--json", "--quiet", "verify", path])
             report = json.loads((root / "ewf-verify.out").read_text())
             assert report["verification"]["sha256"] == digest.hexdigest(), "EWF source SHA256 mismatch"
             metrics[f"ewf2_{codec}_write_and_verify"]["stored_bytes"] = sum(p.stat().st_size for p in output_dir.glob("*.Ex*"))
             shutil.rmtree(output_dir)
         path = root / "physical.aff4"
         metrics["aff4_physical_zlib_write"] = measure(root, "aff4-write", [release / "examples/acquire", source, path])
-        metrics["aff4_physical_verify_all"] = measure(root, "aff4-verify", [release / "aff4-image", "verify", path])
+        metrics["aff4_physical_verify_all"] = measure(root, "aff4-verify", [release / "aff4-image", "--json", "verify", path])
         report = json.loads((root / "aff4-verify.out").read_text())
         assert digest.hexdigest() in [stream["verification"]["sha256"] for stream in report["resources"] if stream.get("verification")], "AFF4 source SHA256 mismatch"
         metrics["aff4_physical_zlib_write"]["stored_bytes"] = path.stat().st_size
@@ -82,7 +82,7 @@ def main():
         catalog.mkdir()
         for index in range(args.files):
             (catalog / f"file-{index:06}").write_bytes(block[:1024])
-        metrics["aff4_catalog_collect_and_verify"] = measure(root, "aff4-catalog", [release / "aff4-image", "collect", catalog, root / "catalog.aff4"])
+        metrics["aff4_catalog_collect_and_verify"] = measure(root, "aff4-catalog", [release / "aff4-image", "--json", "collect", catalog, root / "catalog.aff4"])
         report = json.loads((root / "aff4-catalog.out").read_text())
         assert report["published"] and len(report["output"]["streams"]) == args.files
     print(json.dumps(results, indent=2))

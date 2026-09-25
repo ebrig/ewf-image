@@ -48,14 +48,14 @@ try {
     }
     foreach ($mode in @(@{command='acquire'; extension='E01'}, @{command='acquire-sequential'; extension='Ex01'})) {
         $output = Join-Path $outputRoot "physical.$($mode.extension)"
-        $report = (Invoke-Recorded $ewf $mode.extension @('--quiet', $mode.command, $raw, $output, '--chunks-per-segment', '16', '--compression', 'zlib')) | ConvertFrom-Json
+        $report = (Invoke-Recorded $ewf $mode.extension @('--json', '--quiet', $mode.command, $raw, $output, '--chunks-per-segment', '16', '--compression', 'zlib')) | ConvertFrom-Json
         if ($report.verification.sha256 -ne $expected) { throw 'Physical SHA256 mismatch' }
     }
-    $null = Invoke-Recorded $ewf 'Lx01' @('--quiet','collect',$logical,(Join-Path $outputRoot 'logical.Lx01'),'--chunks-per-segment','1')
+    $null = Invoke-Recorded $ewf 'Lx01' @('--json', '--quiet','collect',$logical,(Join-Path $outputRoot 'logical.Lx01'),'--chunks-per-segment','1')
     $null = Invoke-Recorded $acquire 'aff4-acquire' @($raw,(Join-Path $outputRoot 'physical.aff4'))
-    $verified = (Invoke-Recorded $aff4 'aff4-verify' @('verify',(Join-Path $outputRoot 'physical.aff4'))) | ConvertFrom-Json
+    $verified = (Invoke-Recorded $aff4 'aff4-verify' @('--json','verify',(Join-Path $outputRoot 'physical.aff4'))) | ConvertFrom-Json
     if ($expected -notin @($verified.resources | ForEach-Object { $_.verification.sha256 })) { throw 'AFF4 decoded SHA256 mismatch' }
-    $null = Invoke-Recorded $aff4 'aff4-collect' @('collect',$logical,(Join-Path $outputRoot 'logical.aff4'))
+    $null = Invoke-Recorded $aff4 'aff4-collect' @('--json','collect',$logical,(Join-Path $outputRoot 'logical.aff4'))
     $images = @(Get-ChildItem -LiteralPath $outputRoot -File | Where-Object { $_.Extension -match '^\.(E[0-9]+|Ex[0-9]+|Lx[0-9]+|aff4)$' } | ForEach-Object {
         @{ path = $_.Name; bytes = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName).Hash.ToLowerInvariant() }
     })

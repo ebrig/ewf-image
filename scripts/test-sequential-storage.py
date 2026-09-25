@@ -16,7 +16,7 @@ import tempfile
 
 
 def invoke(binary, arguments, expected):
-    result = subprocess.run([str(binary), "--quiet", *map(str, arguments)], capture_output=True, text=True, timeout=120)
+    result = subprocess.run([str(binary), "--json", "--quiet", *map(str, arguments)], capture_output=True, text=True, timeout=120)
     assert result.returncode == expected, result.stdout + result.stderr
     return json.loads(result.stdout)
 

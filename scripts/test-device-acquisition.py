@@ -100,7 +100,7 @@ class Devices:
 
 
 def cli(binary, root, args, code=0, prefix=()):
-    result = subprocess.run([*prefix, str(binary), "--quiet", *map(str, args)],
+    result = subprocess.run([*prefix, str(binary), "--json", "--quiet", *map(str, args)],
                             cwd=root, capture_output=True, text=True, timeout=180, check=False)
     report = json.loads(result.stdout)
     if result.returncode != code or report["exit_code"] != code:
@@ -133,7 +133,7 @@ def stalled_device(args, root, devices, mapped, expected, cancel):
     checkpoint = root / f".stalled-{label}.E01.ewf-acquisition" / "checkpoint-00001"
     stdout = root / f"stalled-{label}.json"
     stderr = root / f"stalled-{label}.stderr"
-    arguments = [str(args.binary), "--quiet", "acquire", mapped, str(output),
+    arguments = [str(args.binary), "--json", "--quiet", "acquire", mapped, str(output),
                  "--compression", "raw", "--sectors-per-chunk", "1",
                  "--chunks-per-segment", "128", "--zero-fill", "--retries", "100"]
     if not cancel:

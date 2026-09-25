@@ -2,8 +2,16 @@
 
 The workspace contains two independent format libraries. `ewf-image` exposes EWF
 media streams and file catalogs; `aff4-image` exposes identified AFF4 resources,
-RDF metadata, Maps, and volume sets. Each has its own CLI and verification model.
+RDF metadata, Maps, and volume sets. Each retains its own verification model.
 AFF4 remains experimental and is not a dependency of the EWF package.
+
+The provisional `ewf-cli` workspace package depends on both libraries and
+provides acquisition, conversion, collection, inspection, and verification.
+It shares the existing EWF operational runtime and native device adapter by
+source inclusion, in process, while the two legacy executables remain available.
+The unified package is unpublished and must be built from this workspace.
+Conversion reads decoded streams, maps supported metadata, and reports omissions;
+it does not make either format library depend on the other.
 
 ## EWF reading
 
@@ -60,8 +68,9 @@ require complete media coverage. See [acquisition](acquisition.md) for limits.
 
 ## AFF4 reading and writing
 
-AFF4 opens preflight ZIP directory allocation and enforce metadata, entry, member,
-chunk, Map, and verification-work budgets. RDF resources remain identified by URI;
+AFF4 opens preflight ZIP directory allocation. Library defaults enforce metadata,
+entry, member, chunk, Map, and verification-work budgets; the local CLI uses
+platform capacity without application quotas. RDF resources remain identified by URI;
 original paths are metadata. `VolumeSet` preserves each volume's graph and resolves
 cross-volume ImageStreams by ownership, using a complete Map in the primary volume.
 

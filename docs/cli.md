@@ -1,10 +1,14 @@
 # EWF command line
 
+For combined EWF/AFF4 acquisition and conversion, use the new
+[ewf-cli](ewf-cli.md). This page documents the retained `ewf-image` executable.
+
 Build this checkout with `cargo build --release --features cli --locked`, or install with
 `cargo install --path . --features cli --locked`. The optional CLI dependencies
 are excluded from ordinary library builds.
 
-Choose an operation below. Commands emit JSON results; progress goes to stderr.
+Commands print concise text summaries. Add `--json` for machine-readable results;
+progress goes to stderr and `-q` / `--quiet` hides it. Use `<command> --help` for options.
 Read [results and exit codes](#results) before automating decisions based on output.
 The CLI has no password option for encrypted EWF1 images.
 
@@ -12,7 +16,7 @@ The CLI has no password option for encrypted EWF1 images.
 | --- | --- |
 | Inspect or check an image | `info`, `verify`, `analyze` |
 | Export decoded media | `export` |
-| Browse or extract logical files | `files`, `verify-file`, `extract-file` |
+| Browse or extract logical files | `files`, `verify IMAGE ENTRY`, `extract` |
 | Acquire/resume physical E01 | `acquire`, `resume`, `checkpoint inspect`, `checkpoint validate` |
 | Create one-shot EWF2 output | `acquire-sequential`, `collect` |
 | Resolve EWF2 publication | `recover-publication` |
@@ -27,8 +31,8 @@ ewf-image checkpoint validate case.E01
 ewf-image verify case.E01
 ewf-image info case.E01
 ewf-image files case.L01 --limit 1000
-ewf-image verify-file case.L01 1
-ewf-image extract-file case.L01 1 selected.bin
+ewf-image verify case.L01 1
+ewf-image extract case.L01 1 selected.bin
 ewf-image analyze case.E01 --maximum-findings 1024
 ewf-image recover damaged.E01 recovered-case --maximum-output-bytes 107374182400
 ewf-image export case.E01 disk.raw
@@ -38,6 +42,10 @@ ewf-image report case.E01 --write
 
 ## Logical file operations
 
+`verify-file` and `extract-file` remain accepted for existing scripts. New usage
+is `verify IMAGE ENTRY` and `extract IMAGE ENTRY OUTPUT`. Scripts must add `--json`;
+redirecting stdout alone does not select JSON.
+
 `files IMAGE` lists L01/Lx01 catalog entries in preorder, with root index 0.
 Each entry includes `parent_index` (null for the root), preserving hierarchy
 across pages. Use `--offset` and `--limit` to page through the catalog; `next_offset` is null
@@ -45,13 +53,13 @@ on the last page. Indices select entries even when names collide or contain
 characters that cannot be represented as destination filenames. They remain
 stable only for the same unchanged image. Listing does not verify file data.
 
-`verify-file IMAGE INDEX` strictly reads that regular file, computes MD5, SHA1,
+`verify IMAGE ENTRY` strictly reads that regular file, computes MD5, SHA1,
 and SHA256, and compares available file MD5/SHA1 references. Container hashes
 are not file references. Missing file hashes return `file_hashes_missing`
 (exit 4); mismatches, invalid references, and unreadable data fail (exit 3).
 Directories and unknown entry types cannot be verified as regular files.
 
-`extract-file IMAGE INDEX OUTPUT` streams the file into a temporary file beside
+`extract IMAGE ENTRY OUTPUT` streams the file into a temporary file beside
 OUTPUT, checks its stored file hashes, synchronizes it, and publishes without
 overwriting an existing destination. Cancellation, corruption, and hash mismatch
 leave no final output. Missing references permit extraction but return
@@ -371,8 +379,10 @@ to 100,000 records and 64 MiB of committed records; each record and saved report
 is limited to 16 MiB. Reaching a limit stops logging rather than dropping events.
 
 Progress is written to stderr at most once per second; `--quiet` suppresses it.
-One JSON object is written to stdout on completion, cancellation, or operational
-failure. Argument errors and help follow normal command-line conventions.
+With `--json`, one JSON object is written to stdout on completion, cancellation,
+or operational failure. Text summaries show the outcome, verification scope,
+and relevant failures; detailed findings and history remain in JSON. Argument
+errors and help follow normal command-line conventions.
 The report has `schema_version: 1`; additive fields may appear in that version.
 It includes status, phase, elapsed time, accepted/checkpointed bytes when known,
 publication status, acquisition-error ranges, and verification results.
@@ -390,7 +400,7 @@ finish may still need recovery to resolve publication state.
 | 4 | Substitutions, missing logical-file references, analysis warnings, or recovery findings; inspect the command result |
 | 130 | Cancelled, including a requested `--stop-after` pause |
 
-For example, `ewf-image acquire disk.raw case.E01 > result.json` retains the
+For example, `ewf-image --json acquire disk.raw case.E01 > result.json` retains the
 report. Choose a new report path outside the source and image set: the shell
 opens redirections before the program can check them. Manifests and reports can
 contain case metadata and local source paths; handle them with the evidence.
