@@ -14,7 +14,7 @@ use super::{Progress, Result, error_ranges, hex, inspect, invalid, substituted_s
 
 const BUFFER_BYTES: usize = 1024 * 1024;
 
-pub fn run(
+pub(super) fn run(
     input: &Path,
     output: &Path,
     progress: &mut Progress<'_>,
@@ -55,7 +55,7 @@ pub fn run(
     Ok(())
 }
 
-pub(super) fn destination(segments: &[PathBuf], output: &Path) -> Result<PathBuf> {
+pub(crate) fn destination(segments: &[PathBuf], output: &Path) -> Result<PathBuf> {
     let name = output
         .file_name()
         .ok_or_else(|| invalid("missing output filename"))?;

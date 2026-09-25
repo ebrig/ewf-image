@@ -1,16 +1,17 @@
 //! Command-line acquisition, integrity analysis, recovery, and raw export.
 
 mod analyze;
-mod export;
+pub(crate) mod export;
 mod history;
 mod inspect;
 mod logical;
+mod output;
 mod recover;
 mod sequential;
 mod session;
-mod source;
+pub(crate) mod source;
 
-use std::io::{self, Write};
+use std::io;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -32,81 +33,115 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Acquire, inspect, analyze, recover, export, and verify EWF forensic images"
+    about = "Read, acquire, and verify EWF evidence",
+    disable_help_subcommand = true,
+    after_help = "Use ewf-image <command> --help for details."
 )]
 struct Cli {
-    /// Suppress progress on stderr (JSON results are always written to stdout).
-    #[arg(long, global = true)]
+    /// Hide progress.
+    #[arg(short, long, global = true)]
     quiet: bool,
+    /// Print machine-readable results.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Inspect image metadata without verifying media contents.
-    Info { image: PathBuf },
-    /// List logical catalog entries with stable preorder indices (root is 0).
-    Files {
+    /// Show image information.
+    Info {
+        /// First image segment.
         image: PathBuf,
-        #[arg(long, default_value_t = 0)]
+    },
+    /// Verify an image or one logical file.
+    Verify {
+        /// First image segment.
+        image: PathBuf,
+        /// Entry number from files; omit to verify the whole image.
+        entry: Option<usize>,
+    },
+    /// List logical files and their entry numbers.
+    Files {
+        /// First logical image segment.
+        image: PathBuf,
+        /// Start at this entry number.
+        #[arg(long, default_value_t = 0, value_name = "ENTRY")]
         offset: usize,
-        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..=100000))]
+        /// Entries per page.
+        #[arg(long, default_value_t = 1000, value_name = "COUNT", value_parser = clap::value_parser!(u32).range(1..=100000))]
         limit: u32,
     },
-    /// Strictly verify one logical file selected by its catalog index.
+    /// Verify one logical file (compatibility command).
+    #[command(hide = true)]
     VerifyFile { image: PathBuf, entry: usize },
-    /// Extract one logical file to a NEW caller-selected filename.
+    /// Extract and check one logical file.
+    #[command(name = "extract", alias = "extract-file")]
     ExtractFile {
+        /// First logical image segment.
         image: PathBuf,
+        /// Entry number from files.
         entry: usize,
+        /// New destination file.
         output: PathBuf,
     },
-    /// Scan integrity findings and media coverage, continuing after chunk errors.
+    /// Scan for damage and report integrity findings.
     Analyze {
+        /// First image segment.
         image: PathBuf,
         /// Maximum retained findings; all findings are still counted.
-        #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(0..=100000))]
+        #[arg(long, default_value_t = 1024, value_name = "COUNT", value_parser = clap::value_parser!(u32).range(0..=100000))]
         maximum_findings: u32,
     },
-    /// Export the complete, strictly decoded media stream to a new raw file.
-    Export { image: PathBuf, output: PathBuf },
-    /// Recover physical raw/zlib EWF1 into a NEW directory with raw data and provenance.
-    Recover {
+    /// Export decoded media to a raw file.
+    Export {
+        /// First image segment.
         image: PathBuf,
+        /// New raw output file.
+        output: PathBuf,
+    },
+    /// Recover damaged EWF1 media with a provenance map.
+    Recover {
+        /// First damaged EWF1 segment.
+        image: PathBuf,
+        /// New directory for recovered data and provenance.
         output: PathBuf,
         /// Reject declared media larger than this limit before creating output.
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        #[arg(long, value_name = "BYTES", value_parser = clap::value_parser!(u64).range(1..))]
         maximum_output_bytes: Option<u64>,
         /// Retain decodable checksum-suspect bytes when no validated alternate exists.
         #[arg(long)]
         preserve_checksum_suspect: bool,
     },
-    /// Acquire a source, publish its E01 segments, then reopen and verify them.
+    /// Acquire and verify a resumable E01 image.
     Acquire(Acquire),
-    /// One-shot Ex01 acquisition, with bounded scratch and post-write verification.
+    /// Acquire and verify an Ex01 image (no resume).
     AcquireSequential(sequential::AcquireArgs),
-    /// Collect a directory snapshot into a new Lx01 image and verify every file.
+    /// Collect a directory into a verified Lx01 image.
     Collect(sequential::CollectArgs),
-    /// Recover/discard an interrupted one-shot publication transaction.
-    RecoverPublication { output: PathBuf },
-    /// Resume using the original source and options from the session manifest.
+    /// Resolve an interrupted Ex01/Lx01 publication.
+    RecoverPublication {
+        /// First output segment (.Ex01 or .Lx01).
+        output: PathBuf,
+    },
+    /// Resume an interrupted E01 acquisition.
     Resume {
+        /// Original .E01 output path.
         output: PathBuf,
         #[command(flatten)]
         read: ReadArgs,
     },
-    /// Inspect or validate a stopped acquisition without opening its source.
+    /// Inspect or validate an E01 checkpoint.
     Checkpoint {
         #[command(subcommand)]
         command: CheckpointCommand,
     },
-    /// Reopen an image and verify all media bytes and supported stored hashes.
-    Verify { image: PathBuf },
-    /// Read recorded acquisition history without opening or verifying the image.
+    /// Show saved acquisition history.
     Report {
+        /// Original .E01 output path.
         output: PathBuf,
-        /// Rebuild the saved consolidated report from committed history records.
+        /// Update the saved report.
         #[arg(long)]
         write: bool,
     },
@@ -114,30 +149,44 @@ enum Command {
 
 #[derive(Subcommand)]
 enum CheckpointCommand {
-    /// Inspect metadata only; does not certify segment contents.
-    Inspect { output: PathBuf },
-    /// Validate every sealed segment against its checkpointed SHA256.
-    Validate { output: PathBuf },
+    /// Show checkpoint information.
+    Inspect {
+        /// Original .E01 output path.
+        output: PathBuf,
+    },
+    /// Check saved segment hashes.
+    Validate {
+        /// Original .E01 output path.
+        output: PathBuf,
+    },
 }
 
 #[derive(Args)]
 struct Acquire {
+    /// Source file or device.
     source: PathBuf,
+    /// New .E01 output path.
     output: PathBuf,
     /// Logical sector size for a regular file.
-    #[arg(long, value_parser = clap::value_parser!(u32).range(512..=4096))]
+    #[arg(long, value_name = "BYTES", help_heading = "Image settings", value_parser = clap::value_parser!(u32).range(512..=4096))]
     sector_size: Option<u32>,
-    #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..=32768))]
+    /// Sectors in each encoded chunk.
+    #[arg(long, default_value_t = 64, value_name = "COUNT", help_heading = "Image settings", value_parser = clap::value_parser!(u32).range(1..=32768))]
     sectors_per_chunk: u32,
-    #[arg(long, default_value_t = 16375, value_parser = clap::value_parser!(u32).range(1..=16375))]
+    /// Chunks in each segment.
+    #[arg(long, default_value_t = 16375, value_name = "COUNT", help_heading = "Image settings", value_parser = clap::value_parser!(u32).range(1..=16375))]
     chunks_per_segment: u32,
-    #[arg(long, default_value = "zlib", value_parser = ["raw", "zlib"])]
+    /// Image compression.
+    #[arg(long, default_value = "zlib", help_heading = "Image settings", value_parser = ["raw", "zlib"])]
     compression: String,
-    #[arg(long)]
+    /// Case identifier.
+    #[arg(long, value_name = "ID", help_heading = "Case details")]
     case_number: Option<String>,
-    #[arg(long)]
+    /// Evidence identifier.
+    #[arg(long, value_name = "ID", help_heading = "Case details")]
     evidence_number: Option<String>,
-    #[arg(long)]
+    /// Examiner name.
+    #[arg(long, value_name = "NAME", help_heading = "Case details")]
     examiner: Option<String>,
     #[command(flatten)]
     read: ReadArgs,
@@ -145,20 +194,20 @@ struct Acquire {
 
 #[derive(Args)]
 struct ReadArgs {
-    /// Maximum wait for each source seek/read, in milliseconds; no deadline by default.
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    /// Per-read timeout; omitted means no deadline.
+    #[arg(long, value_name = "MS", help_heading = "Read handling", value_parser = clap::value_parser!(u64).range(1..))]
     read_timeout_ms: Option<u64>,
     /// Additional attempts per failed sector.
-    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(0..=100))]
+    #[arg(long, default_value_t = 2, value_name = "COUNT", help_heading = "Read handling", value_parser = clap::value_parser!(u32).range(0..=100))]
     retries: u32,
-    /// Substitute unrecoverable sectors with zeros and record their ranges.
-    #[arg(long)]
+    /// Record unreadable sectors and replace them with zeros.
+    #[arg(long, help_heading = "Read handling")]
     zero_fill: bool,
     /// Checkpoint interval in bytes; must be a multiple of the chunk size.
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, value_name = "BYTES", help_heading = "Checkpoints", value_parser = clap::value_parser!(u64).range(1..))]
     checkpoint_interval: Option<u64>,
-    /// Pause when this absolute accepted-byte offset is reached (chunk granularity).
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    /// Pause after this many accepted bytes (rounded to a chunk).
+    #[arg(long, value_name = "BYTES", help_heading = "Checkpoints", value_parser = clap::value_parser!(u64).range(1..))]
     stop_after: Option<u64>,
 }
 
@@ -166,15 +215,38 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let stop = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&stop);
+    if let Err(error) = ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed)) {
+        eprintln!("cannot install cancellation handler: {error}");
+        return ExitCode::from(1);
+    }
+    let json = cli.json;
+    let (report, code) = execute(&cli, &stop);
+    if let Err(error) = output::print(&report, json) {
+        eprintln!("cannot write result: {error}");
+        return ExitCode::from(1);
+    }
+    ExitCode::from(code)
+}
+
+// In-process bridge used by the unified CLI. Legacy entry points use the same
+// execution and history finalization path; this never launches a subprocess.
+#[allow(dead_code)]
+pub(crate) fn dispatch(
+    arguments: &[std::ffi::OsString],
+    stop: &Arc<AtomicBool>,
+) -> Result<(Value, u8)> {
+    let cli = Cli::try_parse_from(arguments)?;
+    Ok(execute(&cli, stop))
+}
+
+fn execute(cli: &Cli, stop: &Arc<AtomicBool>) -> (Value, u8) {
     let started = Instant::now();
     let mut report = json!({"schema_version": 1, "tool_version": env!("CARGO_PKG_VERSION"),
         "status": "failed", "phase": "preflight", "published": false,
         "verification": null, "checkpoint_bytes": 0, "accepted_bytes": 0});
     let mut history = None;
     let mut recovery = None;
-    let result = ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed))
-        .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
-        .and_then(|()| run(&cli, &stop, &mut report, &mut history, &mut recovery));
+    let result = run(cli, stop, &mut report, &mut history, &mut recovery);
     let mut code = if let Err(error) = result {
         let aborted = error
             .downcast_ref::<EwfError>()
@@ -240,14 +312,7 @@ fn main() -> ExitCode {
         code = 1;
         report["exit_code"] = json!(code);
     }
-    if let Err(error) = serde_json::to_writer_pretty(io::stdout().lock(), &report)
-        .map_err(io::Error::other)
-        .and_then(|()| writeln!(io::stdout().lock()))
-    {
-        eprintln!("cannot write result: {error}");
-        return ExitCode::from(1);
-    }
-    ExitCode::from(code)
+    (report, code)
 }
 
 fn run(
@@ -412,7 +477,10 @@ fn run(
             });
             Ok(())
         }
-        Command::Verify { image } => verify(image, None, &mut progress, report),
+        Command::Verify { image, entry } => match entry {
+            Some(entry) => logical::read(image, *entry, None, &mut progress, report),
+            None => verify(image, None, &mut progress, report),
+        },
         Command::Report { output, write } => {
             let output = session::normalize_output(output)?;
             let _lock = session::lock(&output)?;

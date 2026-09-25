@@ -57,7 +57,7 @@ impl Session {
             .evidence_number
             .clone_from(&self.evidence_number);
         options.metadata.examiner.clone_from(&self.examiner);
-        options.metadata.acquisition_software = Some("ewf-image".into());
+        options.metadata.acquisition_software = Some(env!("CARGO_PKG_NAME").into());
         options.metadata.acquisition_software_version = Some(self.software_version.clone());
         Ok(options)
     }

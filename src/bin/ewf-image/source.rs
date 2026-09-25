@@ -18,7 +18,7 @@ mod windows;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum SourceKind {
+pub(crate) enum SourceKind {
     #[default]
     File,
     Device,
@@ -30,7 +30,7 @@ fn is_file(kind: &SourceKind) -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(super) struct SourceIdentity {
+pub(crate) struct SourceIdentity {
     #[serde(default, skip_serializing_if = "is_file")]
     pub kind: SourceKind,
     pub path: PathBuf,
@@ -39,7 +39,7 @@ pub(super) struct SourceIdentity {
     pub identity: String,
 }
 
-pub(super) struct Source {
+pub(crate) struct Source {
     file: File,
     pub identity: SourceIdentity,
     output: PathBuf,
@@ -302,7 +302,7 @@ impl SourceIdentity {
     }
 }
 
-pub(super) fn metadata_identity(metadata: &fs::Metadata) -> Result<String> {
+pub(crate) fn metadata_identity(metadata: &fs::Metadata) -> Result<String> {
     let mut identity = format!(
         "file:{}:{:?}:{:?}",
         metadata.len(),

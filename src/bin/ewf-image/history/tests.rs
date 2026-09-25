@@ -68,7 +68,10 @@ fn process_exit_during_record_and_report_publication_preserves_prior_records() {
             let result = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "history::tests::history_crash_worker",
+                    &format!(
+                        "{}::history_crash_worker",
+                        module_path!().split_once("::").unwrap().1
+                    ),
                     "--nocapture",
                 ])
                 .env("EWF_HISTORY_CRASH_OUTPUT", &session.output)

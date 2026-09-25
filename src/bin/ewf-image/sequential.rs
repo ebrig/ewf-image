@@ -15,34 +15,42 @@ use serde_json::{Value, json};
 
 #[derive(Args)]
 pub(super) struct OutputArgs {
+    /// New image path (.Ex01 for acquisition, .Lx01 for collection).
     pub output: PathBuf,
     /// Chunks per segment; chunks use standard 32 KiB geometry.
-    #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(1..=16384))]
+    #[arg(long, default_value_t = 1024, value_name = "COUNT", help_heading = "Image settings", value_parser = clap::value_parser!(u32).range(1..=16384))]
     chunks_per_segment: u32,
-    #[arg(long, default_value = "zlib", value_parser = ["raw", "zlib"])]
+    /// Image compression.
+    #[arg(long, default_value = "zlib", help_heading = "Image settings", value_parser = ["raw", "zlib"])]
     compression: String,
-    #[arg(long)]
+    /// Case identifier.
+    #[arg(long, value_name = "ID", help_heading = "Case details")]
     case_number: Option<String>,
-    #[arg(long)]
+    /// Evidence identifier.
+    #[arg(long, value_name = "ID", help_heading = "Case details")]
     evidence_number: Option<String>,
-    #[arg(long)]
+    /// Examiner name.
+    #[arg(long, value_name = "NAME", help_heading = "Case details")]
     examiner: Option<String>,
 }
 
 #[derive(Args)]
 pub(super) struct AcquireArgs {
+    /// Source file or device.
     source: PathBuf,
     #[command(flatten)]
     output: OutputArgs,
-    #[arg(long, value_parser = clap::value_parser!(u32).range(512..=4096))]
+    /// Logical sector size for a regular file.
+    #[arg(long, value_name = "BYTES", help_heading = "Image settings", value_parser = clap::value_parser!(u32).range(512..=4096))]
     sector_size: Option<u32>,
     /// Deadline for each source read, in milliseconds.
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, value_name = "MS", value_parser = clap::value_parser!(u64).range(1..))]
     read_timeout_ms: Option<u64>,
 }
 
 #[derive(Args)]
 pub(super) struct CollectArgs {
+    /// Directory to collect; use a stable snapshot.
     source: PathBuf,
     #[command(flatten)]
     output: OutputArgs,
@@ -75,7 +83,7 @@ fn settings(args: &OutputArgs, size: u64, format: WriteFormat) -> SequentialOpti
         .evidence_number
         .clone_from(&args.evidence_number);
     settings.write.metadata.examiner.clone_from(&args.examiner);
-    settings.write.metadata.acquisition_software = Some("ewf-image".into());
+    settings.write.metadata.acquisition_software = Some(env!("CARGO_PKG_NAME").into());
     settings.write.metadata.acquisition_software_version = Some(env!("CARGO_PKG_VERSION").into());
     settings
 }
@@ -113,7 +121,7 @@ fn published(
             report["published"] = Value::Null;
             report["publication_state"] = json!("unresolved");
             report["recovery_command"] = json!([
-                "ewf-image",
+                env!("CARGO_PKG_NAME"),
                 "recover-publication",
                 output.to_string_lossy().as_ref()
             ]);

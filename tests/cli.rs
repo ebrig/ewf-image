@@ -11,6 +11,96 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 #[test]
+fn cli_text_summaries_and_json_preserve_verification_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("source")).unwrap();
+    fs::write(dir.path().join("source/file"), b"known file bytes").unwrap();
+    let text_cli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ewf-image"))
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let collected = text_cli(&["-q", "collect", "source", "case.Lx01"]);
+    assert!(collected.status.success(), "{collected:?}");
+    let text = String::from_utf8(collected.stdout).unwrap();
+    assert!(text.contains("Published: yes"), "{text}");
+    assert!(text.contains("Files verified: 1"), "{text}");
+    assert!(text.lines().count() < 16, "{text}");
+    let info = text_cli(&["info", "case.Lx01"]);
+    assert!(info.status.success());
+    let text = String::from_utf8(info.stdout).unwrap();
+    assert!(
+        text.contains("Status: inspected") && !text.contains("Status: verified"),
+        "{text}"
+    );
+    let verified = text_cli(&["-q", "verify", "case.Lx01", "1"]);
+    assert!(verified.status.success(), "{verified:?}");
+    let text = String::from_utf8(verified.stdout).unwrap();
+    assert!(
+        text.contains("Scope: file") && text.contains("Reference hashes: match"),
+        "{text}"
+    );
+    let extracted = text_cli(&["-q", "extract", "case.Lx01", "1", "file.bin"]);
+    assert!(extracted.status.success(), "{extracted:?}");
+    assert_eq!(
+        fs::read(dir.path().join("file.bin")).unwrap(),
+        b"known file bytes"
+    );
+    let json = result(dir.path(), &["verify", "case.Lx01", "1"], 0);
+    assert_eq!(json["verification"]["scope"], "file");
+    assert_eq!(json["media_verified"], false);
+    let error = text_cli(&["info", "missing.E01"]);
+    assert_eq!(error.status.code(), Some(1));
+    let text = String::from_utf8(error.stdout).unwrap();
+    assert!(
+        text.contains("Status: failed") && text.contains("Error:"),
+        "{text}"
+    );
+}
+
+#[test]
+fn cli_help_covers_every_operation() {
+    for command in [
+        None,
+        Some("info"),
+        Some("files"),
+        Some("verify"),
+        Some("extract"),
+        Some("analyze"),
+        Some("export"),
+        Some("recover"),
+        Some("acquire"),
+        Some("acquire-sequential"),
+        Some("collect"),
+        Some("recover-publication"),
+        Some("resume"),
+        Some("checkpoint"),
+        Some("report"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ewf-image"))
+            .args(command)
+            .arg("--help")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let help = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            help.contains("--json") && help.contains("--quiet"),
+            "{help}"
+        );
+        assert!(!help.contains("--memory-limit"));
+        if command.is_none() {
+            assert!(
+                !help.contains("verify-file") && !help.contains("extract-file"),
+                "{help}"
+            );
+        }
+    }
+}
+
+#[test]
 fn cli_sequential_acquires_split_images_and_verifies_source_hash() {
     for codec in ["raw", "zlib"] {
         let dir = tempfile::tempdir().unwrap();
@@ -284,6 +374,7 @@ fn cli_logical_listing_verification_and_safe_selective_extraction() {
 
 fn cli(directory: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_ewf-image"))
+        .arg("--json")
         .current_dir(directory)
         .args(args)
         .output()
@@ -718,6 +809,7 @@ fn cli_analysis_signal_cancellation_never_reports_complete_hashes() {
         },
     );
     let mut child = Command::new(env!("CARGO_BIN_EXE_ewf-image"))
+        .arg("--json")
         .current_dir(dir.path())
         .args(["analyze", "case.E01"])
         .stdout(Stdio::piped())
@@ -746,6 +838,7 @@ fn running_recovery(directory: &Path) -> std::process::Child {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
     let mut child = Command::new(env!("CARGO_BIN_EXE_ewf-image"))
+        .arg("--json")
         .current_dir(directory)
         .args(["recover", "case.E01", "recovered"])
         .stdout(Stdio::piped())
@@ -1048,6 +1141,7 @@ fn running_export(directory: &Path) -> std::process::Child {
     use std::process::Stdio;
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_ewf-image"))
+        .arg("--json")
         .current_dir(directory)
         .args(["export", "case.E01", "disk.raw"])
         .stdout(Stdio::piped())
@@ -1629,6 +1723,7 @@ fn cli_handles_real_interrupt_and_termination_signals() {
             .set_len(512 * 1024 * 1024)
             .unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_ewf-image"))
+            .arg("--json")
             .current_dir(dir.path())
             .args([
                 "acquire",

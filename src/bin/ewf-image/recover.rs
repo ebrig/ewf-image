@@ -343,7 +343,14 @@ mod tests {
             writer.finish().unwrap();
             let original = fs::read(&path).unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "recover::tests::crash_worker", "--nocapture"])
+                .args([
+                    "--exact",
+                    &format!(
+                        "{}::crash_worker",
+                        module_path!().split_once("::").unwrap().1
+                    ),
+                    "--nocapture",
+                ])
                 .env("EWF_RECOVERY_CRASH_ROOT", dir.path())
                 .env("EWF_RECOVERY_CRASH_POINT", point)
                 .output()
