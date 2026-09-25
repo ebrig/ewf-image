@@ -385,6 +385,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ewf-cli"
+version = "0.1.0"
+dependencies = [
+ "aff4-image",
+ "base64",
+ "clap",
+ "ctrlc",
+ "ewf-image",
+ "md-5",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "tempfile",
+ "time",
+ "windows-sys",
+]
+
+[[package]]
 name = "ewf-image"
 version = "0.4.0"
 dependencies = [

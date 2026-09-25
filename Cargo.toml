@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/aff4-image"]
+members = ["crates/aff4-image", "crates/ewf-cli"]
 default-members = ["."]
 resolver = "3"
 
@@ -43,6 +43,7 @@ include = [
     "/docs/architecture.md",
     "/docs/acquisition.md",
     "/docs/cli.md",
+    "/docs/ewf-cli.md",
     "/docs/device-acceptance.md",
     "/docs/assets/ewf-image-banner.png",
     "/docs/compatibility.md",
