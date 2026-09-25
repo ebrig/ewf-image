@@ -6836,6 +6836,51 @@ fn image_reads_ewf1_sparse_entry_from_duplicate_offset_before_extent() {
 }
 
 #[test]
+fn image_preserves_logical_names_and_reads_data_bearing_parent() {
+    let mut lines = default_single_files_prefix();
+    lines.extend([
+        "entry".to_owned(),
+        "0\t1".to_owned(),
+        "id\tp\tn\tls\tbe".to_owned(),
+        "26\t1".to_owned(),
+        "1\td\troot\t0\t".to_owned(),
+        "26\t1".to_owned(),
+        "2\td\tfolder/name\t4\t1 0 4".to_owned(),
+        "26\t0".to_owned(),
+        "3\tf\tpart\\name·stream\t5\t1 4 5".to_owned(),
+        String::new(),
+    ]);
+    let file = synthetic_l01_with_ltree(b"HEADhello", &utf16le_lines(lines));
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    let catalog = image.info().single_files.as_ref().unwrap();
+    let parent = catalog.entry_by_path("folder/name").unwrap().unwrap();
+    let child = catalog
+        .entry_by_path("folder/name\tpart\\name·stream")
+        .unwrap()
+        .unwrap();
+    let mut parent_data = [0; 4];
+    let mut child_data = [0; 5];
+
+    assert_eq!(parent.name.as_deref(), Some("folder/name"));
+    assert_eq!(child.name.as_deref(), Some("part\\name·stream"));
+    assert_eq!(parent.children.len(), 1);
+    assert_eq!(
+        image
+            .read_single_file_at_strict(parent, &mut parent_data, 0)
+            .unwrap(),
+        4
+    );
+    assert_eq!(&parent_data, b"HEAD");
+    assert_eq!(
+        image
+            .read_single_file_at(child, &mut child_data, 0)
+            .unwrap(),
+        5
+    );
+    assert_eq!(&child_data, b"hello");
+}
+
+#[test]
 fn image_reads_ewf1_sparse_entry_as_repeated_stored_byte() {
     let file = synthetic_l01_with_ltree(
         b"Qother-data",
