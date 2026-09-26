@@ -1,8 +1,8 @@
 # Acquisition and writing
 
-Choose a writer according to input access, output family, and resume needs.
-The CLI uses these APIs with additional source checks and JSON reporting; see
-[CLI acquisition](cli.md#acquisition).
+Choose a writer based on how the input is accessed, the output format family,
+and whether the operation must be resumable. The CLI uses these APIs and adds
+source checks and JSON reporting. See [CLI acquisition](cli.md#acquisition).
 
 ## Choose a writer
 
@@ -13,18 +13,19 @@ The CLI uses these APIs with additional source checks and JSON reporting; see
 | `SequentialWriter` | You need append-only Ex01/Lx01 with bounded payload scratch | Known size; no checkpoint resume |
 | `LogicalWriter` | You are supplying files and metadata for L01/Lx01 | Retained catalog; general or sequential EWF2 backend |
 
-Library finalization computes hashes but does not independently reread output.
-EWF CLI acquisition/collection verifies after publication. AFF4 is a separate
-[sibling crate](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image)
-with its own single-volume writer and opt-in verification before publication.
+Library finalization computes hashes but does not reread the output. The EWF CLI
+acquisition and collection commands verify output after publication. AFF4 support
+is provided by a separate
+[sibling crate](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image),
+which has its own single-volume writer and optional verification before publication.
 
 ## Resumable E01 acquisition
 
-`AcquisitionWriter` creates physical E01 images from an append-only source with
-a known, nonzero, sector-aligned size. It supports raw and zlib compression,
-one destination, and MD5/SHA1/SHA256 media digests. `EwfWriter` remains available
-for positioned writes, other container families, mirroring, and rewrite-based
-resume.
+`AcquisitionWriter` creates physical E01 images from an append-only source whose
+size is known, nonzero, and sector-aligned. The writer supports raw and zlib
+compression, one destination, and MD5, SHA1, and SHA256 media digests. Use
+`EwfWriter` for positioned writes, other container families, mirroring, and
+resume by rewriting.
 
 ```rust,no_run
 use ewf_image::{AcquisitionOptions, AcquisitionWriter};
@@ -45,7 +46,7 @@ fn main() -> ewf_image::Result<()> {
 ```
 
 After an interruption, reopen the source and reconstruct the same `options` and
-`identity`. In the acquisition application, continue from the sealed offset:
+`identity`. Then continue from the sealed offset:
 
 ```rust,ignore
 // Continuation: source, options, and identity come from the acquisition session.
@@ -58,11 +59,11 @@ writer.finish()?;
 
 ## Source reads, progress, and cancellation
 
-For a caller-opened file or seekable device handle, use `acquire_from` or
-`acquire_with_progress`. These methods seek to the writer's accepted offset on
-every read attempt, including after resume; callers do not need to position the
-source themselves. Device opening, privileges, source-size discovery, and stable
-source identification remain the application's responsibility.
+For a file or seekable device handle opened by the caller, use `acquire_from` or
+`acquire_with_progress`. These methods seek to the writer's accepted offset
+before every read attempt, including after resume, so the caller does not need to
+position the source. The application is responsible for opening devices,
+obtaining privileges, discovering the source size, and identifying the source.
 
 ```rust,ignore
 // Continuation: writer and source are the open acquisition handles.
@@ -87,51 +88,59 @@ if outcome.status == AcquisitionStatus::Complete {
 }
 ```
 
-Normal reads are chunk-sized. A failed bulk read is discarded, then retried one
-sector at a time to isolate damaged sectors. `retries` is the number of additional
-attempts per sector (0 through 100); the initial bulk failure does not consume that
-allowance. Short successful reads are completed before any bytes from the attempt
-enter the image. Progress includes read/retry counts for the current call, the
-current read offset and error kind, total accepted/checkpointed bytes, and the
-cumulative substituted-sector count.
+Normal reads are chunk-sized. When a bulk read fails, its data is discarded and
+the range is reread one sector at a time to isolate damaged sectors. `retries` is
+the number of additional attempts for each sector, from 0 through 100. The
+initial bulk failure does not count against that number. Short successful reads
+are completed before any bytes from the attempt enter the image. Progress reports
+include read and retry counts for the current call, the current read offset and
+error kind, the total accepted and checkpointed bytes, and the cumulative count
+of substituted sectors.
 
-The default policy stops on an unreadable sector. `ZeroFill` must be selected
-explicitly: it substitutes exactly one sector and records its location. EOF,
-failed seeks, permission/configuration failures, timeouts, and interrupted or nonblocking
-reads always stop; these conditions are never padded to the declared source
-size. Error-range storage is bounded by `maximum_error_ranges` (65,536 by
-default); reaching the limit stops before another disjoint substitution. Adjacent
-substitutions share a range. EWF1 error tables use 32-bit sector addresses;
-substitution stops if a failed sector cannot be represented.
+The default policy stops at an unreadable sector. `ZeroFill` must be selected
+explicitly. `ZeroFill` substitutes zeros for exactly one sector and records its
+location. EOF, failed seeks, permission and configuration failures, timeouts,
+and interrupted or nonblocking reads always stop acquisition. These conditions
+are never padded to the declared source size.
 
-`Complete` means the declared output range is filled, possibly with substitutions.
-It does not mean every source sector was successfully read. `acquisition_errors()`
-exposes those ranges, including accepted but unsealed substitutions. Each sealed
-segment carries a cumulative native EWF `error2` table; the final table describes
-all substituted sectors and is compatible with libewf. Resume restores only the
-sealed ranges. Media hashes describe the bytes actually written, including zeros;
-a successful hash verification does not prove that substituted source data was
-recovered. The library does not persist per-attempt diagnostics or retry counts.
-The optional CLI records read-error kinds, offsets, retry counters, and run results
-in separate [acquisition history](cli.md#results); those records are not EWF metadata.
+`maximum_error_ranges` limits error-range storage and defaults to 65,536. When
+the limit is reached, acquisition stops before another separate substitution.
+Adjacent substitutions share a range. EWF1 error tables use 32-bit sector
+addresses, so acquisition stops if a failed sector cannot be represented.
 
-A callback returning `Break(())` stops between source I/O operations, checkpoints
-complete accepted chunks, and returns `Cancelled`. A partial chunk remains in the
-live writer; continue with it, or drop it and resume from `checkpoint_offset()`.
-Source failures similarly checkpoint full chunks and leave the writer usable.
-Destination failures poison it. Callbacks run on the calling thread; an in-flight
-OS read, seek, or native segment seal cannot be interrupted by the callback.
-Applications can check an atomic stop flag or forward progress to their own UI.
+`Complete` means that the declared output range is filled, possibly with
+substitutions. `Complete` does not mean that every source sector was read
+successfully. `acquisition_errors()` returns the substituted ranges, including
+accepted substitutions that are not yet sealed. Each sealed segment carries a
+cumulative native EWF `error2` table. The final table describes all substituted
+sectors and is compatible with libewf. Resume restores only the sealed ranges.
 
-`checkpoint_interval` can force earlier seals. It must be a positive multiple of
-the chunk size and must fit the native segment-number namespace. The interval is
-measured in accepted bytes since the last checkpoint; regular segment boundaries
-still apply. Changing read policy after resume affects only new input.
+Media hashes describe the bytes actually written, including substituted zeros.
+A successful hash verification does not prove that substituted source data was
+recovered. The library does not store per-attempt diagnostics or retry counts.
+The CLI records read-error kinds, offsets, retry counters, and run results in a
+separate [acquisition history](cli.md#results). These records are not EWF metadata.
+
+When the callback returns `Break(())`, the writer stops between source I/O
+operations, checkpoints the complete accepted chunks, and returns `Cancelled`. A
+partial chunk remains in the open writer. Either continue writing, or drop the
+writer and resume from `checkpoint_offset()`. Source failures also checkpoint
+full chunks and leave the writer usable. Destination failures poison the writer.
+Callbacks run on the calling thread, so the callback cannot interrupt an
+operating-system read or seek in progress or a native segment seal. Applications
+can check an atomic stop flag in the callback or forward progress to their own
+user interface.
+
+`checkpoint_interval` forces segments to be sealed earlier. The interval must be
+a positive multiple of the chunk size and must fit the native segment-number
+namespace. The interval counts accepted bytes since the last checkpoint. Regular
+segment boundaries still apply. A read policy changed after resume affects only
+new input.
 
 ## Inspecting and validating a checkpoint
 
-Close the writer before calling these functions so inspection can acquire the
-output lock. Supply the original acquisition options and source identity:
+Close the writer before calling these functions so that inspection can acquire
+the output lock. Supply the original acquisition options and source identity:
 
 ```rust,ignore
 // Supply the original acquisition options and identity.
@@ -144,94 +153,101 @@ let checkpoint = AcquisitionWriter::validate_checkpoint(
 assert!(checkpoint.segment_hashes_validated);
 ```
 
-Inspection reports the resumable offset, sealed count/size, readiness to finish,
-whether publication started, and normalized substituted-sector ranges. It never
-cleans scratch, rewrites checkpoints, reads the source, or publishes output.
+Inspection reports the resumable offset, the sealed segment count and size,
+whether the acquisition is ready to finish, whether publication has started, and
+the normalized ranges of substituted sectors. Inspection never cleans scratch
+files, rewrites checkpoints, reads the source, or publishes output.
 Metadata-only inspection does not scan media payloads or certify their contents.
-Validation additionally compares each entire sealed file with its checkpointed
-SHA256; it does not decode and rehash logical media.
+Validation also compares each complete sealed file with its checkpointed SHA256.
+Validation does not decode or rehash the logical media.
 
-`resume_with_progress` reports container validation and logical-media rehash
-phases. `finish_with_progress` reports validation and publication. Their callbacks
-receive `AcquisitionOperationProgress`; byte units and totals belong to the
+`resume_with_progress` reports the container validation and logical-media rehash
+phases. `finish_with_progress` reports validation and publication. Both callbacks
+receive `AcquisitionOperationProgress`, whose byte units and totals refer to the
 reported phase. Returning `Break(())` returns `EwfError::Aborted` and leaves the
-journal resumable. Even cancellation after output links have been installed is
-recoverable through resume and finish. Journal retirement is the publication
-commit point; final cleanup after that point is not cancellable.
+journal resumable. Cancellation remains recoverable through resume and finish
+even after output links have been installed. Retiring the journal is the commit
+point for publication. The final cleanup after that point cannot be cancelled.
 
 ## Checkpoints and resource use
 
-Writes encode one chunk at a time into a segment-sized scratch file. A full
-segment is sealed as native EWF data, synchronized, and recorded by an immutable
-checkpoint. At default geometry, a segment holds at most 16,375 chunks of
-32 KiB each. A fixed number of chunk buffers and one segment's descriptors are
-kept in RAM; per-segment checkpoint metadata grows with the number of segments.
-Scratch space is limited to one encoded segment and its native copy during
-sealing. Previously sealed native segments occupy the space needed for the
-eventual image; the source is never spooled in full.
+The writer encodes one chunk at a time into a scratch file sized for one segment.
+A full segment is sealed as native EWF data, synchronized, and recorded by an
+immutable checkpoint. At the default geometry, a segment holds at most 16,375
+chunks of 32 KiB each. A fixed number of chunk buffers and the descriptors for
+one segment are kept in memory. Checkpoint metadata grows with the number of
+segments. Scratch space is limited to one encoded segment plus its native copy
+during sealing. Sealed native segments occupy the space of the final image, and
+the source is never spooled in full.
 
 `position()` includes all accepted input. `checkpoint_offset()` includes only
-successfully sealed input. `checkpoint()` and `Write::flush()` seal complete
-chunks early, but retain a partial chunk in memory. The last chunk is sealed
-automatically when the exact source size is reached. `finish()` rejects short
-input, and writes reject excess input. Errors from the low-level `Write` API
-poison the writer; drop it and resume before supplying more data.
+input that has been sealed successfully. `checkpoint()` and `Write::flush()` seal
+complete chunks early but keep a partial chunk in memory. The last chunk is
+sealed automatically when the exact source size is reached. `finish()` rejects
+short input, and writes reject excess input. An error from the low-level `Write`
+API poisons the writer. Drop the writer and resume before supplying more data.
 
-Resume checks the configuration, caller-supplied source identity, checkpoint
-records, and the full SHA256 of every sealed container segment. It then decodes
-the sealed prefix to rebuild all three media hash states. This costs a complete
-read/hash of the acquired prefix but never rewrites it. Input after the last
-successful checkpoint must be supplied again. The caller must prevent source
-changes or provide a new identity; the library does not inspect a physical
-device's identity or compare the live source with previous input.
+Resume checks the configuration, the source identity supplied by the caller, the
+checkpoint records, and the full SHA256 of every sealed container segment.
+Resume then decodes the sealed prefix to rebuild all three media hash states.
+This step reads and hashes the entire acquired prefix but never rewrites it. Any
+input after the last successful checkpoint must be supplied again. The caller
+must prevent source changes or supply a new identity. The library does not
+inspect a physical device's identity or compare the live source with earlier input.
 
 ## Publication and recovery boundaries
 
-During acquisition, native segments and checkpoint records are stored beside
-the destination in `.case.E01.ewf-acquisition`. Preserve that whole directory.
-It is a private versioned implementation format, not a libewf resume file. The
-first path, source identity, and configuration must match on resume.
+During acquisition, native segments and checkpoint records are stored in a
+`.case.E01.ewf-acquisition` directory beside the destination. Preserve the whole
+directory. The directory uses a private, versioned format and is not a libewf
+resume file. The first segment path, source identity, and configuration must
+match on resume.
 
-`finish()` exclusively creates destination hard links to the sealed segments,
-then retires the checkpoint directory after synchronizing publication. This
-requires a filesystem supporting file locking and hard links. Existing output,
-including higher-numbered segments after gaps, is rejected. An interrupted
-publication is resumed with the same `resume(...).finish()` sequence. Readers
-in this library reject a pending acquisition; other EWF tools do not honor its
-sidecar, so use the output only after successful completion. A failure during
-final cleanup can leave a completed image and inert
-`.ewf-acquisition-cleanup-*` directories. Interrupted initialization can leave
-inert `.ewf-acquisition-init-*` directories.
+`finish()` exclusively creates hard links from the destination paths to the
+sealed segments, synchronizes the publication, and then retires the checkpoint
+directory. The filesystem must support file locking and hard links. Existing
+output is rejected, including higher-numbered segments after a gap. An
+interrupted publication is completed with the same `resume(...).finish()`
+sequence.
 
-Files are flushed before checkpoints are acknowledged. Unix also flushes
-directory entries. Windows power-loss durability, network filesystems, and
-devices that disregard flushes are not certified. This API does not open
-device handles itself, perform positioned output writes, replace an existing
-image, mirror targets, or resume arbitrary E01 files from other producers.
+Readers in this library reject an image with a pending acquisition. Other EWF
+tools do not recognize the acquisition directory, so use the output only after
+acquisition completes successfully. A failure during final cleanup can leave a
+completed image and inert `.ewf-acquisition-cleanup-*` directories. An
+interrupted initialization can leave inert `.ewf-acquisition-init-*` directories.
+
+Files are flushed before checkpoints are acknowledged. On Unix, directory
+entries are also flushed. Windows power-loss durability, network filesystems,
+and devices that ignore flushes are not certified. `AcquisitionWriter` does not
+open device handles, perform positioned output writes, replace an existing
+image, mirror output, or resume E01 files from other producers.
+
 ## Bounded EWF2 writing
 
-`SequentialWriter` accepts an exact known source length and streams physical
-Ex01 or logical Lx01 output into staged native segments. Select
-`SequentialOptions::chunks_per_segment` (raw capacity at most 512 MiB); this is
-not an encoded segment size limit. Chunks are limited to 16 MiB. The example
-`cargo run --release --example sequential -- SOURCE OUTPUT [zlib]` uses 32 MiB
-raw capacity per segment and verifies the published image's SHA256.
+`SequentialWriter` accepts an exact source length and streams physical Ex01 or
+logical Lx01 output into staged native segments. Set
+`SequentialOptions::chunks_per_segment` to at most 512 MiB of raw capacity. This
+setting is not a limit on encoded segment size. Chunks are limited to 16 MiB. The
+example `cargo run --release --example sequential -- SOURCE OUTPUT [zlib]` uses
+32 MiB of raw capacity per segment and verifies the SHA256 of the published image.
 
-Only the current encoded segment is spooled, alongside output staging. Memory
-contains a chunk, codec buffers, current chunk descriptors, and the segment path
-list. Logical catalogs remain in memory and are written in the final segment.
-`LogicalWriter::create_sequential` builds that catalog while accepting files;
-declare the sum of file lengths as `source_size`. Empty files/directories work.
-An incomplete file, cancellation, or oversize write prevents publication. Final
-sector padding is zero and included in image hashes, but not file hashes.
+Only the current encoded segment is spooled, in addition to the staged output.
+Memory holds one chunk, codec buffers, the current chunk descriptors, and the
+list of segment paths. Logical catalogs remain in memory and are written in the
+final segment. `LogicalWriter::create_sequential` builds the catalog while
+accepting files. Declare the sum of all file lengths as `source_size`. Empty
+files and directories are supported. An incomplete file, cancellation, or an
+oversize write prevents publication. Final sector padding is zero and is
+included in image hashes but not in file hashes.
 
-`finish` uses the existing recoverable publication transaction, including
-mirrors and optional replacement. Completed staged native segments occupy the
-eventual output size; this is bounded *payload scratch*, not bounded total disk
-use or catalog memory. No seeking, checkpoint resume, or encoded-size split
-limit is supported. After process interruption call `EwfWriter::recover_output`
-to discard uncommitted staging or recover interrupted publication. Existing
-`EwfWriter` remains available for seek/patch operations and EWF1 logical output.
-The E01 `AcquisitionWriter` remains the resumable path. The sequential EWF2
-transaction uses renames rather than hard links; removable filesystems still
-need their own durability acceptance tests.
+`finish` uses the recoverable publication transaction, which supports mirrors and
+optional replacement. Staged native segments occupy the size of the final output.
+Only payload scratch space is bounded. Total disk use and catalog memory are not.
+Seeking, checkpoint resume, and splitting by encoded size are unsupported. After
+a process interruption, call `EwfWriter::recover_output` to discard uncommitted
+staging or complete an interrupted publication.
+
+Use `EwfWriter` for seek and patch operations and for EWF1 logical output. Use
+the E01 `AcquisitionWriter` for resumable acquisition. The sequential EWF2
+transaction uses renames rather than hard links. Removable filesystems require
+their own durability acceptance tests.

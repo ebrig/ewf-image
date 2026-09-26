@@ -1,9 +1,14 @@
 # Unified evidence CLI
 
-`ewf-cli` combines EWF, AFF4, and raw-image operations. The name is provisional.
-Build with `cargo build -p ewf-cli --release --locked`; the executable is
-`target/release/ewf-cli` (`ewf-cli.exe` on Windows). From this checkout,
-`cargo install --path crates/ewf-cli --locked` also works. Rust 1.96 is required.
+`ewf-cli` combines EWF, AFF4, and raw-image operations in one executable. The
+name is provisional. Building it requires Rust 1.96 or later:
+
+```sh
+cargo build -p ewf-cli --release --locked
+```
+
+The executable is `target/release/ewf-cli` (`ewf-cli.exe` on Windows). To install
+it instead, run `cargo install --path crates/ewf-cli --locked` from this checkout.
 
 ## Everyday commands
 
@@ -17,34 +22,38 @@ ewf-cli files IMAGE
 ewf-cli extract IMAGE ENTRY OUTPUT
 ```
 
-Use `<command> --help` for its options. `--json` selects a machine-readable
-result on stdout. The default is a short human-readable summary. Progress goes
-to stderr; `--quiet` suppresses progress without suppressing the result.
+Run `<command> --help` to list a command's options. By default, each command
+prints a short human-readable summary. `--json` prints a machine-readable result
+on stdout instead. Progress is written to stderr, and `--quiet` suppresses
+progress without suppressing the result.
 
-Output filenames select the format: `.E01`, `.Ex01`, `.aff4`, `.raw` (also
-`.dd`, `.img`, `.bin`), or `.Lx01` for a logical collection. Use the canonical
-case shown for EWF output extensions. Input EWF/AFF4 containers are detected
-by signature. Raw input requires a recognized raw extension because it has
+The output filename selects the format: `.E01`, `.Ex01`, `.aff4`, `.raw` (or
+`.dd`, `.img`, `.bin`), or `.Lx01` for a logical collection. Write EWF output
+extensions in the case shown. EWF and AFF4 input containers are detected by
+signature. Raw input requires a recognized raw extension because raw images have
 no identifying header. A renamed container is still decoded as a container.
 
 ## Acquisition and conversion
 
-Every acquisition writes one destination. Examples for Windows and Linux:
+Each acquisition writes one destination. Windows examples:
 
 ```powershell
 ewf-cli acquire '\\.\PhysicalDrive2' case.aff4 --case-number CASE-123
 ewf-cli acquire '\\.\PhysicalDrive2' case.Ex01
 ```
 
+Linux example:
+
 ```sh
 sudo ewf-cli acquire /dev/sdb case.E01
 ```
 
-Device acquisition uses the existing EWF CLI's Windows/Linux read-only adapter,
-including geometry, identity, and destination-overlap checks. Administrator/root
-access may be required. Other platforms support regular-file sources. Acquisition
-does not freeze a live disk; use a stable source or snapshot. No device was used
-to validate the new AFF4/raw dispatch in the local automated test suite.
+Device acquisition uses the read-only Windows and Linux device adapter from the
+EWF CLI, including its geometry, identity, and destination-overlap checks.
+Administrator or root access may be required. Other platforms support
+regular-file sources only. Acquisition does not freeze a live disk, so use a
+stable source or a snapshot. The automated test suite does not exercise AFF4 or
+raw acquisition from a physical device.
 
 | Source | Supported destinations |
 | --- | --- |
@@ -53,32 +62,33 @@ to validate the new AFF4/raw dispatch in the local automated test suite.
 | Logical EWF or AFF4 logical collection (`convert`) | Lx01, AFF4 logical |
 | Directory (`collect`) | Lx01, AFF4 logical |
 
-`--sector-size BYTES` supplies raw-file geometry or missing AFF4 geometry.
-The default in those cases is 512 bytes; recorded geometry must agree with any
-override. Supported physical sector sizes are 512, 1024, 2048, and 4096 bytes.
-Physical input must be nonempty and sector-aligned. AFF4 output records the
-sector size independently of its compression-chunk size.
+`--sector-size BYTES` supplies the geometry for raw files and for AFF4 images
+that do not record it. The default in those cases is 512 bytes. When an image
+records its geometry, any override must agree with it. Supported physical sector
+sizes are 512, 1024, 2048, and 4096 bytes. Physical input must be nonempty and
+sector-aligned. AFF4 output records the sector size independently of its
+compression-chunk size.
 
-An AFF4 container with multiple physical disks requires `convert --resource ID`;
-`info` lists IDs. Conversion currently accepts one AFF4 volume; `verify-set`
-remains available for multi-volume verification. Conversion never substitutes
-the encoded ZIP/EWF container bytes for decoded disk contents.
+An AFF4 container with multiple physical disks requires `convert --resource ID`.
+Run `info` to list the resource IDs. Conversion accepts one AFF4 volume. Use
+`verify-set` to verify a multi-volume set. Conversion always copies decoded disk
+contents and never substitutes the encoded ZIP or EWF container bytes.
 
-Conversion checks available source integrity references, hashes transferred
-bytes, checks source consistency, and verifies the destination. Raw and AFF4
-outputs are verified while staged. EWF output is published transactionally and
-then reopened for verification; consult `published` if verification fails.
-Raw input without a separately recorded digest can establish copy equality,
-not independent source authenticity.
+Conversion checks the available source integrity references, hashes the
+transferred bytes, checks source consistency, and verifies the destination. Raw
+and AFF4 outputs are verified before publication. EWF output is published
+transactionally and then reopened for verification. If that verification fails,
+check the `published` field. A raw input without a separately recorded digest can
+establish that the copy matches the input, but not that the source is authentic.
 
-Common case fields are mapped where possible. Logical conversions retain file
+Common case fields are mapped where possible. Logical conversions keep file
 bytes, hierarchy, empty folders, and supported timestamps. Lx01 stores timestamps
 in whole seconds. Resource identifiers, integrity graphs, and format-specific
-metadata are regenerated or omitted; `metadata_not_preserved` reports this and
-exit code 4 makes it visible to scripts. Conversion refuses logical substreams
-and unsupported entry/hierarchy types rather than silently losing their bytes.
-Raw has no case-metadata or acquisition-error container. Keep the conversion
-report alongside evidence when it records metadata or acquisition-error ranges.
+metadata are regenerated or omitted. The `metadata_not_preserved` field lists
+these omissions, and exit code 4 signals them to scripts. Conversion refuses
+logical substreams and unsupported entry or hierarchy types rather than silently
+dropping their bytes. Raw output cannot store case metadata or acquisition-error
+ranges. Keep the conversion report with the evidence when it records either.
 
 ```text
 ewf-cli convert case.E01 converted.aff4 --json
@@ -87,28 +97,32 @@ ewf-cli collect snapshot-directory files.Lx01
 ewf-cli convert files.Lx01 files.aff4 --json
 ```
 
-New output paths are required; existing destinations are never overwritten.
-E01 acquisition retains the established checkpoint/resume/history workflow.
-Ex01/AFF4/raw acquisition and conversion are one-shot operations. E01 conversion
-uses the transactional general writer, with full disk-backed raw and encoded
-scratch spools; it is not checkpoint-resumable. Ex01/Lx01 and AFF4 stream payloads
-with bounded segment/bevy buffers. Metadata/catalog memory grows with input size.
-Finalization in the general E01 writer is not cancellable midway; a pending
-cancellation is observed by the subsequent verification step.
+Every command requires a new output path and never overwrites an existing
+destination. E01 acquisition supports checkpoints, resume, and acquisition
+history. Ex01, AFF4, and raw acquisition and all conversions run in a single pass
+and cannot be resumed.
 
-There are no `--memory-limit` or resource-budget switches. The CLI uses internal
-streaming buffers and platform capacity for AFF4 metadata/verification limits.
-Library defaults and format/structural validation remain unchanged. This does
-not mean the CLI preallocates all RAM or automatically uses every CPU core.
+E01 conversion uses the general transactional writer, which spools the full raw
+and encoded data to disk. Ex01, Lx01, and AFF4 output stream payloads with
+buffers bounded by segment or bevy size. Metadata and catalog memory grows with
+the input size. Finalization in the general E01 writer cannot be cancelled
+partway through. A pending cancellation takes effect at the verification step
+that follows.
+
+The CLI has no `--memory-limit` or resource-budget options. The CLI uses internal
+streaming buffers and sets AFF4 metadata and verification limits from platform
+capacity. Library defaults and format validation are unchanged. The CLI does not
+preallocate all available RAM or automatically use every CPU core.
 
 ## Inspecting and checking
 
-`verify IMAGE` checks available container references. A raw file needs an
-independently recorded `--sha256 HASH` to make a comparison. Without one it
-reports its computed digest and exits 4. The same option compares decoded
-EWF media or the sole AFF4 physical disk; select an AFF4 resource explicitly
-when ambiguous. A selected resource's scope is reported separately from
-whole-container verification.
+`verify IMAGE` checks the references stored in the container. A raw file has no
+stored references, so it requires an independently recorded `--sha256 HASH`.
+Without that option, `verify` reports the computed digest of a raw file and exits
+with code 4. `--sha256` also compares decoded EWF media or the only physical disk
+in an AFF4 container. Select an AFF4 resource explicitly when the container holds
+more than one. The report states the scope of a selected-resource check
+separately from whole-container verification.
 
 ```text
 ewf-cli verify case.E01 --sha256 HASH
@@ -120,16 +134,17 @@ ewf-cli verify files.Lx01 2
 ewf-cli extract files.Lx01 2 selected.bin
 ```
 
-EWF file selectors are preorder catalog indices from `files`; AFF4 selectors
-are resource IDs. Extraction checks stored file references before publishing.
-Missing or unsupported references remain visible. Catalog names never become
-host extraction paths; the user supplies the destination path.
+EWF file selectors are the preorder catalog indices shown by `files`. AFF4
+selectors are resource IDs. Extraction checks the stored file references before
+publishing the output. Missing or unsupported references are reported. Catalog
+names never become extraction paths on the host. The user supplies the
+destination path.
 
-EWF diagnostics remain available as `analyze`, `recover`, `resume`,
-`checkpoint inspect`, `checkpoint validate`, `recover-publication`, and `report`.
-See the [EWF CLI guide](cli.md) for their underlying semantics. Advanced legacy
-acquisition tuning is still available through `ewf-image`; `ewf-cli` exposes
-the normal workflow and uses the established safe defaults.
+The EWF diagnostic commands `analyze`, `recover`, `resume`, `checkpoint inspect`,
+`checkpoint validate`, `recover-publication`, and `report` are also available.
+The [EWF command guide](cli.md) describes their behavior. Advanced acquisition
+tuning remains available under `ewf-cli ewf <command>`; the format-neutral
+commands provide the standard workflow with safe defaults.
 
 ## Results
 
@@ -142,12 +157,12 @@ the normal workflow and uses the established safe defaults.
 | 4 | Incomplete references, substitutions, metadata omissions, or other findings |
 | 130 | Cancelled |
 
-JSON includes `schema_version`, `tool`, `tool_version`, `status`, `exit_code`,
-`elapsed_seconds`, and operation-specific results. `published` is false before
-publication, true after known publication, or null when an EWF publication
-outcome needs resolution. A nonzero exit does not by itself mean no output was
-created. Internal matching hashes do not authenticate the source.
+JSON results include `schema_version`, `tool`, `tool_version`, `status`,
+`exit_code`, `elapsed_seconds`, and operation-specific fields. `published` is
+false before publication and true after confirmed publication. `published` is
+null when an EWF publication outcome must be resolved. A nonzero exit code does
+not by itself mean that no output was created. Matching internal hashes do not
+authenticate the source.
 
-The independently usable `ewf-image` and `aff4-image` executables remain
-available. Their default output is also human-readable; scripts should add
-`--json`. Neither legacy CLI is launched as a subprocess by `ewf-cli`.
+`ewf-cli` is the only command-line executable. It prints human-readable output
+by default, so scripts should add `--json`.

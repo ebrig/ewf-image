@@ -1,15 +1,15 @@
 # Migrating to 0.3
 
-This historical guide covers the 0.2-to-0.3 transition. For current development
-changes, see [Migrating to 0.5](migrating-to-0.5.md).
+This historical guide covers the upgrade from 0.2 to 0.3. For changes in the
+development checkout, see [Migrating to 0.5](migrating-to-0.5.md).
 
-Version 0.3 adds X-Ways EWF1 Zstandard reader support. Images using that
-encoding now report `CompressionMethod::Zstd`, and decoded chunks report
-`DataChunkEncoding::Zstd`.
+Version 0.3 adds reader support for X-Ways EWF1 Zstandard compression. Images
+that use this encoding report `CompressionMethod::Zstd`, and their decoded chunks
+report `DataChunkEncoding::Zstd`.
 
-Both public enums are now non-exhaustive so future on-disk encodings can be
-reported without adding another source-breaking exhaustive-match requirement.
-Downstream matches must therefore include a wildcard arm:
+Both enums are now non-exhaustive, so future on-disk encodings can be added
+without another source-breaking change. Downstream `match` expressions must
+include a wildcard arm:
 
 ```rust,no_run
 fn describe(image: &ewf_image::Image) {
@@ -22,6 +22,6 @@ fn describe(image: &ewf_image::Image) {
 }
 ```
 
-The reader accepts X-Ways magicless Zstandard chunk payloads and the X-Ways
-one-byte zero-chunk marker. Writer behavior is unchanged and does not emit this
-X-Ways-specific encoding.
+The reader accepts X-Ways Zstandard chunk payloads without the frame magic number
+and the X-Ways one-byte zero-chunk marker. Writer behavior is unchanged, and the
+writers do not produce this X-Ways-specific encoding.

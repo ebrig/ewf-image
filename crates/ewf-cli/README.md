@@ -1,7 +1,7 @@
 # ewf-cli
 
-One command line for the independent `ewf-image` and `aff4-image` libraries.
-The name is provisional. Build from this workspace with Rust 1.96 or later:
+A single command-line tool for the `ewf-image` and `aff4-image` libraries. The
+name is provisional. Build it from this workspace with Rust 1.96 or later:
 
 ```sh
 cargo build -p ewf-cli --release --locked
@@ -21,12 +21,12 @@ ewf-cli files files.aff4
 ewf-cli extract files.aff4 RESOURCE-ID selected.bin
 ```
 
-Each acquisition writes **one output**. Its extension selects the format.
-Results are concise text; use `--json` for scripts and `--quiet` to hide progress.
-See the [unified CLI guide](../../docs/ewf-cli.md) for device paths, supported
-conversions, verification scope, metadata omissions, and exit codes.
+Each acquisition writes one output, and the output extension selects the format.
+Results are printed as concise text. Add `--json` for scripts and `--quiet` to
+hide progress. The [unified CLI guide](../../docs/ewf-cli.md) covers device
+paths, supported conversions, verification scope, metadata omissions, and exit codes.
 
-The legacy executables remain available. This unpublished workspace package
-shares the existing EWF command runtime and native device adapter in process;
-it does not launch either legacy executable. Format crates retain their
-independent library APIs and dependency graphs.
+`ewf-cli` is the only command-line executable. Use `ewf-cli ewf <command>` for
+advanced EWF acquisition and recovery controls. The EWF command runtime and
+native device adapter run in this process. Each format crate keeps its own
+library API and dependency graph.
