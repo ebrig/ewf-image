@@ -4,9 +4,13 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
 license = "Apache-2.0"
-description = "Bounded AFF4 evidence stream reading and writing"
+description = "Experimental Rust reader, verifier, and writer for AFF4 evidence containers"
+readme = "README.md"
 repository = "https://github.com/ebrig/ewf-image"
-publish = false
+homepage = "https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image"
+documentation = "https://docs.rs/aff4-image"
+keywords = ["aff4", "forensics", "evidence", "disk-image"]
+categories = ["parser-implementations", "filesystem"]
 
 [features]
 default = ["write"]
