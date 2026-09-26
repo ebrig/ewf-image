@@ -60,7 +60,7 @@ invoked while reader locks are held. Cancellation returns no completed report.
 The optional `parallel` feature enables more than one worker:
 
 ```toml
-ewf-image = { version = "0.4", features = ["parallel"] }
+ewf-image = { version = "0.5", features = ["parallel"] }
 ```
 
 `VerifyOptions::with_parallelism(4)` selects up to four workers. The default is a
