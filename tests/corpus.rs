@@ -967,17 +967,22 @@ fn external_logical_entry_bytes_and_media_match_references() -> Result<(), Box<d
         let root = image
             .root_file_entry()
             .ok_or("logical image has no entry root")?;
-        let mut stack = root.children.iter().collect::<Vec<_>>();
+        assert!(
+            !root.children.is_empty(),
+            "logical image has no child entries"
+        );
+        let mut stack = vec![root];
         let mut entries = 0_usize;
         while let Some(entry) = stack.pop() {
+            let entry_index = entries;
             entries += 1;
-            stack.extend(entry.children.iter());
+            stack.extend(entry.children.iter().rev());
             if entry.file_entry_type == Some(ewf_image::SingleFileEntryType::File) {
                 let result = image.verify_single_file(entry)?;
                 assert_ne!(
                     result.references_match(),
                     Some(false),
-                    "stored hash mismatch at entry {entries}"
+                    "stored hash mismatch at entry {entry_index}"
                 );
                 hashed_files += usize::from(result.references_match() == Some(true));
             } else if let Some(size) = entry.size
@@ -989,12 +994,11 @@ fn external_logical_entry_bytes_and_media_match_references() -> Result<(), Box<d
                     let length = (size - offset).min(BUFFER_SIZE as u64) as usize;
                     let read =
                         image.read_single_file_at_strict(entry, &mut buffer[..length], offset)?;
-                    assert_eq!(read, length, "short read at entry {entries}");
+                    assert_eq!(read, length, "short read at entry {entry_index}");
                     offset += read as u64;
                 }
             }
         }
-        assert!(entries > 0, "logical image has no entries");
     }
     assert!(hashed_files > 0, "corpus has no stored file hashes");
     if env::var_os("EWF_LOGICAL_REQUIRE_SPLIT").as_deref() == Some(std::ffi::OsStr::new("1")) {
