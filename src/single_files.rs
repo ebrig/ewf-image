@@ -583,7 +583,7 @@ fn parse_sources_category(
 
     let root = parse_source_row(&types, get_line(lines, cursor, "EWF2 source root")?)?;
     cursor += 1;
-    let mut sources = Vec::with_capacity(entry_count.saturating_add(1));
+    let mut sources = Vec::new();
     sources.push(root);
 
     for source_index in 0..entry_count {
@@ -631,7 +631,7 @@ fn parse_subjects_category(
 
     let root = parse_subject_row(&types, get_line(lines, cursor, "EWF2 subject root")?)?;
     cursor += 1;
-    let mut subjects = Vec::with_capacity(entry_count.saturating_add(1));
+    let mut subjects = Vec::new();
     subjects.push(root);
 
     for _ in 0..entry_count {
@@ -674,7 +674,7 @@ fn parse_permission_groups_category(
     )?;
     require_permission_group_type(&root_permission, "EWF2 permission category root")?;
     cursor += 1;
-    let mut groups = Vec::with_capacity(entry_count);
+    let mut groups = Vec::new();
 
     for _ in 0..entry_count {
         let permission_count = parse_child_entry_count(
@@ -689,7 +689,7 @@ fn parse_permission_groups_category(
         )?;
         require_permission_group_type(&group_permission, "EWF2 permission group row")?;
         cursor += 1;
-        let mut group = permission_group_from_permission(group_permission, permission_count);
+        let mut group = permission_group_from_permission(group_permission);
 
         for _ in 0..permission_count {
             let child_count = parse_child_entry_count(
@@ -903,17 +903,14 @@ fn require_permission_group_type(permission: &SingleFilePermission, label: &str)
     Ok(())
 }
 
-fn permission_group_from_permission(
-    permission: SingleFilePermission,
-    permission_count: usize,
-) -> SingleFilePermissionGroup {
+fn permission_group_from_permission(permission: SingleFilePermission) -> SingleFilePermissionGroup {
     SingleFilePermissionGroup {
         name: permission.name,
         identifier: permission.identifier,
         property_type: permission.property_type,
         access_mask: permission.access_mask,
         ace_flags: permission.ace_flags,
-        permissions: Vec::with_capacity(permission_count),
+        permissions: Vec::new(),
     }
 }
 
@@ -1139,7 +1136,8 @@ fn parse_binary_extents(value: &str) -> Result<Vec<SingleFileExtent>> {
         .next()
         .ok_or_else(|| EwfError::Malformed("EWF2 single files extents missing count".into()))
         .and_then(|part| parse_hex_usize(part, "extent count"))?;
-    let mut extents = Vec::with_capacity(extent_count);
+    // The declared count is untrusted. Grow only as actual extent pairs parse.
+    let mut extents = Vec::new();
 
     while parts.peek().is_some() {
         let sparse = if parts.peek() == Some(&"S") {
@@ -1428,5 +1426,11 @@ mod entry_type_tests {
             apply_entry_value(&mut entry, "p", value).unwrap();
             assert_eq!(entry.file_entry_type, Some(expected));
         }
+    }
+
+    #[test]
+    fn unbacked_catalog_counts_do_not_reserve_memory() {
+        assert!(parse_binary_extents("ffffffffffffffff").is_err());
+        assert!(parse_binary_extents("4000000 0 1").is_err());
     }
 }
