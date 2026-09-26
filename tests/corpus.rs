@@ -395,7 +395,6 @@ fn external_writer_outputs_match_ewfexport_stdout() -> Result<(), Box<dyn Error>
         expected.resize(usize::try_from(result.logical_size)?, 0);
 
         compare_ewfexport_bytes(&ewfexport, &path, &expected)?;
-        #[cfg(feature = "cli")]
         compare_with_ewfexport(&ewfexport, &path)?;
     }
 
@@ -1581,37 +1580,6 @@ fn compare_with_ewfinfo(ewfinfo: &OsString, path: &Path) -> Result<(), Box<dyn E
     let oracle = parse_ewfinfo_metadata(&stdout);
     let info = image.info();
 
-    #[cfg(feature = "cli")]
-    {
-        let output = Command::new(env!("CARGO_BIN_EXE_ewf-image"))
-            .arg("info")
-            .arg(path)
-            .output()?;
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-        assert_eq!(report["media_verified"], false);
-        assert!(report["verification"].is_null());
-        if let Some(size) = oracle.media_size {
-            assert_eq!(report["media"]["logical_bytes"], size);
-        }
-        if let Some(size) = oracle.bytes_per_sector {
-            assert_eq!(report["media"]["bytes_per_sector"], size);
-        }
-        for (name, expected) in [
-            ("case_number", &oracle.case_number),
-            ("evidence_number", &oracle.evidence_number),
-            ("examiner", &oracle.examiner),
-        ] {
-            if let Some(value) = expected {
-                assert_eq!(report["metadata"][name].as_str(), Some(value.as_str()));
-            }
-        }
-    }
-
     if let Some(file_format) = oracle.file_format.as_deref() {
         assert!(
             ewfinfo_format_profile_matches(info.format_profile, file_format),
@@ -1966,33 +1934,6 @@ fn compare_with_ewfexport(ewfexport: &OsString, path: &Path) -> Result<(), Box<d
         Err(err) => return Err(Box::new(err)),
     };
     let mut cursor = image.cursor();
-    #[cfg(feature = "cli")]
-    let (_directory, mut cli_raw, cli_report) = {
-        let directory = tempfile::tempdir()?;
-        let raw = directory.path().join("export.raw");
-        let output = Command::new(env!("CARGO_BIN_EXE_ewf-image"))
-            .args(["--quiet", "export"])
-            .arg(path)
-            .arg(&raw)
-            .output()?;
-        let code = if image.acquisition_errors().is_empty() {
-            0
-        } else {
-            4
-        };
-        assert_eq!(
-            output.status.code(),
-            Some(code),
-            "{}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-        assert_eq!(report["published"], true);
-        let file = fs::File::open(raw)?;
-        (directory, file, report)
-    };
-    #[cfg(feature = "cli")]
-    let mut oracle_sha256 = Sha256::new();
     let mut child = Command::new(ewfexport)
         .args(["-q", "-f", "raw", "-t", "-", "-u"])
         .arg(path)
@@ -2020,16 +1961,6 @@ fn compare_with_ewfexport(ewfexport: &OsString, path: &Path) -> Result<(), Box<d
             "ewfexport mismatch at image offset {offset} for {}",
             path.display()
         );
-        #[cfg(feature = "cli")]
-        {
-            cli_raw.read_exact(&mut actual[..read])?;
-            assert_eq!(
-                &actual[..read],
-                &oracle[..read],
-                "CLI export differs at offset {offset}"
-            );
-            oracle_sha256.update(&oracle[..read]);
-        }
         offset += u64::try_from(read).expect("usize fits u64");
     }
 
@@ -2047,15 +1978,6 @@ fn compare_with_ewfexport(ewfexport: &OsString, path: &Path) -> Result<(), Box<d
         "ewfexport raw size differed for {}",
         path.display()
     );
-    #[cfg(feature = "cli")]
-    {
-        assert_eq!(cli_raw.read(&mut actual)?, 0);
-        assert_eq!(cli_report["exported_bytes"], offset);
-        assert_eq!(
-            cli_report["verification"]["sha256"],
-            hex_lower(&oracle_sha256.finalize())
-        );
-    }
     Ok(())
 }
 

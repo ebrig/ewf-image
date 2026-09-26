@@ -363,22 +363,6 @@ fn full_set_report_retains_missing_references_coverage_and_cancellation() {
         set.verify_full("aff4://v1/image", None, |_, _, _| ControlFlow::Break(())),
         Err(Error::Aborted)
     ));
-    #[cfg(feature = "cli")]
-    {
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image"))
-            .arg("--json")
-            .arg("verify-set")
-            .args(&paths)
-            .args(["--image", "aff4://v1/image", "--full"])
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(4));
-        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(
-            report["scope"],
-            "selected image and supplied-volume integrity"
-        );
-    }
 }
 
 #[test]
@@ -460,43 +444,5 @@ fn full_set_verifies_foreign_block_references_and_metadata_in_their_own_context(
                             aff4_image::CheckOutcome::Match
                         })
         );
-    }
-}
-
-#[test]
-#[cfg(feature = "cli")]
-fn set_cli_distinguishes_computed_matched_and_mismatched_hashes() {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = pair(
-        dir.path(),
-        PRIMARY,
-        COMPANION,
-        &[map(0, 4, 0, 0), map(4, 4, 0, 1)].concat(),
-    );
-    let digest = VolumeSet::open(&paths)
-        .unwrap()
-        .verify_image("aff4://v1/image", None, |_, _| ControlFlow::Continue(()))
-        .unwrap()
-        .sha256;
-    for (expected, code) in [(None, 4), (Some(digest), 0), (Some("0".repeat(64)), 3)] {
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image"));
-        command.arg("--json");
-        command
-            .arg("verify-set")
-            .args(&paths)
-            .args(["--image", "aff4://v1/image"]);
-        if let Some(expected) = expected {
-            command.args(["--expected-image-sha256", &expected]);
-        }
-        let output = command.output().unwrap();
-        assert_eq!(
-            output.status.code(),
-            Some(code),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(report["scope"], "assembled image bytes only");
-        assert_eq!(report["result"]["bytes"], 8);
     }
 }

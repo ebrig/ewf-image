@@ -113,55 +113,6 @@ fn collector_records_empty_folders_exclusions_and_detects_source_change() {
     assert!(!path.exists());
 }
 
-#[test]
-fn cli_collect_verify_and_extract_do_not_overwrite() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("source");
-    fs::create_dir(&root).unwrap();
-    fs::write(root.join("file"), b"abc").unwrap();
-    let output = dir.path().join("case.aff4");
-    let collected = std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image"))
-        .arg("--json")
-        .arg("collect")
-        .arg(&root)
-        .arg(&output)
-        .output()
-        .unwrap();
-    assert!(
-        collected.status.success(),
-        "{} {}",
-        String::from_utf8_lossy(&collected.stdout),
-        String::from_utf8_lossy(&collected.stderr)
-    );
-    let json: serde_json::Value = serde_json::from_slice(&collected.stdout).unwrap();
-    let id = json["output"]["streams"][0]["id"].as_str().unwrap();
-    let destination = dir.path().join("recovered");
-    let extract = || {
-        std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image"))
-            .arg("--json")
-            .arg("extract")
-            .arg(&output)
-            .arg(id)
-            .arg(&destination)
-            .output()
-            .unwrap()
-    };
-    assert!(extract().status.success());
-    assert_eq!(fs::read(&destination).unwrap(), b"abc");
-    fs::write(&destination, b"keep").unwrap();
-    assert!(!extract().status.success());
-    assert_eq!(fs::read(destination).unwrap(), b"keep");
-    let verify = std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image"))
-        .arg("--json")
-        .arg("verify")
-        .arg(output)
-        .arg("--expected-metadata-sha256")
-        .arg("0".repeat(64))
-        .output()
-        .unwrap();
-    assert_eq!(verify.status.code(), Some(4));
-}
-
 #[cfg(unix)]
 #[test]
 fn collector_never_follows_symlinks() {
@@ -202,37 +153,4 @@ fn collector_never_follows_symlinks() {
         .unwrap();
     assert_eq!((report.files, report.issues.len()), (0, 1));
     writer.finish().unwrap();
-}
-
-#[test]
-fn cli_collects_and_verifies_an_empty_directory() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("empty");
-    fs::create_dir(&root).unwrap();
-    let output = dir.path().join("empty.aff4");
-    let result = std::process::Command::new(env!("CARGO_BIN_EXE_aff4-image"))
-        .arg("--json")
-        .arg("collect")
-        .arg(root)
-        .arg(&output)
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{} {}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert_eq!(json["published"], true);
-    assert_eq!(json["collection"]["files"], 0);
-    assert_eq!(json["collection"]["folders"], 1);
-    assert_eq!(json["verification"]["resources"], serde_json::json!([]));
-    assert!(
-        Container::open(output)
-            .unwrap()
-            .verify_all(None, |_, _, _| ControlFlow::Continue(()))
-            .unwrap()
-            .all_match()
-    );
 }

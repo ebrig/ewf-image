@@ -32,7 +32,7 @@ def main():
             (source / f"file-{index:06}").write_bytes(block)
             expected.update(block)
         destination = root / ("case.aff4" if args.aff4 else "case.Lx01")
-        command = [str(binary), "--json"] + ([] if args.aff4 else ["--quiet"])
+        command = [str(binary), "--json", "--quiet"] + ([] if args.aff4 else ["ewf"])
         command += ["collect", str(source), str(destination)]
         start = time.monotonic()
         with (root / "stdout.json").open("w") as output, (root / "stderr.log").open("w") as error:
@@ -51,8 +51,8 @@ def main():
             assert report["verified_files"] == args.files
             assert report["verification"]["sha256"] == expected.hexdigest()
         if child.returncode == 0 and args.aff4:
-            assert len(report["output"]["streams"]) == args.files
-            assert all(item["sha256"] == hashlib.sha256(block).hexdigest() for item in report["output"]["streams"])
+            assert report["collection"]["files"] == args.files
+            assert report["status"] == "complete"
         print(json.dumps({"profile": "aff4" if args.aff4 else "ewf2", "files": args.files,
             "source_bytes": args.files * 1024, "elapsed_seconds": elapsed,
             "peak_rss_bytes": usage.ru_maxrss * 1024, "exit_code": child.returncode,

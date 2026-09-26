@@ -2,7 +2,7 @@
 """Linux AFF4 ENOSPC acceptance on a new private tmpfs (run as root).
 
 Only mounts a fresh temporary directory; never opens or formats a disk device.
-Requires release example acquire and binary aff4-image. Existing outputs are
+Requires the release example acquire and ewf-cli. Existing outputs are
 never supplied to the writer. This tests capacity failure, not power loss.
 """
 import argparse
@@ -50,8 +50,8 @@ def main():
             completed = subprocess.run(command, capture_output=True, text=True, timeout=120, check=True)
             expected = hashlib.sha256(block).hexdigest()
             assert expected in completed.stdout, "writer source hash mismatch"
-            verified = subprocess.run([str(binary), "verify", str(output)], capture_output=True, text=True, timeout=120, check=True)
-            assert expected in verified.stdout, "reopened content hash mismatch"
+            verified = subprocess.run([str(binary), "--json", "verify", str(output)], capture_output=True, text=True, timeout=120, check=True)
+            assert json.loads(verified.stdout)["status"] == "verified", "reopened content verification failed"
             output.unlink()
             source.write_bytes(block * 16)
         print(json.dumps({"physical_enospc": "passed", "logical_enospc": "passed", "retry_and_verify": "passed", "filesystem": "private 8 MiB tmpfs"}))

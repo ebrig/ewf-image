@@ -28,7 +28,6 @@ include = [
     "/src/**",
     "/tests/api.rs",
     "/tests/acquisition.rs",
-    "/tests/cli.rs",
     "/tests/corpus.rs",
     "/tests/encryption.rs",
     "/tests/data/xways-encrypted/**",
@@ -59,18 +58,12 @@ include = [
 [lib]
 name = "ewf_image"
 
-[[bin]]
-name = "ewf-image"
-path = "src/bin/ewf-image/main.rs"
-required-features = ["cli"]
-
 [features]
 default = ["verify"]
 verify = []
 parallel = ["verify", "dep:rayon"]
 serde = ["dep:serde"]
 external-fixtures = []
-cli = ["verify", "serde", "dep:clap", "dep:ctrlc", "dep:serde_json", "dep:rustix", "dep:windows-sys"]
 
 [[example]]
 name = "sequential"
@@ -80,8 +73,6 @@ required-features = ["verify"]
 aes = "0.9"
 bzip2 = "0.6"
 ctr = "0.10"
-clap = { version = "4", features = ["derive"], optional = true }
-ctrlc = { version = "3.5", features = ["termination"], optional = true }
 encoding_rs = "0.8"
 flate2 = "1"
 lru = "0.18"
@@ -89,19 +80,12 @@ md-5 = "0.11"
 ruzstd = "0.9"
 rayon = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
 sha1 = "0.11"
 sha2 = "0.11"
 subtle = "2.6"
 tempfile = "3"
 thiserror = "2"
 zeroize = { version = "1.9", features = ["derive"] }
-
-[target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["fs"], optional = true }
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl"], optional = true }
 
 [dev-dependencies]
 serde_json = "1"

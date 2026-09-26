@@ -31,13 +31,9 @@ try {
     & git diff --quiet HEAD -- src crates Cargo.toml Cargo.lock
     if ($LASTEXITCODE -ne 0) { throw 'Commit runtime source changes before preparing attributed fixtures' }
     $revision = (& git rev-parse HEAD).Trim()
-    & cargo build --release --locked --features cli --bin ewf-image --target-dir $TargetDirectory
-    if ($LASTEXITCODE -ne 0) { throw 'EWF build failed' }
-    & cargo build --release --locked -p aff4-image --bin aff4-image --example acquire --target-dir $TargetDirectory
-    if ($LASTEXITCODE -ne 0) { throw 'AFF4 build failed' }
-    $ewf = Join-Path $TargetDirectory 'release/ewf-image.exe'
-    $aff4 = Join-Path $TargetDirectory 'release/aff4-image.exe'
-    $acquire = Join-Path $TargetDirectory 'release/examples/acquire.exe'
+    & cargo build --release --locked -p ewf-cli --target-dir $TargetDirectory
+    if ($LASTEXITCODE -ne 0) { throw 'Unified CLI build failed' }
+    $cli = Join-Path $TargetDirectory 'release/ewf-cli.exe'
     New-Item -ItemType Directory -Path $outputRoot | Out-Null
     function Invoke-Recorded([string]$program, [string]$name, [string[]]$arguments) {
         $text = (& $program @arguments 2> (Join-Path $outputRoot "$name.stderr.txt")) | Out-String
@@ -48,21 +44,21 @@ try {
     }
     foreach ($mode in @(@{command='acquire'; extension='E01'}, @{command='acquire-sequential'; extension='Ex01'})) {
         $output = Join-Path $outputRoot "physical.$($mode.extension)"
-        $report = (Invoke-Recorded $ewf $mode.extension @('--json', '--quiet', $mode.command, $raw, $output, '--chunks-per-segment', '16', '--compression', 'zlib')) | ConvertFrom-Json
+        $report = (Invoke-Recorded $cli $mode.extension @('--json', '--quiet', 'ewf', $mode.command, $raw, $output, '--chunks-per-segment', '16', '--compression', 'zlib')) | ConvertFrom-Json
         if ($report.verification.sha256 -ne $expected) { throw 'Physical SHA256 mismatch' }
     }
-    $null = Invoke-Recorded $ewf 'Lx01' @('--json', '--quiet','collect',$logical,(Join-Path $outputRoot 'logical.Lx01'),'--chunks-per-segment','1')
-    $null = Invoke-Recorded $acquire 'aff4-acquire' @($raw,(Join-Path $outputRoot 'physical.aff4'))
-    $verified = (Invoke-Recorded $aff4 'aff4-verify' @('--json','verify',(Join-Path $outputRoot 'physical.aff4'))) | ConvertFrom-Json
-    if ($expected -notin @($verified.resources | ForEach-Object { $_.verification.sha256 })) { throw 'AFF4 decoded SHA256 mismatch' }
-    $null = Invoke-Recorded $aff4 'aff4-collect' @('--json','collect',$logical,(Join-Path $outputRoot 'logical.aff4'))
+    $null = Invoke-Recorded $cli 'Lx01' @('--json', '--quiet','ewf','collect',$logical,(Join-Path $outputRoot 'logical.Lx01'),'--chunks-per-segment','1')
+    $null = Invoke-Recorded $cli 'aff4-acquire' @('--json','--quiet','acquire',$raw,(Join-Path $outputRoot 'physical.aff4'))
+    $verified = (Invoke-Recorded $cli 'aff4-verify' @('--json','--quiet','verify',(Join-Path $outputRoot 'physical.aff4'),'--sha256',$expected)) | ConvertFrom-Json
+    if ($verified.external_match -ne $true) { throw 'AFF4 decoded SHA256 mismatch' }
+    $null = Invoke-Recorded $cli 'aff4-collect' @('--json','--quiet','collect',$logical,(Join-Path $outputRoot 'logical.aff4'))
     $images = @(Get-ChildItem -LiteralPath $outputRoot -File | Where-Object { $_.Extension -match '^\.(E[0-9]+|Ex[0-9]+|Lx[0-9]+|aff4)$' } | ForEach-Object {
         @{ path = $_.Name; bytes = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName).Hash.ToLowerInvariant() }
     })
     $manifest = @{
         source_revision = $revision
         preparation_script_sha256 = (Get-FileHash -LiteralPath $PSCommandPath).Hash.ToLowerInvariant()
-        binary_sha256 = @{ ewf = (Get-FileHash $ewf).Hash.ToLowerInvariant(); aff4 = (Get-FileHash $aff4).Hash.ToLowerInvariant(); aff4_acquire = (Get-FileHash $acquire).Hash.ToLowerInvariant() }
+        binary_sha256 = @{ unified = (Get-FileHash $cli).Hash.ToLowerInvariant() }
         physical_source = @{ bytes = 4194304; sha256 = $expected }
         logical_sources = $sources
         images = $images

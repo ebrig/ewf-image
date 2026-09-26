@@ -6,7 +6,7 @@ use std::{
 };
 
 fn cli(directory: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_aff4-image"))
+    Command::new(env!("CARGO_BIN_EXE_ewf-cli"))
         .current_dir(directory)
         .args(args)
         .output()
@@ -27,7 +27,7 @@ fn collection_and_extraction_have_concise_text_and_explicit_json() {
     assert!(collected.status.success(), "{collected:?}");
     let text = stdout(&collected);
     assert!(
-        text.contains("Published: yes") && text.contains("Verification: passed"),
+        text.contains("Published: yes") && text.contains("Files collected: 1"),
         "{text}"
     );
     assert!(text.lines().count() < 12, "{text}");
@@ -52,9 +52,9 @@ fn collection_and_extraction_have_concise_text_and_explicit_json() {
     let verified = cli(root.path(), &["--json", "verify", "case.aff4"]);
     assert!(verified.status.success(), "{verified:?}");
     let report: serde_json::Value = serde_json::from_slice(&verified.stdout).unwrap();
-    assert!(report["resources"].is_array());
+    assert!(report["verification"]["resources"].is_array());
     assert!(
-        report["checks"]
+        report["verification"]["checks"]
             .as_array()
             .unwrap()
             .iter()
@@ -75,17 +75,17 @@ fn omissions_and_mismatches_remain_visible_in_text() {
     assert_eq!(collected.status.code(), Some(4));
     let text = stdout(&collected);
     assert!(
-        text.contains("Published: yes") && text.contains("Omitted entries: 1"),
+        text.contains("Published: yes") && text.contains("omitted entries: 1"),
         "{text}"
     );
     let verified = cli(
         root.path(),
         &["verify", "case.aff4", "--metadata-sha256", &"0".repeat(64)],
     );
-    assert_eq!(verified.status.code(), Some(4));
+    assert_eq!(verified.status.code(), Some(3));
     let text = stdout(&verified);
     assert!(
-        text.contains("Verification: failed or incomplete") && text.contains("mismatched"),
+        text.contains("Status: verification failed") && text.contains("Check"),
         "{text}"
     );
 }
@@ -108,7 +108,7 @@ fn cli_reads_metadata_above_library_default_without_resource_flags() {
     assert!(Container::open(&path).is_err());
     let verified = cli(root.path(), &["verify", "large.aff4"]);
     assert!(verified.status.success(), "{verified:?}");
-    assert!(stdout(&verified).contains("Verification: passed"));
+    assert!(stdout(&verified).contains("Status: verified"));
 }
 
 #[test]
@@ -146,12 +146,90 @@ fn help_and_errors_are_consistent_and_resource_flags_are_removed() {
     ] {
         let result = cli(root.path(), args);
         assert_eq!(result.status.code(), Some(1));
-        assert!(result.stdout.is_empty());
         if args[0] == "--json" {
-            let error: serde_json::Value = serde_json::from_slice(&result.stderr).unwrap();
+            let error: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
             assert!(error["error"].is_string());
         } else {
-            assert!(String::from_utf8_lossy(&result.stderr).starts_with("Error:"));
+            assert!(stdout(&result).starts_with("Status: failed"));
         }
+    }
+}
+
+#[test]
+fn collect_empty_directory_and_refuse_extract_overwrite() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("empty")).unwrap();
+    let collected = cli(root.path(), &["--json", "collect", "empty", "empty.aff4"]);
+    assert!(collected.status.success(), "{collected:?}");
+    let report: serde_json::Value = serde_json::from_slice(&collected.stdout).unwrap();
+    assert_eq!(report["published"], true);
+    assert_eq!(report["collection"]["files"], 0);
+    assert_eq!(report["collection"]["folders"], 1);
+    assert_eq!(report["verification"]["resources"], serde_json::json!([]));
+
+    fs::create_dir(root.path().join("source")).unwrap();
+    fs::write(root.path().join("source/file"), b"abc").unwrap();
+    let collected = cli(root.path(), &["--json", "collect", "source", "case.aff4"]);
+    assert!(collected.status.success(), "{collected:?}");
+    let info = cli(root.path(), &["--json", "files", "case.aff4"]);
+    assert!(info.status.success(), "{info:?}");
+    let report: serde_json::Value = serde_json::from_slice(&info.stdout).unwrap();
+    let id = report["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["size"] == 3)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let extract = || {
+        cli(
+            root.path(),
+            &["--json", "extract", "case.aff4", id, "copy.bin"],
+        )
+    };
+    assert!(extract().status.success());
+    assert_eq!(fs::read(root.path().join("copy.bin")).unwrap(), b"abc");
+    fs::write(root.path().join("copy.bin"), b"keep").unwrap();
+    assert!(!extract().status.success());
+    assert_eq!(fs::read(root.path().join("copy.bin")).unwrap(), b"keep");
+}
+
+#[test]
+fn verify_set_distinguishes_missing_matching_and_wrong_external_hashes() {
+    use aff4_image::{Profile, WriteOptions, Writer};
+    use sha2::{Digest, Sha256};
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("disk.aff4");
+    let bytes = b"known disk bytes";
+    let mut writer = Writer::create(&path, Profile::Physical, WriteOptions::default()).unwrap();
+    let image = writer
+        .add_image(bytes.len() as u64, &mut bytes.as_slice(), |_, _| {
+            std::ops::ControlFlow::Continue(())
+        })
+        .unwrap();
+    writer.finish().unwrap();
+    let digest = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    for (expected, code) in [
+        (None, 4),
+        (Some(digest.as_str()), 0),
+        (
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+            3,
+        ),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ewf-cli"));
+        command.args(["--json", "verify-set"]);
+        command.arg(&path).args(["--image", &image]);
+        if let Some(expected) = expected {
+            command.args(["--sha256", expected]);
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(code), "{output:?}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["verification"]["bytes"], bytes.len());
     }
 }

@@ -1,15 +1,10 @@
 //! Unified local evidence operations. Format libraries remain independent.
 mod aff4;
+mod ewf;
 mod format;
 mod logical;
 mod output;
 mod transfer;
-
-// Share the established EWF command runtime and device adapter with its legacy
-// executable during migration. There is one implementation, no child process.
-#[path = "../../../src/bin/ewf-image/main.rs"]
-#[allow(dead_code)]
-mod ewf;
 
 use clap::{Args, Parser, Subcommand};
 use serde_json::{Value, json};
@@ -60,6 +55,11 @@ struct CaseArgs {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Advanced EWF acquisition, recovery, and diagnostic commands.
+    Ewf {
+        #[command(subcommand)]
+        command: ewf::Command,
+    },
     /// Show image information and selectable resources.
     Info { image: PathBuf },
     /// Verify an image or a selected logical file.
@@ -207,7 +207,7 @@ impl Context {
         }
     }
     fn ewf(&self, mut args: Vec<OsString>, report: &mut Value) -> Result<()> {
-        args.insert(0, "ewf-image".into());
+        args.insert(0, "ewf-cli ewf".into());
         if self.quiet {
             args.insert(1, "--quiet".into());
         }
@@ -244,6 +244,12 @@ fn ewf_only(path: &Path) -> Result<()> {
 fn run(cli: &Cli, ctx: &mut Context, report: &mut Value) -> Result<()> {
     use format::{Input, Output};
     match &cli.command {
+        Command::Ewf { command } => {
+            let (value, code) = ewf::dispatch_command(command, ctx.quiet, &ctx.stop);
+            *report = value;
+            report["exit_code"] = json!(code);
+            Ok(())
+        }
         Command::Acquire {
             source,
             output,
@@ -493,7 +499,9 @@ fn main() -> ExitCode {
     report["schema_version"] = json!(1);
     report["tool"] = json!("ewf-cli");
     report["tool_version"] = json!(env!("CARGO_PKG_VERSION"));
-    report["elapsed_seconds"] = json!(started.elapsed().as_secs_f64());
+    if report["elapsed_seconds"].is_null() {
+        report["elapsed_seconds"] = json!(started.elapsed().as_secs_f64());
+    }
     let code = report["exit_code"].as_u64().unwrap_or(1) as u8;
     if let Err(error) = output::print(&report, cli.json) {
         eprintln!("cannot write result: {error}");

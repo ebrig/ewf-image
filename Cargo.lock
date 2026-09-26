@@ -25,8 +25,6 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "blake2",
- "clap",
- "ctrlc",
  "flate2",
  "libc",
  "lz4_flex",
@@ -410,15 +408,12 @@ version = "0.4.0"
 dependencies = [
  "aes",
  "bzip2",
- "clap",
  "ctr",
- "ctrlc",
  "encoding_rs",
  "flate2",
  "lru",
  "md-5",
  "rayon",
- "rustix",
  "ruzstd",
  "serde",
  "serde_json",
@@ -427,7 +422,6 @@ dependencies = [
  "subtle",
  "tempfile",
  "thiserror",
- "windows-sys",
  "zeroize",
 ]
 

@@ -1,5 +1,4 @@
 //! End-to-end acquisition command contracts, including process restarts.
-#![cfg(feature = "cli")]
 
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -16,7 +15,8 @@ fn cli_text_summaries_and_json_preserve_verification_scope() {
     fs::create_dir(dir.path().join("source")).unwrap();
     fs::write(dir.path().join("source/file"), b"known file bytes").unwrap();
     let text_cli = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ewf-image"))
+        Command::new(env!("CARGO_BIN_EXE_ewf-cli"))
+            .arg("ewf")
             .current_dir(dir.path())
             .args(args)
             .output()
@@ -79,7 +79,8 @@ fn cli_help_covers_every_operation() {
         Some("checkpoint"),
         Some("report"),
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_ewf-image"))
+        let output = Command::new(env!("CARGO_BIN_EXE_ewf-cli"))
+            .arg("ewf")
             .args(command)
             .arg("--help")
             .output()
@@ -373,7 +374,8 @@ fn cli_logical_listing_verification_and_safe_selective_extraction() {
 }
 
 fn cli(directory: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ewf-image"))
+    Command::new(env!("CARGO_BIN_EXE_ewf-cli"))
+        .arg("ewf")
         .arg("--json")
         .current_dir(directory)
         .args(args)
@@ -451,9 +453,9 @@ fn cli_info_inspects_metadata_without_certifying_corrupt_media() {
 
 #[test]
 fn cli_info_reports_encryption_when_metadata_cannot_be_opened() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let report = result(
-        root,
+        &root,
         &["info", "tests/data/xways-encrypted/aes128-compatible.E01"],
         1,
     );
@@ -808,7 +810,8 @@ fn cli_analysis_signal_cancellation_never_reports_complete_hashes() {
             ..ewf_image::WriteOptions::default()
         },
     );
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ewf-image"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ewf-cli"))
+        .arg("ewf")
         .arg("--json")
         .current_dir(dir.path())
         .args(["analyze", "case.E01"])
@@ -837,7 +840,8 @@ fn cli_analysis_signal_cancellation_never_reports_complete_hashes() {
 fn running_recovery(directory: &Path) -> std::process::Child {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ewf-image"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ewf-cli"))
+        .arg("ewf")
         .arg("--json")
         .current_dir(directory)
         .args(["recover", "case.E01", "recovered"])
@@ -1140,7 +1144,8 @@ fn running_export(directory: &Path) -> std::process::Child {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ewf-image"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ewf-cli"))
+        .arg("ewf")
         .arg("--json")
         .current_dir(directory)
         .args(["export", "case.E01", "disk.raw"])
@@ -1266,7 +1271,7 @@ fn cli_export_refuses_incomplete_and_encrypted_images() {
     result(dir.path(), &["export", "case.E01", "disk.raw"], 1);
     fs::copy(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/xways-encrypted/aes128-compatible.E01"),
+            .join("../../tests/data/xways-encrypted/aes128-compatible.E01"),
         dir.path().join("encrypted.E01"),
     )
     .unwrap();
@@ -1722,7 +1727,8 @@ fn cli_handles_real_interrupt_and_termination_signals() {
             .unwrap()
             .set_len(512 * 1024 * 1024)
             .unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ewf-image"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ewf-cli"))
+            .arg("ewf")
             .arg("--json")
             .current_dir(dir.path())
             .args([

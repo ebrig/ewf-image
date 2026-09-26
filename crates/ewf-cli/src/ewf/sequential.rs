@@ -35,7 +35,7 @@ pub(super) struct OutputArgs {
 }
 
 #[derive(Args)]
-pub(super) struct AcquireArgs {
+pub(crate) struct AcquireArgs {
     /// Source file or device.
     source: PathBuf,
     #[command(flatten)]
@@ -49,7 +49,7 @@ pub(super) struct AcquireArgs {
 }
 
 #[derive(Args)]
-pub(super) struct CollectArgs {
+pub(crate) struct CollectArgs {
     /// Directory to collect; use a stable snapshot.
     source: PathBuf,
     #[command(flatten)]

@@ -92,7 +92,7 @@ function Attach-OwnedImage([string]$Image, [bool]$ReadOnly = $true) {
 }
 
 function Invoke-Cli([string[]]$CommandArguments, [int]$ExpectedExit = 0) {
-    $lines = & $Binary --json --quiet @CommandArguments 2> (Join-Path $workRoot 'cli-stderr.txt')
+    $lines = & $Binary --json --quiet ewf @CommandArguments 2> (Join-Path $workRoot 'cli-stderr.txt')
     $code = $LASTEXITCODE
     $report = ($lines -join "`n") | ConvertFrom-Json
     if ($code -ne $ExpectedExit -or $report.exit_code -ne $ExpectedExit) {
@@ -177,7 +177,7 @@ function Test-ActiveRemoval([string]$Image, [string]$Expected) {
     $stderr = Join-Path $workRoot 'active-stderr.txt'
     # Frequent small seals leave enough time to detach after a real checkpoint.
     # No delay/fault-injection switches are added to the production executable.
-    $arguments = @('--json', '--quiet', 'acquire', "\\.\PhysicalDrive$number", $output,
+    $arguments = @('--json', '--quiet', 'ewf', 'acquire', "\\.\PhysicalDrive$number", $output,
         '--compression', 'raw', '--sectors-per-chunk', '1', '--chunks-per-segment', '128', '--zero-fill', '--retries', '0')
     $quoted = $arguments | ForEach-Object { '"' + $_ + '"' }
     $process = Start-Process -FilePath $Binary -ArgumentList $quoted -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
@@ -271,7 +271,7 @@ function Test-SequentialVolumes([string]$Raw, [string]$Expected) {
             # Kill only this owned child after a real segment is staged.
             $stdout = Join-Path $workRoot "$filesystem-$mode-kill.json"
             $stderr = Join-Path $workRoot "$filesystem-$mode-kill.stderr"
-            $arguments = @('--json', '--quiet', $command, $inputPath, $output, '--compression', 'raw', '--chunks-per-segment', '1')
+            $arguments = @('--json', '--quiet', 'ewf', $command, $inputPath, $output, '--compression', 'raw', '--chunks-per-segment', '1')
             $quoted = $arguments | ForEach-Object { '"' + $_ + '"' }
             $process = Start-Process -FilePath $Binary -ArgumentList $quoted -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
             $activeProcesses.Add($process)

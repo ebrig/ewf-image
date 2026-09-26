@@ -86,10 +86,9 @@ try {
     $packageArgs = @('package', '--all-features', '--locked')
     if ($AllowDirty) { $packageArgs += '--allow-dirty' }
     $packageCheck = Check 'package' 'cargo' $packageArgs $buildEnvironment
-    $ewfBuild = Check 'ewf-release' 'cargo' @('build', '--release', '--locked', '--features', 'cli', '--bin', 'ewf-image') $buildEnvironment
-    $aff4Build = Check 'aff4-release' 'cargo' @('build', '--release', '--locked', '-p', 'aff4-image', '--bin', 'aff4-image', '--example', 'acquire') $buildEnvironment
+    $ewfBuild = Check 'unified-cli-release' 'cargo' @('build', '--release', '--locked', '-p', 'ewf-cli') $buildEnvironment
     $suffix = if ($IsWindows) { '.exe' } else { '' }
-    $binary = Join-Path $build "release/ewf-image$suffix"
+    $binary = Join-Path $build "release/ewf-cli$suffix"
     if ($EwfExport -and $ewfBuild.status -eq 'passed') {
         foreach ($tool in @(@('ewfexport', $EwfExport), @('ewfverify', $EwfVerify))) {
             if ([IO.Path]::GetExtension($tool[1]) -eq '.ps1') { $null = Version $tool[0] $pwsh @('-NoProfile', '-File', $tool[1], '-V') }
@@ -125,9 +124,9 @@ try {
     } else {
         foreach ($name in @('linux-aff4-tests', 'linux-ewf-oracles', 'linux-aff4-oracles')) { Add-AcceptanceSkip $manifest $output $name 'WSL not configured' }
     }
-    if ($FixtureSourceDirectory -and $IsWindows -and $ewfBuild.status -eq 'passed' -and $aff4Build.status -eq 'passed') {
+    if ($FixtureSourceDirectory -and $IsWindows -and $ewfBuild.status -eq 'passed') {
         $null = Check 'consumer-fixtures' $pwsh @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'prepare-consumer-fixtures.ps1'), '-SourceDirectory', $FixtureSourceDirectory, '-OutputDirectory', (Join-Path $output 'consumer-fixtures'), '-TargetDirectory', $build) $buildEnvironment
-    } else { Add-AcceptanceSkip $manifest $output 'consumer-fixtures' 'Requires Windows, a source corpus, and successful release builds' }
+    } else { Add-AcceptanceSkip $manifest $output 'consumer-fixtures' 'Requires Windows, a source corpus, and a successful unified CLI release build' }
     foreach ($name in @('encase-manual', 'macos', 'msrv', 'fuzz-campaign', 'large-scale-benchmarks', 'linux-privileged-storage')) {
         Add-AcceptanceSkip $manifest $output $name 'Outside this runner execution; prior runs do not certify this revision'
     }
@@ -135,10 +134,6 @@ try {
     $null = New-Item -ItemType Directory -Path $artifactDirectory
     if ($packageCheck.status -eq 'passed') { Copy-Item -LiteralPath (Join-Path $build "package/ewf-image-$($package.version).crate") -Destination $artifactDirectory }
     if ($ewfBuild.status -eq 'passed') { Copy-Item -LiteralPath $binary -Destination $artifactDirectory }
-    if ($aff4Build.status -eq 'passed') {
-        Copy-Item -LiteralPath (Join-Path $build "release/aff4-image$suffix") -Destination $artifactDirectory
-        Copy-Item -LiteralPath (Join-Path $build "release/examples/acquire$suffix") -Destination (Join-Path $artifactDirectory "aff4-acquire$suffix")
-    }
 } catch {
     $manifest.runner_error = $_.Exception.Message
     $manifest.runner_error_location = $_.InvocationInfo.PositionMessage

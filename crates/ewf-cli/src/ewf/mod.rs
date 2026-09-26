@@ -5,7 +5,6 @@ pub(crate) mod export;
 mod history;
 mod inspect;
 mod logical;
-mod output;
 mod recover;
 mod sequential;
 mod session;
@@ -14,7 +13,6 @@ pub(crate) mod source;
 use std::io;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -35,7 +33,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
     version,
     about = "Read, acquire, and verify EWF evidence",
     disable_help_subcommand = true,
-    after_help = "Use ewf-image <command> --help for details."
+    after_help = "Use ewf-cli ewf <command> --help for details."
 )]
 struct Cli {
     /// Hide progress.
@@ -49,7 +47,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
-enum Command {
+pub(crate) enum Command {
     /// Show image information.
     Info {
         /// First image segment.
@@ -148,7 +146,7 @@ enum Command {
 }
 
 #[derive(Subcommand)]
-enum CheckpointCommand {
+pub(crate) enum CheckpointCommand {
     /// Show checkpoint information.
     Inspect {
         /// Original .E01 output path.
@@ -162,7 +160,7 @@ enum CheckpointCommand {
 }
 
 #[derive(Args)]
-struct Acquire {
+pub(crate) struct Acquire {
     /// Source file or device.
     source: PathBuf,
     /// New .E01 output path.
@@ -193,7 +191,7 @@ struct Acquire {
 }
 
 #[derive(Args)]
-struct ReadArgs {
+pub(crate) struct ReadArgs {
     /// Per-read timeout; omitted means no deadline.
     #[arg(long, value_name = "MS", help_heading = "Read handling", value_parser = clap::value_parser!(u64).range(1..))]
     read_timeout_ms: Option<u64>,
@@ -211,42 +209,39 @@ struct ReadArgs {
     stop_after: Option<u64>,
 }
 
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-    let stop = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&stop);
-    if let Err(error) = ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed)) {
-        eprintln!("cannot install cancellation handler: {error}");
-        return ExitCode::from(1);
-    }
-    let json = cli.json;
-    let (report, code) = execute(&cli, &stop);
-    if let Err(error) = output::print(&report, json) {
-        eprintln!("cannot write result: {error}");
-        return ExitCode::from(1);
-    }
-    ExitCode::from(code)
+/// Run an advanced EWF command from the single executable.
+pub(crate) fn dispatch_command(
+    command: &Command,
+    quiet: bool,
+    stop: &Arc<AtomicBool>,
+) -> (Value, u8) {
+    execute_command(command, quiet, stop)
 }
 
-// In-process bridge used by the unified CLI. Legacy entry points use the same
-// execution and history finalization path; this never launches a subprocess.
-#[allow(dead_code)]
+// Internal adapter for the format-neutral commands in the same executable.
 pub(crate) fn dispatch(
     arguments: &[std::ffi::OsString],
     stop: &Arc<AtomicBool>,
 ) -> Result<(Value, u8)> {
     let cli = Cli::try_parse_from(arguments)?;
-    Ok(execute(&cli, stop))
+    Ok(execute_command(&cli.command, cli.quiet, stop))
 }
 
-fn execute(cli: &Cli, stop: &Arc<AtomicBool>) -> (Value, u8) {
+fn execute_command(command: &Command, quiet: bool, stop: &Arc<AtomicBool>) -> (Value, u8) {
     let started = Instant::now();
-    let mut report = json!({"schema_version": 1, "tool_version": env!("CARGO_PKG_VERSION"),
+    let mut report = json!({"schema_version": 1, "tool": "ewf-cli", "tool_version": env!("CARGO_PKG_VERSION"),
         "status": "failed", "phase": "preflight", "published": false,
         "verification": null, "checkpoint_bytes": 0, "accepted_bytes": 0});
     let mut history = None;
     let mut recovery = None;
-    let result = run(cli, stop, &mut report, &mut history, &mut recovery);
+    let result = run(
+        command,
+        quiet,
+        stop,
+        &mut report,
+        &mut history,
+        &mut recovery,
+    );
     let mut code = if let Err(error) = result {
         let aborted = error
             .downcast_ref::<EwfError>()
@@ -316,14 +311,15 @@ fn execute(cli: &Cli, stop: &Arc<AtomicBool>) -> (Value, u8) {
 }
 
 fn run(
-    cli: &Cli,
+    command: &Command,
+    quiet: bool,
     stop: &Arc<AtomicBool>,
     report: &mut Value,
     audit: &mut Option<history::History>,
     recovery: &mut Option<recover::Bundle>,
 ) -> Result<()> {
-    let mut progress = Progress::new(cli.quiet, stop);
-    match &cli.command {
+    let mut progress = Progress::new(quiet, stop);
+    match command {
         Command::AcquireSequential(args) => sequential::acquire(args, stop, &mut progress, report),
         Command::Collect(args) => sequential::collect(args, &mut progress, report),
         Command::RecoverPublication { output } => sequential::recover(output, report),

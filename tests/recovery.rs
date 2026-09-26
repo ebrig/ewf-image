@@ -385,35 +385,5 @@ fn external_acquisition_and_truncated_recovery_match_ewfexport() {
         assert_eq!(recovered, exported.stdout);
         assert_eq!(report.chunks_zero_filled, 0);
         assert!(!report.notices.is_empty());
-        #[cfg(feature = "cli")]
-        {
-            let bundle = dir.path().join(format!("{compression}-recovered"));
-            let result = Command::new(env!("CARGO_BIN_EXE_ewf-image"))
-                .arg("recover")
-                .arg(&path)
-                .arg(&bundle)
-                .output()
-                .unwrap();
-            assert_eq!(
-                result.status.code(),
-                Some(4),
-                "{}",
-                String::from_utf8_lossy(&result.stdout)
-            );
-            assert_eq!(
-                std::fs::read(bundle.join("image.raw")).unwrap(),
-                exported.stdout
-            );
-            let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
-            assert_eq!(report["recovery_complete"], true);
-            assert_eq!(report["recovery"]["bytes_zero_filled"], 0);
-            assert_eq!(report["mapped_bytes"], exported.stdout.len());
-            let analysis = Command::new(env!("CARGO_BIN_EXE_ewf-image"))
-                .arg("analyze")
-                .arg(&path)
-                .output()
-                .unwrap();
-            assert_eq!(analysis.status.code(), Some(3));
-        }
     }
 }
