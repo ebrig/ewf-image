@@ -2551,6 +2551,7 @@ fn writer_rejects_unpaired_utf16_entry_name_without_reencoding_it() {
 
     let error = writer.finish().unwrap_err();
     assert!(error.to_string().contains("unpaired UTF-16"));
+    assert!(!path.exists());
 }
 
 #[test]
