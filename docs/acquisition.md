@@ -13,8 +13,8 @@ source checks and JSON reporting. See [CLI acquisition](cli.md#acquisition).
 | `SequentialWriter` | You need append-only Ex01/Lx01 with bounded payload scratch | Known size; no checkpoint resume |
 | `LogicalWriter` | You are supplying files and metadata for L01/Lx01 | Retained catalog; general or sequential EWF2 backend |
 
-Library finalization computes hashes but does not reread the output. The EWF CLI
-acquisition and collection commands verify output after publication. AFF4 support
+Library finalization computes hashes but does not reread the output. The EWF
+acquisition and collection commands in `ewf-cli` verify output after publication. AFF4 support
 is provided by a separate
 [sibling crate](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image),
 which has its own single-volume writer and optional verification before publication.

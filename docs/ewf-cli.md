@@ -48,8 +48,8 @@ Linux example:
 sudo ewf-cli acquire /dev/sdb case.E01
 ```
 
-Device acquisition uses the read-only Windows and Linux device adapter from the
-EWF CLI, including its geometry, identity, and destination-overlap checks.
+Device acquisition uses a read-only Windows and Linux device adapter with
+geometry, identity, and destination-overlap checks.
 Administrator or root access may be required. Other platforms support
 regular-file sources only. Acquisition does not freeze a live disk, so use a
 stable source or a snapshot. The automated test suite does not exercise AFF4 or
@@ -141,10 +141,10 @@ names never become extraction paths on the host. The user supplies the
 destination path.
 
 The EWF diagnostic commands `analyze`, `recover`, `resume`, `checkpoint inspect`,
-`checkpoint validate`, `recover-publication`, and `report` are also available.
-The [EWF command guide](cli.md) describes their behavior. Advanced acquisition
-tuning remains available under `ewf-cli ewf <command>`; the format-neutral
-commands provide the standard workflow with safe defaults.
+`checkpoint validate`, `recover-publication`, and `report` are also available at
+the top level. The top-level commands use safe defaults. For advanced
+acquisition and recovery options, use `ewf-cli ewf <command>`. The
+[EWF command guide](cli.md) describes both.
 
 ## Results
 

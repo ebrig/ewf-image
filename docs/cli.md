@@ -1,12 +1,8 @@
 # EWF command line
 
-This page documents advanced EWF commands under `ewf-cli ewf`. For combined
-EWF and AFF4 acquisition and conversion, use [ewf-cli](ewf-cli.md).
-
-Build the executable from this checkout with
-`cargo build --release -p ewf-cli --locked`, or install it with
-`cargo install --path crates/ewf-cli --locked`. CLI dependencies are excluded
-from ordinary library builds.
+This page documents the advanced EWF commands under `ewf-cli ewf`. For the
+standard acquisition, conversion, and verification workflow, see the
+[unified CLI guide](ewf-cli.md), which also explains how to build `ewf-cli`.
 
 Commands print concise text summaries. Add `--json` for machine-readable results.
 Progress is written to stderr, and `-q` or `--quiet` hides it. Run

@@ -8,11 +8,10 @@ The AFF4 crate is experimental and is not a dependency of the EWF package.
 The `ewf-cli` workspace package, whose name is provisional, depends on both
 libraries. The package provides acquisition, conversion, collection, inspection,
 and verification. The package includes the EWF operational runtime and native
-device adapter at the source level and runs them in the same process. `ewf-cli`
-is the only command-line executable; it is unpublished and must be built from
-this workspace. Conversion reads decoded
-streams, maps supported metadata, and reports omissions without making either
-format library depend on the other.
+device adapter and runs them in the same process. `ewf-cli` is the only
+command-line executable. It is unpublished and must be built from this
+workspace. Conversion reads decoded streams, maps supported metadata, and
+reports omissions without making either format library depend on the other.
 
 ## EWF reading
 
@@ -102,7 +101,7 @@ budgets. Multi-volume writing and resume are unsupported. See the
 | `verify`, `integrity`, `image::recovery` | Media checks, findings, and recovery provenance |
 | `crates/ewf-cli/src/ewf` | EWF device access, source policy, sessions, and history |
 
-Both libraries forbid unsafe Rust. The EWF CLI has a narrow native Windows
+Both libraries forbid unsafe Rust. `ewf-cli` has a narrow native Windows
 boundary for read-only device queries and cancellation of source I/O. The
 application is responsible for source consistency, privileges, and the
 interpretation of results.
