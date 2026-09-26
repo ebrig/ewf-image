@@ -3671,6 +3671,11 @@ fn single_file_entry_row(
     source_ids: &SingleFileSourceIds,
     include_guid: bool,
 ) -> Result<String> {
+    if entry.name_utf16.is_some() {
+        return Err(EwfError::Unsupported(
+            "writing a single-file name with unpaired UTF-16 units is not supported".into(),
+        ));
+    }
     let mut values = vec![
         optional_display(entry.identifier),
         single_file_entry_type_value(entry.file_entry_type),

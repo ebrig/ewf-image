@@ -1054,6 +1054,10 @@ pub struct SingleFileEntry {
     pub guid: Option<String>,
     /// Entry name.
     pub name: Option<String>,
+    /// Original UTF-16 units when the entry name contains an unpaired surrogate.
+    /// `name` is then a display string with replacement characters; use this
+    /// field or the catalog index to distinguish names that display alike.
+    pub name_utf16: Option<Vec<u16>>,
     /// Short entry name.
     pub short_name: Option<String>,
     /// Logical file size in bytes.

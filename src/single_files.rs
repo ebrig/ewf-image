@@ -4,6 +4,7 @@ use crate::types::{
     SingleFilesInfo,
 };
 use crate::{EwfError, Result};
+use std::collections::BTreeMap;
 
 /// Path separator used by EWF2 logical single-file catalogs.
 ///
@@ -461,7 +462,10 @@ pub(crate) fn parse_ewf1_single_files_data(data: &[u8]) -> Result<SingleFilesInf
 }
 
 fn parse_single_files_data(data: &[u8], require_record_size: bool) -> Result<SingleFilesInfo> {
-    let lines = decode_utf16le_lines(data)?;
+    let DecodedUtf16Lines {
+        lines,
+        mut invalid_utf16_lines,
+    } = decode_utf16le_lines(data)?;
     if lines.first().map(String::as_str) != Some("5") {
         return Err(EwfError::Malformed(
             "EWF2 single files data has unsupported category count".into(),
@@ -508,12 +512,17 @@ fn parse_single_files_data(data: &[u8], require_record_size: bool) -> Result<Sin
         None => u64::try_from(data.len())
             .map_err(|_| EwfError::Malformed("single files data size overflow".into()))?,
     };
-    let root = parse_entry(&lines, &types, &mut cursor)?;
+    let root = parse_entry(&lines, &types, &mut cursor, &mut invalid_utf16_lines)?;
     require_empty_category_terminator(
         &lines,
         cursor,
         "EWF2 single files entry category terminator",
     )?;
+    if !invalid_utf16_lines.is_empty() {
+        return Err(EwfError::Malformed(
+            "single files data has invalid UTF-16 outside an entry name".into(),
+        ));
+    }
     Ok(SingleFilesInfo {
         data_size,
         root,
@@ -990,7 +999,12 @@ fn parse_single_char(value: &str, label: &str) -> Result<char> {
     Ok(character)
 }
 
-fn decode_utf16le_lines(data: &[u8]) -> Result<Vec<String>> {
+struct DecodedUtf16Lines {
+    lines: Vec<String>,
+    invalid_utf16_lines: BTreeMap<usize, Vec<u16>>,
+}
+
+fn decode_utf16le_lines(data: &[u8]) -> Result<DecodedUtf16Lines> {
     if !data.len().is_multiple_of(2) {
         return Err(EwfError::Malformed(
             "EWF2 single files data has odd UTF-16 size".into(),
@@ -1003,17 +1017,30 @@ fn decode_utf16le_lines(data: &[u8]) -> Result<Vec<String>> {
         .iter()
         .map(|chunk| u16::from_le_bytes(*chunk))
         .collect();
-    let text = String::from_utf16(&units)
-        .map_err(|_| EwfError::Malformed("EWF2 single files data is not valid UTF-16LE".into()))?;
-    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-
-    Ok(text
-        .split('\n')
-        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
-        .collect())
+    let units = units.strip_prefix(&[0xfeff]).unwrap_or(&units);
+    let mut lines = Vec::new();
+    let mut invalid = BTreeMap::new();
+    for raw in units.split(|unit| *unit == u16::from(b'\n')) {
+        let raw = raw.strip_suffix(&[u16::from(b'\r')]).unwrap_or(raw);
+        if let Ok(line) = String::from_utf16(raw) {
+            lines.push(line);
+        } else {
+            invalid.insert(lines.len(), raw.to_vec());
+            lines.push(String::from_utf16_lossy(raw));
+        }
+    }
+    Ok(DecodedUtf16Lines {
+        lines,
+        invalid_utf16_lines: invalid,
+    })
 }
 
-fn parse_entry(lines: &[String], types: &[&str], cursor: &mut usize) -> Result<SingleFileEntry> {
+fn parse_entry(
+    lines: &[String],
+    types: &[&str],
+    cursor: &mut usize,
+    invalid_utf16_lines: &mut BTreeMap<usize, Vec<u16>>,
+) -> Result<SingleFileEntry> {
     let count_line = lines
         .get(*cursor)
         .ok_or_else(|| EwfError::Malformed("EWF2 single file entry missing count".into()))?;
@@ -1023,6 +1050,7 @@ fn parse_entry(lines: &[String], types: &[&str], cursor: &mut usize) -> Result<S
         .checked_add(1)
         .ok_or_else(|| EwfError::Malformed("EWF2 single file entry index overflow".into()))?;
 
+    let value_line_index = *cursor;
     let value_line = lines
         .get(*cursor)
         .ok_or_else(|| EwfError::Malformed("EWF2 single file entry missing values".into()))?;
@@ -1035,9 +1063,26 @@ fn parse_entry(lines: &[String], types: &[&str], cursor: &mut usize) -> Result<S
     for (value_type, value) in types.iter().zip(values.iter()) {
         apply_entry_value(&mut entry, value_type, value)?;
     }
+    if let Some(raw) = invalid_utf16_lines.remove(&value_line_index) {
+        for (index, field) in raw.split(|unit| *unit == u16::from(b'\t')).enumerate() {
+            if String::from_utf16(field).is_err() {
+                if types.get(index) != Some(&"n") || entry.name_utf16.is_some() {
+                    return Err(EwfError::Malformed(
+                        "single files entry has invalid UTF-16 outside its name".into(),
+                    ));
+                }
+                entry.name_utf16 = Some(field.to_vec());
+            }
+        }
+        if entry.name_utf16.is_none() {
+            return Err(EwfError::Malformed(
+                "single files entry has invalid UTF-16 outside its name".into(),
+            ));
+        }
+    }
 
     for _ in 0..child_count {
-        let child = parse_entry(lines, types, cursor)?;
+        let child = parse_entry(lines, types, cursor, invalid_utf16_lines)?;
         entry.children.push(child);
     }
     Ok(entry)

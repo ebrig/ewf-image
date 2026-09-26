@@ -6881,6 +6881,50 @@ fn image_preserves_logical_names_and_reads_data_bearing_parent() {
 }
 
 #[test]
+fn image_preserves_unpaired_utf16_entry_name_units() {
+    let mut catalog = single_files_stream_with_single_extent(0, 7);
+    let name = utf16le("report.bin");
+    let offset = catalog
+        .windows(name.len())
+        .position(|window| window == name)
+        .unwrap();
+    catalog[offset..offset + 2].copy_from_slice(&0xd800_u16.to_le_bytes());
+    let file = synthetic_l01_with_ltree(b"payload", &catalog);
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    let entry = &image.info().single_files.as_ref().unwrap().root.children[0];
+    let mut expected_units = "report.bin".encode_utf16().collect::<Vec<_>>();
+    expected_units[0] = 0xd800;
+    let mut content = [0; 7];
+
+    assert_eq!(entry.name.as_deref(), Some("�eport.bin"));
+    assert_eq!(entry.name_utf16.as_deref(), Some(expected_units.as_slice()));
+    assert_eq!(
+        image.read_single_file_at(entry, &mut content, 0).unwrap(),
+        7
+    );
+    assert_eq!(&content, b"payload");
+}
+
+#[test]
+fn image_rejects_unpaired_utf16_outside_entry_name() {
+    let mut catalog = single_files_stream_with_single_extent(0, 7);
+    let row = utf16le("2\tf\treport.bin");
+    let offset = catalog
+        .windows(row.len())
+        .position(|window| window == row)
+        .unwrap();
+    catalog[offset + 4..offset + 6].copy_from_slice(&0xd800_u16.to_le_bytes());
+    let file = synthetic_l01_with_ltree(b"payload", &catalog);
+
+    let error = ewf_image::Image::open(file.path()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("invalid UTF-16 outside its name")
+    );
+}
+
+#[test]
 fn image_reads_ewf1_sparse_entry_as_repeated_stored_byte() {
     let file = synthetic_l01_with_ltree(
         b"Qother-data",

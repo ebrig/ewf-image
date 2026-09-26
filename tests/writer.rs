@@ -2518,6 +2518,42 @@ fn writer_creates_readable_logical_l01_single_files_catalog() {
 }
 
 #[test]
+fn writer_rejects_unpaired_utf16_entry_name_without_reencoding_it() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("unpaired.L01");
+    let single_files = SingleFilesInfo {
+        root: SingleFileEntry {
+            file_entry_type: Some(SingleFileEntryType::Directory),
+            name: Some("root".to_owned()),
+            children: vec![SingleFileEntry {
+                file_entry_type: Some(SingleFileEntryType::File),
+                name: Some("�".to_owned()),
+                name_utf16: Some(vec![0xd800]),
+                size: Some(1),
+                extents: vec![SingleFileExtent {
+                    data_offset: 0,
+                    data_size: 1,
+                    sparse: false,
+                }],
+                ..SingleFileEntry::default()
+            }],
+            ..SingleFileEntry::default()
+        },
+        ..SingleFilesInfo::default()
+    };
+    let options = WriteOptions {
+        format: WriteFormat::Ewf1Logical,
+        single_files: Some(single_files),
+        ..WriteOptions::default()
+    };
+    let mut writer = EwfWriter::create(&path, options).unwrap();
+    writer.write_all(b"x").unwrap();
+
+    let error = writer.finish().unwrap_err();
+    assert!(error.to_string().contains("unpaired UTF-16"));
+}
+
+#[test]
 fn writer_creates_readable_smart_s01() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("smart.s01");
