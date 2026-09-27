@@ -13,8 +13,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const BUFFER_SIZE: usize = 1024 * 1024;
-const DEFAULT_CORPUS_DIR: &str =
-    "/mnt/c/Users/user/Documents/Repos/ewf-upstream-prs/ewf/tests/data";
 
 #[test]
 #[cfg(feature = "verify")]
@@ -2114,10 +2112,8 @@ fn logical_single_file_fixture_paths_from_root(
     Ok(paths)
 }
 
-fn corpus_root(env_root: Option<OsString>, default_root: &Path) -> Option<PathBuf> {
-    env_root
-        .map(PathBuf::from)
-        .or_else(|| default_root.exists().then(|| default_root.to_path_buf()))
+fn corpus_root(env_root: Option<OsString>) -> Option<PathBuf> {
+    env_root.map(PathBuf::from)
 }
 
 fn corpus_roots(env_roots: Option<OsString>, env_root: Option<OsString>) -> Vec<PathBuf> {
@@ -2126,9 +2122,7 @@ fn corpus_roots(env_roots: Option<OsString>, env_root: Option<OsString>) -> Vec<
             .filter(|path| path.exists())
             .collect();
     }
-    corpus_root(env_root, Path::new(DEFAULT_CORPUS_DIR))
-        .into_iter()
-        .collect()
+    corpus_root(env_root).into_iter().collect()
 }
 
 fn is_first_segment(path: &Path) -> bool {
@@ -2744,26 +2738,18 @@ fn external_fixture_open_error_includes_path_and_source() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn corpus_root_prefers_explicit_environment_value() {
+fn corpus_root_uses_explicit_environment_value() {
     let explicit = OsString::from("/tmp/explicit-ewf-corpus");
-    let default = Path::new("/tmp/default-ewf-corpus");
 
     assert_eq!(
-        corpus_root(Some(explicit), default),
+        corpus_root(Some(explicit)),
         Some(PathBuf::from("/tmp/explicit-ewf-corpus"))
     );
 }
 
 #[test]
-fn corpus_root_uses_existing_default_when_environment_is_absent() -> Result<(), Box<dyn Error>> {
-    let dir = tempfile::tempdir()?;
-
-    assert_eq!(
-        corpus_root(None, dir.path()),
-        Some(dir.path().to_path_buf())
-    );
-
-    Ok(())
+fn corpus_root_requires_explicit_environment_value() {
+    assert_eq!(corpus_root(None), None);
 }
 
 #[test]
