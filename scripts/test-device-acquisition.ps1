@@ -314,6 +314,12 @@ function Test-SequentialVolumes([string]$Raw, [string]$Expected) {
             }
             $checks.Add("$filesystem ${mode}: actual disk full, killed staging, rollback, fresh retry, reopened source SHA256")
         }
+        # Release the finished destination before attaching the next filesystem.
+        # Keeping it mounted needlessly consumes a VHD attachment in the full run.
+        $disk = Get-OwnedDisk $image
+        Remove-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber -AccessPath $access
+        $accessPaths.RemoveAt($accessPaths.Count - 1)
+        Dismount-VHD -Path $image
     }
 }
 
