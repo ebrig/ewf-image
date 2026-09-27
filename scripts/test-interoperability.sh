@@ -18,12 +18,15 @@ export EWFINFO="$prefix/bin/ewfinfo"
 export EWFVERIFY="$prefix/bin/ewfverify"
 
 run_case() {
-  local suite=$1 name=$2 listing
-  listing=$(cargo test --locked --all-features --test "$suite" -- --list)
+  local suite=$1 name=$2 listing package=ewf-image
+  if [[ "$suite" == ewf_cli ]]; then
+    package=ewf-cli
+  fi
+  listing=$(cargo test --locked --all-features -p "$package" --test "$suite" -- --list)
   grep --fixed-strings --line-regexp "$name: test" <<< "$listing" >/dev/null || {
     echo "Required oracle test is missing: $suite/$name" >&2; exit 1;
   }
-  cargo test --locked --all-features --test "$suite" "$name" -- --exact --ignored --nocapture
+  cargo test --locked --all-features -p "$package" --test "$suite" "$name" -- --exact --ignored --nocapture
 }
 
 run_case corpus ewf_tool_generated_fixture_matrix_matches_oracles
@@ -36,5 +39,5 @@ run_case corpus external_acquisition_bad_sectors_match_ewf_tools
 run_case corpus external_writer_logical_single_files_match_ewfinfo
 run_case corpus external_logical_builder_files_match_ewfexport
 run_case recovery external_acquisition_and_truncated_recovery_match_ewfexport
-run_case cli external_cli_resumed_acquisition_matches_libewf
-run_case cli external_cli_sequential_and_collection_match_libewf
+run_case ewf_cli external_cli_resumed_acquisition_matches_libewf
+run_case ewf_cli external_cli_sequential_and_collection_match_libewf
