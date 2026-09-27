@@ -64,6 +64,7 @@ verify = []
 parallel = ["verify", "dep:rayon"]
 serde = ["dep:serde"]
 external-fixtures = []
+fuzzing = []
 
 [[example]]
 name = "sequential"

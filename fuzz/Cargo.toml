@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-ewf-image = { path = ".." }
+ewf-image = { path = "..", features = ["fuzzing"] }
 aff4-image = { path = "../crates/aff4-image" }
 tempfile = "3"
 
@@ -26,6 +26,13 @@ bench = false
 [[bin]]
 name = "aff4_read"
 path = "fuzz_targets/aff4_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ewf_catalog"
+path = "fuzz_targets/ewf_catalog.rs"
 test = false
 doc = false
 bench = false

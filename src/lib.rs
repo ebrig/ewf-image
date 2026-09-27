@@ -143,6 +143,7 @@
 //!   without this feature.
 //! - `external-fixtures` enables ignored integration tests that require local
 //!   EWF corpora and external EWF tools. It does not change library behavior.
+//! - `fuzzing` exposes the logical catalog parser to the isolated fuzz workspace.
 //! - `parallel` enables multiple decompression workers for verification and
 //!   analysis. It implies `verify`; scans remain single-threaded by default.
 //! - `serde` enables serialization of analysis, verification, recovery, and
@@ -195,6 +196,16 @@ mod writer;
 
 pub use encryption::{EncryptionInfo, EncryptionMethod, EwfPassword};
 pub use error::{EwfError, Result};
+/// Direct catalog parsing for the isolated fuzz workspace.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn parse_single_files_for_fuzzing(data: &[u8], ewf1: bool) -> Result<SingleFilesInfo> {
+    if ewf1 {
+        single_files::parse_ewf1_single_files_data(data)
+    } else {
+        single_files::parse_ewf2_single_files_data(data)
+    }
+}
 pub use image::recovery::{
     EwfRecovery, RecoveryNotice, RecoveryOptions, RecoveryProgress, RecoveryRange, RecoveryReport,
     RecoveryStatus,
