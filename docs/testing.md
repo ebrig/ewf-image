@@ -120,6 +120,44 @@ cargo test --features external-fixtures --test corpus \
   external_logical_entry_bytes_and_media_match_references -- --ignored --nocapture
 ```
 
+An additional opt-in gate compares the complete logical entry tree and each
+entry's SHA256 with an independently produced JSON Lines manifest. For a first
+segment named `case.L01`, place `case.L01.entries.jsonl` in the matching relative
+directory under `EWF_LOGICAL_ENTRY_MANIFEST_DIR`. Keep manifests and images
+outside the repository. Produce the manifest from the original source files or
+an independent reader; do not derive it from this library's parsed entries.
+
+The first line is a header with `schema` set to `ewf-logical-entries-v1`, decimal
+`media_size`, lowercase `media_sha256`, decimal `segment_count`, and decimal
+`entry_count`. Following lines list every entry in preorder, including the
+root. Each has a zero-based `index`, its parent's index (`null` for the root),
+`name_utf16` as four lowercase hexadecimal digits per UTF-16 code unit, `kind`
+(`file`, `directory`, `unknown`, or `unspecified`), decimal `size`, and lowercase
+`sha256` of its content. `size` is the entry's declared size, or zero if none is
+declared; an extent alone does not imply content for this manifest. Hash the
+empty byte string for zero-size entries. Each line is one JSON object with
+exactly these fields. For example:
+
+```jsonl
+{"schema":"ewf-logical-entries-v1","media_size":3,"media_sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","segment_count":1,"entry_count":2}
+{"index":0,"parent":null,"name_utf16":"","kind":"directory","size":0,"sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
+{"index":1,"parent":0,"name_utf16":"0061002e007400780074","kind":"file","size":3,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}
+```
+
+Run the independent entry gate with:
+
+```bash
+EWF_LOGICAL_SINGLE_FILES_DIR=/path/to/images \
+EWF_LOGICAL_ENTRY_MANIFEST_DIR=/path/to/independent-manifests \
+EWF_LOGICAL_REQUIRE_SPLIT=1 \
+cargo test --features external-fixtures --test corpus \
+  external_logical_entries_match_independent_manifests -- --ignored --nocapture
+```
+
+`EWF_LOGICAL_REQUIRE_SPLIT=1` requires at least one multi-segment image. A
+writer-created split set checks our output against a consumer, while a split
+image from another producer is needed for independent reader coverage.
+
 The writer oracle tests compare images created by this library with the output
 of external EWF tools:
 

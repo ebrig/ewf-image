@@ -8,7 +8,7 @@ use std::env;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -795,10 +795,14 @@ fn external_logical_builder_files_match_ewfexport() -> Result<(), Box<dyn Error>
     let ewfinfo = env::var_os("EWFINFO").unwrap_or_else(|| OsString::from("ewfinfo"));
     let ewfexport = env::var_os("EWFEXPORT").unwrap_or_else(|| OsString::from("ewfexport"));
     let dir = tempfile::tempdir()?;
+    let split_payload: Vec<u8> = (0_u32..6000)
+        .flat_map(|index| Sha256::digest(index.to_le_bytes()).to_vec())
+        .collect();
     for (name, format) in [
         ("case.L01", WriteFormat::Ewf1Logical),
         ("case.Lx01", WriteFormat::Ewf2Logical),
         ("stream.Lx01", WriteFormat::Ewf2Logical),
+        ("split.L01", WriteFormat::Ewf1Logical),
     ] {
         let path = dir.path().join(name);
         let mut writer = if name == "stream.Lx01" {
@@ -811,6 +815,7 @@ fn external_logical_builder_files_match_ewfexport() -> Result<(), Box<dyn Error>
                 &path,
                 WriteOptions {
                     format,
+                    maximum_segment_size: (name == "split.L01").then_some(65_536),
                     ..WriteOptions::default()
                 },
             )?
@@ -841,8 +846,22 @@ fn external_logical_builder_files_match_ewfexport() -> Result<(), Box<dyn Error>
                 150_000,
                 &mut std::io::Cursor::new(vec![73; 150_000]),
             )?;
+        } else if name == "split.L01" {
+            writer.add_file(
+                folder,
+                LogicalEntryMetadata {
+                    name: "later.bin".into(),
+                    ..Default::default()
+                },
+                split_payload.len() as u64,
+                &mut std::io::Cursor::new(split_payload.as_slice()),
+            )?;
         }
-        writer.finish()?;
+        let written = writer.finish()?;
+        if name == "split.L01" {
+            assert!(written.segment_paths.len() > 1, "expected split L01 output");
+            assert_eq!(written.chunk_size, 32_768);
+        }
         assert!(ewfinfo_hierarchy(&ewfinfo, &path)?.contains("folder/data.txt"));
         let output = dir.path().join(format!("{name}-export"));
         let result = Command::new(&ewfexport)
@@ -861,6 +880,8 @@ fn external_logical_builder_files_match_ewfexport() -> Result<(), Box<dyn Error>
                 fs::read(output.join("folder/later.bin"))?,
                 vec![73; 150_000]
             );
+        } else if name == "split.L01" {
+            assert_eq!(fs::read(output.join("folder/later.bin"))?, split_payload);
         }
     }
     Ok(())
@@ -1056,6 +1077,269 @@ fn external_logical_entry_bytes_and_media_match_references() -> Result<(), Box<d
         split_images,
         hashed_files
     );
+    Ok(())
+}
+
+#[test]
+#[cfg(feature = "verify")]
+#[ignore = "requires external logical images and independently produced entry manifests"]
+fn external_logical_entries_match_independent_manifests() -> Result<(), Box<dyn Error>> {
+    let image_root = PathBuf::from(
+        env::var_os("EWF_LOGICAL_SINGLE_FILES_DIR")
+            .ok_or("set EWF_LOGICAL_SINGLE_FILES_DIR to the external image directory")?,
+    );
+    let manifest_root = PathBuf::from(
+        env::var_os("EWF_LOGICAL_ENTRY_MANIFEST_DIR")
+            .ok_or("set EWF_LOGICAL_ENTRY_MANIFEST_DIR to independent entry manifests")?,
+    );
+    let paths = logical_single_file_fixture_paths_from_root(&image_root)?;
+    assert!(!paths.is_empty(), "external logical corpus is empty");
+
+    let mut split_images = 0_usize;
+    let mut entries = 0_usize;
+    for path in &paths {
+        let image = ewf_image::Image::open(path)?;
+        split_images += usize::from(image.number_of_segments() > 1);
+        let relative = path.strip_prefix(&image_root)?;
+        let mut sidecar_name = relative
+            .file_name()
+            .ok_or("logical image path has no file name")?
+            .to_os_string();
+        sidecar_name.push(".entries.jsonl");
+        let manifest = manifest_root
+            .join(relative.parent().unwrap_or_else(|| Path::new("")))
+            .join(sidecar_name);
+        entries += check_logical_entry_manifest(&image, &manifest)?;
+    }
+    if env::var_os("EWF_LOGICAL_REQUIRE_SPLIT").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        assert!(split_images > 0, "corpus has no split logical image");
+    }
+    eprintln!(
+        "validated {} logical images, {} split sets, and {} entry digests",
+        paths.len(),
+        split_images,
+        entries
+    );
+    Ok(())
+}
+
+#[cfg(feature = "verify")]
+fn check_logical_entry_manifest(
+    image: &ewf_image::Image,
+    manifest: &Path,
+) -> Result<usize, Box<dyn Error>> {
+    let mut lines = BufReader::new(fs::File::open(manifest)?).lines();
+    let header = next_logical_manifest_record(&mut lines, "manifest header")?;
+    let expected_count = header["entry_count"]
+        .as_u64()
+        .ok_or("manifest header has no entry_count")?;
+    let media = image.verify_with_options(&ewf_image::VerifyOptions::default())?;
+    let expected_header = serde_json::json!({
+        "schema": "ewf-logical-entries-v1",
+        "media_size": media.bytes_verified,
+        "media_sha256": hex_lower(&media.hashes.sha256),
+        "segment_count": image.number_of_segments(),
+        "entry_count": expected_count,
+    });
+    if header != expected_header {
+        return Err(format!(
+            "logical entry manifest header mismatch in {}: expected {header}, read {expected_header}",
+            manifest.display()
+        )
+        .into());
+    }
+
+    let root = image
+        .root_file_entry()
+        .ok_or("logical image has no entry root")?;
+    let mut stack = vec![(root, None)];
+    let mut count = 0_u64;
+    while let Some((entry, parent)) = stack.pop() {
+        let record = next_logical_manifest_record(&mut lines, "entry record")?;
+        let size = entry.size.unwrap_or(0);
+        let sha256 = if entry.file_entry_type == Some(ewf_image::SingleFileEntryType::File) {
+            let result = image.verify_single_file(entry)?;
+            if result.references_match() == Some(false) {
+                return Err(format!("stored hash mismatch at entry {count}").into());
+            }
+            if result.bytes_verified != size {
+                return Err(format!("short verification at entry {count}").into());
+            }
+            hex_lower(&result.hashes.sha256)
+        } else {
+            hash_non_file_logical_entry(image, entry, size)?
+        };
+        let expected = serde_json::json!({
+            "index": count,
+            "parent": parent,
+            "name_utf16": logical_name_utf16_hex(entry),
+            "kind": logical_entry_kind(entry),
+            "size": size,
+            "sha256": sha256,
+        });
+        if record != expected {
+            return Err(format!(
+                "logical entry {count} differs from {}: expected {record}, read {expected}",
+                manifest.display()
+            )
+            .into());
+        }
+        stack.extend(
+            entry
+                .children
+                .iter()
+                .rev()
+                .map(|child| (child, Some(count))),
+        );
+        count += 1;
+    }
+    if count != expected_count || lines.next().transpose()?.is_some() {
+        return Err(format!("logical entry count differs from {}", manifest.display()).into());
+    }
+    Ok(usize::try_from(count)?)
+}
+
+#[cfg(feature = "verify")]
+fn next_logical_manifest_record(
+    lines: &mut impl Iterator<Item = std::io::Result<String>>,
+    label: &str,
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    let line = lines.next().ok_or_else(|| format!("missing {label}"))??;
+    Ok(serde_json::from_str(&line)?)
+}
+
+#[cfg(feature = "verify")]
+fn logical_name_utf16_hex(entry: &ewf_image::SingleFileEntry) -> String {
+    let units = entry.name_utf16.clone().unwrap_or_else(|| {
+        entry
+            .name
+            .as_deref()
+            .unwrap_or_default()
+            .encode_utf16()
+            .collect()
+    });
+    units.iter().map(|unit| format!("{unit:04x}")).collect()
+}
+
+#[cfg(feature = "verify")]
+fn logical_entry_kind(entry: &ewf_image::SingleFileEntry) -> &'static str {
+    match entry.file_entry_type {
+        Some(ewf_image::SingleFileEntryType::File) => "file",
+        Some(ewf_image::SingleFileEntryType::Directory) => "directory",
+        Some(ewf_image::SingleFileEntryType::Unknown) => "unknown",
+        None => "unspecified",
+    }
+}
+
+#[cfg(feature = "verify")]
+fn hash_non_file_logical_entry(
+    image: &ewf_image::Image,
+    entry: &ewf_image::SingleFileEntry,
+    size: u64,
+) -> Result<String, Box<dyn Error>> {
+    let mut hash = Sha256::new();
+    let mut buffer = vec![0_u8; BUFFER_SIZE];
+    let mut offset = 0_u64;
+    while offset < size {
+        let length = (size - offset).min(BUFFER_SIZE as u64) as usize;
+        let read = image.read_single_file_at_strict(entry, &mut buffer[..length], offset)?;
+        if read != length {
+            return Err(format!("short logical entry read at offset {offset}").into());
+        }
+        hash.update(&buffer[..read]);
+        offset += read as u64;
+    }
+    Ok(hex_lower(&hash.finalize()))
+}
+
+#[test]
+#[cfg(feature = "verify")]
+fn logical_entry_manifest_checks_hierarchy_and_content() -> Result<(), Box<dyn Error>> {
+    use ewf_image::{LogicalEntryMetadata, LogicalWriter, WriteFormat, WriteOptions};
+
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("known.L01");
+    let mut writer = LogicalWriter::create(
+        &path,
+        WriteOptions {
+            format: WriteFormat::Ewf1Logical,
+            ..WriteOptions::default()
+        },
+    )?;
+    let folder = writer.add_directory(
+        1,
+        LogicalEntryMetadata {
+            name: "folder".into(),
+            ..Default::default()
+        },
+    )?;
+    writer.add_file(
+        folder,
+        LogicalEntryMetadata {
+            name: "data.txt".into(),
+            ..Default::default()
+        },
+        3,
+        &mut std::io::Cursor::new(b"abc"),
+    )?;
+    let written = writer.finish()?;
+    assert_eq!(written.segment_paths.len(), 1);
+    let records = vec![
+        serde_json::json!({
+            "schema": "ewf-logical-entries-v1",
+            "media_size": 3,
+            "media_sha256": sha256_hex(b"abc"),
+            "segment_count": 1,
+            "entry_count": 3,
+        }),
+        serde_json::json!({
+            "index": 0,
+            "parent": null,
+            "name_utf16": "",
+            "kind": "directory",
+            "size": 0,
+            "sha256": sha256_hex(b""),
+        }),
+        serde_json::json!({
+            "index": 1,
+            "parent": 0,
+            "name_utf16": "0066006f006c006400650072",
+            "kind": "directory",
+            "size": 0,
+            "sha256": sha256_hex(b""),
+        }),
+        serde_json::json!({
+            "index": 2,
+            "parent": 1,
+            "name_utf16": "0064006100740061002e007400780074",
+            "kind": "file",
+            "size": 3,
+            "sha256": sha256_hex(b"abc"),
+        }),
+    ];
+    let manifest = dir.path().join("known.L01.entries.jsonl");
+    let write_records = |records: &[serde_json::Value]| -> Result<(), Box<dyn Error>> {
+        let jsonl = records
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&manifest, format!("{jsonl}\n"))?;
+        Ok(())
+    };
+    let image = ewf_image::Image::open(&path)?;
+    write_records(&records)?;
+    assert_eq!(check_logical_entry_manifest(&image, &manifest)?, 3);
+
+    let mut wrong_parent = records.clone();
+    wrong_parent[3]["parent"] = serde_json::json!(0);
+    write_records(&wrong_parent)?;
+    assert!(check_logical_entry_manifest(&image, &manifest).is_err());
+
+    let mut wrong_digest = records;
+    wrong_digest[3]["sha256"] = serde_json::json!(sha256_hex(b"abd"));
+    write_records(&wrong_digest)?;
+    assert!(check_logical_entry_manifest(&image, &manifest).is_err());
     Ok(())
 }
 
