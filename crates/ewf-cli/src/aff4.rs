@@ -297,6 +297,7 @@ pub(crate) fn extract(
     input: &Path,
     entry: &str,
     output: &Path,
+    restore_times: bool,
     ctx: &mut Context,
     report: &mut Value,
 ) -> Result<()> {
@@ -305,9 +306,25 @@ pub(crate) fn extract(
     let parent = output
         .parent()
         .ok_or_else(|| invalid("missing output parent"))?;
+    let mut container = open(input)?;
+    let (accessed, modified) = if restore_times {
+        let properties = container
+            .metadata()
+            .get(entry)
+            .ok_or_else(|| invalid("selected resource has no recorded file metadata"))?;
+        let recorded = |name: &str| {
+            properties
+                .iter()
+                .find(|p| p.predicate.ends_with(&format!("#{name}")))
+                .map(|p| crate::timestamps::rfc3339(&p.value))
+                .transpose()
+        };
+        (recorded("lastAccessed")?, recorded("lastWritten")?)
+    } else {
+        (None, None)
+    };
     let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-    let v =
-        open(input)?.copy_verified(entry, &mut staged, |a, b| ctx.progress("extraction", a, b))?;
+    let v = container.copy_verified(entry, &mut staged, |a, b| ctx.progress("extraction", a, b))?;
     report["verification"] = json!(v);
     report["verification"]["scope"] = json!("selected resource");
     if v.references_match == Some(false) {
@@ -315,9 +332,21 @@ pub(crate) fn extract(
         report["exit_code"] = json!(3);
         return Ok(());
     }
+    let restored_times = if restore_times {
+        Some(crate::timestamps::apply(
+            staged.as_file(),
+            accessed,
+            modified,
+        )?)
+    } else {
+        None
+    };
     staged.as_file().sync_all()?;
     ctx.check("publication", v.bytes_verified, v.bytes_verified)?;
     staged.persist_noclobber(&output)?;
+    if let Some(fields) = restored_times {
+        report["restored_times"] = json!(fields);
+    }
     report["published"] = json!(true);
     #[cfg(unix)]
     std::fs::File::open(parent)?.sync_all()?;

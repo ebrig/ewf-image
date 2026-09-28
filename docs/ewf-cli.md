@@ -27,6 +27,12 @@ prints a short human-readable summary. `--json` prints a machine-readable result
 on stdout instead. Progress is written to stderr, and `--quiet` suppresses
 progress without suppressing the result.
 
+Supported encrypted X-Ways EWF1 images can be inspected, verified, exported, or
+converted using `--password-file PATH`. Use `-` to read from stdin. The input is
+1 to 32 bytes, with one trailing LF or CRLF removed. The password is not put in
+command arguments or JSON results. This option applies only to EWF image reads;
+encrypted output and encrypted EWF2 remain unsupported.
+
 The output filename selects the format: `.E01`, `.Ex01`, `.aff4`, `.raw` (or
 `.dd`, `.img`, `.bin`), or `.Lx01` for a logical collection. Write EWF output
 extensions in the case shown. EWF and AFF4 input containers are detected by
@@ -132,6 +138,7 @@ ewf-cli metadata case.aff4
 ewf-cli files files.Lx01 --offset 0 --limit 100
 ewf-cli verify files.Lx01 2
 ewf-cli extract files.Lx01 2 selected.bin
+ewf-cli extract files.Lx01 2 selected.bin --restore-times
 ```
 
 EWF file selectors are the preorder catalog indices shown by `files`. AFF4
@@ -139,6 +146,10 @@ selectors are resource IDs. Extraction checks the stored file references before
 publishing the output. Missing or unsupported references are reported. Catalog
 names never become extraction paths on the host. The user supplies the
 destination path.
+`--restore-times` sets the recorded access and modification times on the new
+file before publication and reports which fields were applied. EWF times have
+whole-second precision; AFF4 can retain nanosecond precision. This does not
+restore ACLs, xattrs, alternate streams, or directory metadata.
 
 The EWF diagnostic commands `analyze`, `recover`, `resume`, `checkpoint inspect`,
 `checkpoint validate`, `recover-publication`, and `report` are also available at

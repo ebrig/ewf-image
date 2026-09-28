@@ -341,7 +341,7 @@ pub(crate) fn convert(
     report["output"] = json!(output);
     let (mut origin, entries, paths, snapshots, metadata) = match format::detect(input)? {
         Input::Ewf => {
-            let image = Image::open(input)?;
+            let image = crate::password::open(input, ctx.password.as_ref())?;
             if !image.info().acquisition_complete {
                 return Err(invalid("source acquisition is incomplete"));
             }

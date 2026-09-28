@@ -37,8 +37,9 @@ Run `<command> --help` to list options. `verify` checks all supported resources
 and integrity structures.
 
 Extraction writes to a new filename chosen by the caller and never interprets
-evidence paths as output paths. Extraction copies content without restoring
-filesystem metadata.
+evidence paths as output paths. Add `--restore-times` to restore recorded access
+and modification times on the selected file. ACLs, xattrs, alternate streams,
+and directory metadata are not restored.
 
 The library and an example program provide physical acquisition:
 

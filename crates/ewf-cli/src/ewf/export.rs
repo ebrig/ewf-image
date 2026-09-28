@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use ewf_image::{EwfError, Image};
+use ewf_image::{EwfError, EwfPassword, Image};
 use md5::{Digest, Md5};
 use serde_json::{Value, json};
 use sha1::Sha1;
@@ -17,11 +17,12 @@ const BUFFER_BYTES: usize = 1024 * 1024;
 pub(super) fn run(
     input: &Path,
     output: &Path,
+    password: Option<&EwfPassword>,
     progress: &mut Progress<'_>,
     report: &mut Value,
 ) -> Result<()> {
     report["output"] = json!(output);
-    let image = inspect::open(input, report)?;
+    let image = inspect::open(input, password, report)?;
     if !image.info().acquisition_complete {
         return Err(invalid("cannot export an incomplete acquisition"));
     }

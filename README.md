@@ -136,6 +136,8 @@ fn main() -> ewf_image::Result<()> {
 
 Extraction copies file content only. Timestamps and other recorded metadata
 remain available on each catalog entry but are not applied to extracted files.
+The `ewf-cli extract --restore-times` option applies recorded file access and
+modification times to a selected new output file.
 
 ## Write an image
 

@@ -4,9 +4,7 @@ use crate::{
     format::{self, Input, Output},
     invalid,
 };
-use ewf_image::{
-    EwfMetadata, EwfWriter, Image, SequentialOptions, SequentialWriter, VerifyOptions,
-};
+use ewf_image::{EwfMetadata, EwfWriter, SequentialOptions, SequentialWriter, VerifyOptions};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -101,7 +99,7 @@ fn read_source(
                     "resource selection applies to AFF4 physical containers",
                 ));
             }
-            let image = Image::open(input)?;
+            let image = crate::password::open(input, ctx.password.as_ref())?;
             if image.info().single_files.is_some() {
                 return Err(invalid(
                     "logical containers require logical conversion, not physical-media conversion",
@@ -330,7 +328,10 @@ pub(crate) fn convert(
 ) -> Result<()> {
     let target = Output::from_path(output)?;
     let logical = match format::detect(input)? {
-        Input::Ewf => Image::open(input)?.info().single_files.is_some(),
+        Input::Ewf => crate::password::open(input, ctx.password.as_ref())?
+            .info()
+            .single_files
+            .is_some(),
         Input::Aff4 => aff4::open(input)?.version() != (1, 0),
         Input::Raw => false,
     };
@@ -647,7 +648,7 @@ fn verify_written_ewf(
     ctx: &mut Context,
     report: &mut Value,
 ) -> Result<()> {
-    let result = Image::open(path)?.verify_with_progress(
+    let result = crate::password::open(path, ctx.password.as_ref())?.verify_with_progress(
         &VerifyOptions::default().with_expected_sha256(expected),
         |p| ctx.progress("destination verification", p.bytes_verified, p.bytes_total),
     )?;
@@ -702,7 +703,7 @@ pub(crate) fn verify_ewf(
     report: &mut Value,
 ) -> Result<()> {
     report["image"] = json!(path);
-    let image = Image::open(path)?;
+    let image = crate::password::open(path, ctx.password.as_ref())?;
     if !image.info().acquisition_complete {
         return Err(invalid("image acquisition is incomplete"));
     }
@@ -765,6 +766,7 @@ mod tests {
                 stop: Arc::new(AtomicBool::new(true)),
                 quiet: true,
                 last: None,
+                password: None,
             };
             let mut report = json!({"published":false});
             assert!(convert(&raw, &output, None, None, &mut ctx, &mut report).is_err());

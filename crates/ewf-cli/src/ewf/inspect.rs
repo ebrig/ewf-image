@@ -2,26 +2,27 @@
 
 use std::path::Path;
 
-use ewf_image::{Image, OpenOptions, check_file_encryption};
+use ewf_image::{EwfPassword, Image, OpenOptions, check_file_encryption};
 use serde_json::{Value, json};
 
 use super::{Result, error_ranges, hex, substituted_sectors};
 
-pub fn open(path: &Path, report: &mut Value) -> Result<Image> {
+pub fn open(path: &Path, password: Option<&EwfPassword>, report: &mut Value) -> Result<Image> {
     report["image"] = json!(path);
     report["media_verified"] = json!(false);
     report["encryption_detected"] = json!(check_file_encryption(path)?);
-    Ok(Image::open_with_options(
-        path,
-        OpenOptions::default()
-            .with_chunk_cache_size(0)
-            .with_maximum_open_handles(Some(16)),
-    )?)
+    let options = OpenOptions::default()
+        .with_chunk_cache_size(0)
+        .with_maximum_open_handles(Some(16));
+    Ok(match password {
+        Some(password) => Image::open_with_options_and_password(path, options, password)?,
+        None => Image::open_with_options(path, options)?,
+    })
 }
 
-pub fn info(path: &Path, report: &mut Value) -> Result<()> {
+pub fn info(path: &Path, password: Option<&EwfPassword>, report: &mut Value) -> Result<()> {
     report["phase"] = json!("inspection");
-    let image = open(path, report)?;
+    let image = open(path, password, report)?;
     let info = image.info();
     let media = &info.media;
     let metadata = &info.metadata;

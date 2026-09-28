@@ -4,6 +4,8 @@ mod ewf;
 mod format;
 mod logical;
 mod output;
+mod password;
+mod timestamps;
 mod transfer;
 
 use clap::{Args, Parser, Subcommand};
@@ -36,6 +38,9 @@ struct Cli {
     /// Hide progress.
     #[arg(short, long, global = true)]
     quiet: bool,
+    /// Read an EWF password from a file, or from stdin with '-'.
+    #[arg(long, global = true, value_name = "PATH")]
+    password_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -129,6 +134,9 @@ enum Command {
         image: PathBuf,
         entry: String,
         output: PathBuf,
+        /// Restore recorded access and modification times on the output file.
+        #[arg(long)]
+        restore_times: bool,
     },
     /// Show recorded metadata.
     Metadata { image: PathBuf },
@@ -186,6 +194,7 @@ struct Context {
     stop: Arc<AtomicBool>,
     quiet: bool,
     last: Option<Instant>,
+    password: Option<ewf_image::EwfPassword>,
 }
 
 impl Context {
@@ -211,7 +220,7 @@ impl Context {
         if self.quiet {
             args.insert(1, "--quiet".into());
         }
-        let (value, code) = ewf::dispatch(&args, &self.stop)?;
+        let (value, code) = ewf::dispatch(&args, &self.stop, self.password.as_ref())?;
         *report = value;
         report["exit_code"] = json!(code);
         Ok(())
@@ -241,11 +250,37 @@ fn ewf_only(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn validate_password_target(command: &Command) -> Result<()> {
+    let path = match command {
+        Command::Ewf {
+            command:
+                ewf::Command::Info { image }
+                | ewf::Command::Verify { image, .. }
+                | ewf::Command::Files { image, .. }
+                | ewf::Command::VerifyFile { image, .. }
+                | ewf::Command::ExtractFile { image, .. }
+                | ewf::Command::Analyze { image, .. }
+                | ewf::Command::Export { image, .. },
+        } => image,
+        Command::Info { image }
+        | Command::Metadata { image }
+        | Command::Verify { image, .. }
+        | Command::Files { image, .. }
+        | Command::Extract { image, .. }
+        | Command::Analyze { image }
+        | Command::Export { image, .. } => image,
+        Command::Convert { input, .. } => input,
+        _ => return Err(invalid("--password-file applies only to EWF image reads")),
+    };
+    ewf_only(path)
+}
+
 fn run(cli: &Cli, ctx: &mut Context, report: &mut Value) -> Result<()> {
     use format::{Input, Output};
     match &cli.command {
         Command::Ewf { command } => {
-            let (value, code) = ewf::dispatch_command(command, ctx.quiet, &ctx.stop);
+            let (value, code) =
+                ewf::dispatch_command(command, ctx.quiet, &ctx.stop, ctx.password.as_ref());
             *report = value;
             report["exit_code"] = json!(code);
             Ok(())
@@ -394,17 +429,21 @@ fn run(cli: &Cli, ctx: &mut Context, report: &mut Value) -> Result<()> {
             image,
             entry,
             output,
+            restore_times,
         } => match format::detect(image)? {
-            Input::Ewf => ctx.ewf(
-                vec![
+            Input::Ewf => {
+                let mut args = vec![
                     "extract".into(),
                     image.as_os_str().into(),
                     entry.into(),
                     output.as_os_str().into(),
-                ],
-                report,
-            ),
-            Input::Aff4 => aff4::extract(image, entry, output, ctx, report),
+                ];
+                if *restore_times {
+                    args.push("--restore-times".into());
+                }
+                ctx.ewf(args, report)
+            }
+            Input::Aff4 => aff4::extract(image, entry, output, *restore_times, ctx, report),
             Input::Raw => Err(invalid("raw images do not contain a logical file catalog")),
         },
         Command::VerifySet {
@@ -476,13 +515,20 @@ fn main() -> ExitCode {
         stop: Arc::new(AtomicBool::new(false)),
         quiet: cli.quiet,
         last: None,
+        password: None,
     };
     let flag = Arc::clone(&ctx.stop);
     let started = Instant::now();
     let mut report = json!({"schema_version":1,"status":"failed","published":false,"exit_code":0});
     let result = ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed))
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-        .and_then(|()| run(&cli, &mut ctx, &mut report));
+        .and_then(|()| {
+            if let Some(path) = &cli.password_file {
+                validate_password_target(&cli.command)?;
+                ctx.password = Some(password::read(path)?);
+            }
+            run(&cli, &mut ctx, &mut report)
+        });
     if let Err(error) = result {
         let cancelled = ctx.stop.load(Ordering::Relaxed);
         report["status"] = json!(if cancelled { "cancelled" } else { "failed" });

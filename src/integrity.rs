@@ -198,6 +198,24 @@ pub fn analyze_path_with_password(
     analyze_open_result(Image::open_with_password(path, password), options)
 }
 
+/// Password-aware counterpart to [`analyze_path_with_progress`].
+pub fn analyze_path_with_progress_and_password(
+    path: impl AsRef<Path>,
+    options: &VerifyOptions,
+    password: &EwfPassword,
+    progress: impl FnMut(VerifyProgress) -> ControlFlow<()>,
+) -> Result<IntegrityReport> {
+    options.validate()?;
+    let opened = Image::open_with_options_and_password(
+        path,
+        crate::OpenOptions::default()
+            .with_chunk_cache_size(0)
+            .with_maximum_open_handles(Some(16)),
+        password,
+    );
+    analyze_open_with_progress(opened, options, progress)
+}
+
 fn analyze_open_result(opened: Result<Image>, options: &VerifyOptions) -> Result<IntegrityReport> {
     analyze_open_with_progress(opened, options, |_| ControlFlow::Continue(()))
 }

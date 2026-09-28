@@ -171,7 +171,13 @@ pub(super) fn acquire(
     check_stop(progress, "publication", size, size)?;
     report["phase"] = json!("publication");
     let written = published(&output, writer.finish(), report)?;
-    verify(&output, Some(written.computed_sha256), progress, report)?;
+    verify(
+        &output,
+        Some(written.computed_sha256),
+        None,
+        progress,
+        report,
+    )?;
     report["status"] = json!("complete");
     Ok(())
 }
@@ -376,7 +382,13 @@ pub(super) fn collect(
     check_stop(progress, "publication", accepted, total)?;
     report["phase"] = json!("publication");
     let written = published(&output, writer.finish(), report)?;
-    verify(&output, Some(written.computed_sha256), progress, report)?;
+    verify(
+        &output,
+        Some(written.computed_sha256),
+        None,
+        progress,
+        report,
+    )?;
     let image = Image::open(&output)?;
     let mut pending = vec![
         image

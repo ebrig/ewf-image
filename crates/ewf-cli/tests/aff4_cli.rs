@@ -1,8 +1,9 @@
 //! Human and machine output, resource policy, and exclusive publication.
 use std::{
-    fs,
+    fs::{self, File, FileTimes},
     path::Path,
     process::{Command, Output},
+    time::{Duration, UNIX_EPOCH},
 };
 
 fn cli(directory: &Path, args: &[&str]) -> Output {
@@ -59,6 +60,61 @@ fn collection_and_extraction_have_concise_text_and_explicit_json() {
             .unwrap()
             .iter()
             .all(|c| c["outcome"] == "Match")
+    );
+}
+
+#[test]
+fn extraction_restores_recorded_aff4_file_times_when_requested() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("source")).unwrap();
+    let source = root.path().join("source/file.txt");
+    fs::write(&source, b"known content").unwrap();
+    let modified = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    File::options()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_times(
+            FileTimes::new()
+                .set_modified(modified)
+                .set_accessed(modified),
+        )
+        .unwrap();
+    let collected = cli(root.path(), &["collect", "source", "case.aff4"]);
+    assert!(collected.status.success(), "{collected:?}");
+    let listed = cli(root.path(), &["info", "case.aff4", "--json"]);
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let id = listed["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["size"] == 13)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let extracted = cli(
+        root.path(),
+        &[
+            "--json",
+            "extract",
+            "case.aff4",
+            id,
+            "restored.txt",
+            "--restore-times",
+        ],
+    );
+    assert!(extracted.status.success(), "{extracted:?}");
+    let report: serde_json::Value = serde_json::from_slice(&extracted.stdout).unwrap();
+    assert_eq!(
+        report["restored_times"],
+        serde_json::json!(["accessed", "modified"])
+    );
+    assert_eq!(
+        fs::metadata(root.path().join("restored.txt"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        modified
     );
 }
 

@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
-use ewf_image::{EwfError, VerifyOptions, analyze_path_with_progress};
+use ewf_image::{EwfError, EwfPassword, VerifyOptions, analyze_path_with_progress};
 use serde_json::{Value, json};
 
 use super::{Progress, Result, hex};
@@ -11,6 +11,7 @@ use super::{Progress, Result, hex};
 pub fn run(
     path: &Path,
     limit: usize,
+    password: Option<&EwfPassword>,
     progress: &mut Progress<'_>,
     report: &mut Value,
 ) -> Result<()> {
@@ -20,16 +21,22 @@ pub fn run(
     if progress.stop.load(Ordering::Relaxed) {
         return Err(EwfError::Aborted.into());
     }
-    let analysis = analyze_path_with_progress(
-        path,
-        &VerifyOptions::default().with_maximum_findings(limit),
-        |p| {
-            report["bytes_processed"] = json!(p.bytes_processed);
-            report["bytes_verified"] = json!(p.bytes_verified);
-            report["media_bytes"] = json!(p.bytes_total);
-            progress.event("analysis", p.bytes_processed, p.bytes_total)
-        },
-    )?;
+    let options = VerifyOptions::default().with_maximum_findings(limit);
+    let mut callback = |p: ewf_image::VerifyProgress| {
+        report["bytes_processed"] = json!(p.bytes_processed);
+        report["bytes_verified"] = json!(p.bytes_verified);
+        report["media_bytes"] = json!(p.bytes_total);
+        progress.event("analysis", p.bytes_processed, p.bytes_total)
+    };
+    let analysis = match password {
+        Some(password) => ewf_image::analyze_path_with_progress_and_password(
+            path,
+            &options,
+            password,
+            &mut callback,
+        )?,
+        None => analyze_path_with_progress(path, &options, &mut callback)?,
+    };
     let references_match =
         (!analysis.comparisons.is_empty()).then(|| analysis.comparisons.iter().all(|c| c.matches));
     report["media_verified"] = json!(references_match == Some(true) && analysis.error_count == 0);

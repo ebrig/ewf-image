@@ -1,9 +1,10 @@
 //! End-to-end acquisition command contracts, including process restarts.
 
-use std::fs;
+use std::fs::{self, File, FileTimes};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, UNIX_EPOCH};
 
 use ewf_image::Image;
 use serde_json::Value;
@@ -463,6 +464,117 @@ fn cli_info_reports_encryption_when_metadata_cannot_be_opened() {
     assert_eq!(report["media_verified"], false);
     assert!(report["metadata"].is_null());
     assert!(report["error"].as_str().unwrap().contains("password"));
+}
+
+#[test]
+fn cli_reads_encrypted_ewf_with_password_file_without_exposing_password() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fixture = root.join("tests/data/xways-encrypted/aes256-known-password.E01");
+    let password = dir.path().join("password.txt");
+    fs::write(&password, b"xways-test\r\n").unwrap();
+    let invoke = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_ewf-cli"))
+            .arg("--json")
+            .arg("--password-file")
+            .arg(&password)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.stdout.windows(10).any(|v| v == b"xways-test"));
+        assert!(!output.stderr.windows(10).any(|v| v == b"xways-test"));
+        output
+    };
+    let fixture = fixture.to_str().unwrap();
+    let info = invoke(&["info", fixture]);
+    assert!(info.status.success(), "{info:?}");
+    let info: Value = serde_json::from_slice(&info.stdout).unwrap();
+    assert_eq!(info["encryption_detected"], true);
+    let mut stdin_command = Command::new(env!("CARGO_BIN_EXE_ewf-cli"))
+        .args(["--json", "--password-file", "-", "info", fixture])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    stdin_command
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"xways-test\n")
+        .unwrap();
+    let stdin_result = stdin_command.wait_with_output().unwrap();
+    assert!(stdin_result.status.success(), "{stdin_result:?}");
+    let verified = invoke(&[
+        "verify",
+        fixture,
+        "--sha256",
+        "a4a3ec30d6388244ded06c36c1c7f501ee42fd7940c04350c6e367a644220313",
+    ]);
+    assert!(verified.status.success(), "{verified:?}");
+    let verified: Value = serde_json::from_slice(&verified.stdout).unwrap();
+    assert_eq!(verified["verification"]["references_match"], true);
+    let analyzed = invoke(&["analyze", fixture]);
+    assert!(analyzed.status.success(), "{analyzed:?}");
+    let analyzed: Value = serde_json::from_slice(&analyzed.stdout).unwrap();
+    assert!(analyzed["analysis"]["hashes"]["sha256"].is_string());
+    let output = dir.path().join("converted.raw");
+    let converted = invoke(&["convert", fixture, output.to_str().unwrap()]);
+    assert_eq!(converted.status.code(), Some(4), "{converted:?}");
+    let converted: Value = serde_json::from_slice(&converted.stdout).unwrap();
+    assert_eq!(converted["destination_matches_source"], true);
+    assert_eq!(fs::metadata(&output).unwrap().len(), 1_048_576);
+
+    fs::write(&password, b"incorrect-password\n").unwrap();
+    let wrong = invoke(&["info", fixture]);
+    assert_eq!(wrong.status.code(), Some(1));
+    let wrong: Value = serde_json::from_slice(&wrong.stdout).unwrap();
+    assert!(wrong["error"].as_str().unwrap().contains("password"));
+}
+
+#[test]
+fn cli_restores_recorded_ewf_file_times_when_requested() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("source")).unwrap();
+    let source = dir.path().join("source/record.txt");
+    fs::write(&source, b"recorded content").unwrap();
+    let modified = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    File::options()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_times(
+            FileTimes::new()
+                .set_modified(modified)
+                .set_accessed(modified),
+        )
+        .unwrap();
+    result(dir.path(), &["collect", "source", "case.Lx01"], 0);
+    let report = result(
+        dir.path(),
+        &[
+            "extract",
+            "case.Lx01",
+            "1",
+            "restored.txt",
+            "--restore-times",
+        ],
+        0,
+    );
+    assert_eq!(
+        report["restored_times"],
+        serde_json::json!(["accessed", "modified"])
+    );
+    assert_eq!(
+        fs::read(dir.path().join("restored.txt")).unwrap(),
+        b"recorded content"
+    );
+    assert_eq!(
+        fs::metadata(dir.path().join("restored.txt"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        modified
+    );
 }
 
 fn history_records(directory: &Path) -> Vec<std::path::PathBuf> {

@@ -201,4 +201,5 @@ the library is zeroized and excluded from diagnostics.
 A stored verifier checks the password. For images without a verifier, the first
 decrypted chunk must pass structural validation. AES-CTR is not authenticated
 encryption, so the remaining media still requires integrity verification.
-Encrypted EWF2 images are detected and rejected. The CLI does not accept passwords.
+Encrypted EWF2 images are detected and rejected. The CLI accepts a supported
+X-Ways EWF1 password from a file or stdin using `--password-file`.

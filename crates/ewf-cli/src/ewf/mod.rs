@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use clap::{Args, Parser, Subcommand};
 use ewf_image::{
     AcquisitionOptions, AcquisitionReadOptions, AcquisitionStatus, AcquisitionWriter, EwfError,
-    Image, UnreadableSectorPolicy, VerifyOptions,
+    EwfPassword, UnreadableSectorPolicy, VerifyOptions,
 };
 use serde_json::{Value, json};
 use session::Session;
@@ -83,6 +83,9 @@ pub(crate) enum Command {
         entry: usize,
         /// New destination file.
         output: PathBuf,
+        /// Restore recorded access and modification times on the output file.
+        #[arg(long)]
+        restore_times: bool,
     },
     /// Scan for damage and report integrity findings.
     Analyze {
@@ -214,20 +217,27 @@ pub(crate) fn dispatch_command(
     command: &Command,
     quiet: bool,
     stop: &Arc<AtomicBool>,
+    password: Option<&EwfPassword>,
 ) -> (Value, u8) {
-    execute_command(command, quiet, stop)
+    execute_command(command, quiet, stop, password)
 }
 
 // Internal adapter for the format-neutral commands in the same executable.
 pub(crate) fn dispatch(
     arguments: &[std::ffi::OsString],
     stop: &Arc<AtomicBool>,
+    password: Option<&EwfPassword>,
 ) -> Result<(Value, u8)> {
     let cli = Cli::try_parse_from(arguments)?;
-    Ok(execute_command(&cli.command, cli.quiet, stop))
+    Ok(execute_command(&cli.command, cli.quiet, stop, password))
 }
 
-fn execute_command(command: &Command, quiet: bool, stop: &Arc<AtomicBool>) -> (Value, u8) {
+fn execute_command(
+    command: &Command,
+    quiet: bool,
+    stop: &Arc<AtomicBool>,
+    password: Option<&EwfPassword>,
+) -> (Value, u8) {
     let started = Instant::now();
     let mut report = json!({"schema_version": 1, "tool": "ewf-cli", "tool_version": env!("CARGO_PKG_VERSION"),
         "status": "failed", "phase": "preflight", "published": false,
@@ -238,6 +248,7 @@ fn execute_command(command: &Command, quiet: bool, stop: &Arc<AtomicBool>) -> (V
         command,
         quiet,
         stop,
+        password,
         &mut report,
         &mut history,
         &mut recovery,
@@ -314,6 +325,7 @@ fn run(
     command: &Command,
     quiet: bool,
     stop: &Arc<AtomicBool>,
+    password: Option<&EwfPassword>,
     report: &mut Value,
     audit: &mut Option<history::History>,
     recovery: &mut Option<recover::Bundle>,
@@ -323,25 +335,49 @@ fn run(
         Command::AcquireSequential(args) => sequential::acquire(args, stop, &mut progress, report),
         Command::Collect(args) => sequential::collect(args, &mut progress, report),
         Command::RecoverPublication { output } => sequential::recover(output, report),
-        Command::Info { image } => inspect::info(image, report),
+        Command::Info { image } => inspect::info(image, password, report),
         Command::Files {
             image,
             offset,
             limit,
-        } => logical::list(image, *offset, *limit as usize, &mut progress, report),
+        } => logical::list(
+            image,
+            *offset,
+            *limit as usize,
+            password,
+            &mut progress,
+            report,
+        ),
         Command::VerifyFile { image, entry } => {
-            logical::read(image, *entry, None, &mut progress, report)
+            logical::read(image, *entry, None, false, password, &mut progress, report)
         }
         Command::ExtractFile {
             image,
             entry,
             output,
-        } => logical::read(image, *entry, Some(output), &mut progress, report),
+            restore_times,
+        } => logical::read(
+            image,
+            *entry,
+            Some(output),
+            *restore_times,
+            password,
+            &mut progress,
+            report,
+        ),
         Command::Analyze {
             image,
             maximum_findings,
-        } => analyze::run(image, *maximum_findings as usize, &mut progress, report),
-        Command::Export { image, output } => export::run(image, output, &mut progress, report),
+        } => analyze::run(
+            image,
+            *maximum_findings as usize,
+            password,
+            &mut progress,
+            report,
+        ),
+        Command::Export { image, output } => {
+            export::run(image, output, password, &mut progress, report)
+        }
         Command::Recover {
             image,
             output,
@@ -474,8 +510,10 @@ fn run(
             Ok(())
         }
         Command::Verify { image, entry } => match entry {
-            Some(entry) => logical::read(image, *entry, None, &mut progress, report),
-            None => verify(image, None, &mut progress, report),
+            Some(entry) => {
+                logical::read(image, *entry, None, false, password, &mut progress, report)
+            }
+            None => verify(image, None, password, &mut progress, report),
         },
         Command::Report { output, write } => {
             let output = session::normalize_output(output)?;
@@ -577,6 +615,7 @@ fn acquire(
     verify(
         &session.output,
         Some(finished.computed_sha256),
+        None,
         progress,
         report,
     )?;
@@ -591,11 +630,12 @@ fn acquire(
 fn verify(
     path: &Path,
     expected: Option<[u8; 32]>,
+    password: Option<&EwfPassword>,
     progress: &mut Progress<'_>,
     report: &mut Value,
 ) -> Result<()> {
     report["phase"] = json!("verification");
-    let image = Image::open(path)?;
+    let image = crate::password::open(path, password)?;
     let mut options = VerifyOptions::default();
     if let Some(hash) = expected {
         options = options.with_expected_sha256(hash);

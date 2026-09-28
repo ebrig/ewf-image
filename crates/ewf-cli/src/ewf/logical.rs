@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use ewf_image::{EwfError, Image, SingleFileEntry, SingleFileVerification};
+use ewf_image::{EwfError, EwfPassword, Image, SingleFileEntry, SingleFileVerification};
 use serde_json::{Value, json};
 
 use super::{Progress, Result, export, hex, inspect, invalid};
@@ -44,10 +44,11 @@ pub fn list(
     input: &Path,
     offset: usize,
     limit: usize,
+    password: Option<&EwfPassword>,
     progress: &mut Progress<'_>,
     report: &mut Value,
 ) -> Result<()> {
-    let image = inspect::open(input, report)?;
+    let image = inspect::open(input, password, report)?;
     report["phase"] = json!("catalog");
     let mut page = Vec::new();
     let mut next = None;
@@ -83,10 +84,12 @@ pub fn read(
     input: &Path,
     index: usize,
     output: Option<&Path>,
+    restore_times: bool,
+    password: Option<&EwfPassword>,
     progress: &mut Progress<'_>,
     report: &mut Value,
 ) -> Result<()> {
-    let image = inspect::open(input, report)?;
+    let image = inspect::open(input, password, report)?;
     let entry = entries(&image)?
         .nth(index)
         .map(|(_, e, _)| e)
@@ -120,6 +123,21 @@ pub fn read(
     let matched = verified.references_match() == Some(true);
     if let (Some(file), Some(output)) = (temporary, output) {
         report["phase"] = json!("publication");
+        let restored_times = if restore_times {
+            Some(crate::timestamps::apply(
+                file.as_file(),
+                entry
+                    .access_time
+                    .map(crate::timestamps::seconds)
+                    .transpose()?,
+                entry
+                    .modification_time
+                    .map(crate::timestamps::seconds)
+                    .transpose()?,
+            )?)
+        } else {
+            None
+        };
         file.as_file().sync_all()?;
         if progress
             .event("file", verified.bytes_verified, verified.bytes_verified)
@@ -128,6 +146,9 @@ pub fn read(
             return Err(EwfError::Aborted.into());
         }
         file.persist_noclobber(&output)?;
+        if let Some(fields) = restored_times {
+            report["restored_times"] = json!(fields);
+        }
         report["output"] = json!(output);
         report["published"] = json!(true);
         #[cfg(unix)]
