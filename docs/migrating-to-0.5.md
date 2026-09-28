@@ -1,7 +1,6 @@
 # Migrating to 0.5
 
-This guide covers changes since 0.4.0. The repository source is version 0.5.0,
-which has not been published. See [the changelog](../CHANGELOG.md#unreleased)
+This guide covers changes since 0.4.0. See [the 0.5.0 changelog](../CHANGELOG.md#050)
 for the full list of changes.
 
 ## Update digest handling

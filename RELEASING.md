@@ -10,7 +10,8 @@ executable. Keep release evidence for each crate outside the public source tree.
 1. Integrate the remote branch and start with a clean, committed candidate.
 2. Update the affected package version and `Cargo.lock` when needed. Once its
    release gates pass, move that package's changes from `Unreleased` in
-   `CHANGELOG.md` into a dated version section.
+   `CHANGELOG.md` into a version section. Add the release date before the final
+   checks on the exact release commit.
 3. Update dependency examples and version-specific links in public documentation.
 4. Run the checks in [docs/testing.md](docs/testing.md) on the exact candidate,
    including `cargo package --list` and `cargo publish --dry-run` for each crate.

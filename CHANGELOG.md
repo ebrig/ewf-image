@@ -1,11 +1,12 @@
 # Changelog
 
-Each released entry describes that version. The Unreleased section records the
-0.5.0 source changes, which have not been published. Some of these changes
-require source updates in code written for 0.4.0. See
+Changes are grouped by version. The 0.5.0 changes require source updates in some
+code written for 0.4.0. See
 [Migrating to 0.5](docs/migrating-to-0.5.md).
 
 ## Unreleased
+
+## 0.5.0
 
 ### Command-line usability
 
