@@ -20,6 +20,34 @@ use md5::{Digest, Md5};
 use sha1::Sha1;
 
 #[test]
+fn ewf2_logical_writer_rejects_sub_8k_chunks_before_output() {
+    use ewf_image::{LogicalWriter, SequentialOptions};
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("small.Lx01");
+    let mut options = SequentialOptions::new(4096);
+    options.write.format = WriteFormat::Ewf2Logical;
+    options.write.sectors_per_chunk = 8;
+    assert!(LogicalWriter::create_sequential(&path, options).is_err());
+    assert!(!path.exists());
+
+    let path = dir.path().join("config.Lx01");
+    let mut writer = EwfWriter::create(
+        &path,
+        WriteOptions {
+            format: WriteFormat::Ewf2Logical,
+            ..WriteOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(writer.set_sectors_per_chunk(8).is_err());
+    assert_eq!(writer.sectors_per_chunk(), 64);
+    assert!(writer.set_bytes_per_sector(64).is_err());
+    assert_eq!(writer.bytes_per_sector(), 512);
+    assert!(!path.exists());
+}
+
+#[test]
 fn logical_builder_assigns_offsets_hashes_and_preserves_metadata() {
     use ewf_image::{LogicalEntryMetadata, LogicalWriter};
     for (name, format) in [

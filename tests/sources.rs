@@ -16,6 +16,11 @@ fn image_bytes(format: WriteFormat) -> Vec<u8> {
         WriteOptions {
             format,
             bytes_per_sector: 1,
+            sectors_per_chunk: if format == WriteFormat::Ewf2Logical {
+                8192
+            } else {
+                64
+            },
             ..WriteOptions::default()
         },
     )

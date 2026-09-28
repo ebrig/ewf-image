@@ -70,10 +70,11 @@ EWF2 BZip2 support is covered by local tests. Some external tools cannot produce
 or export EWF2 BZip2 images, so external oracle coverage for BZip2 is tracked
 separately from local read and write behavior.
 
-Independent coverage of logical writer output uses the default 32 KiB chunks. A
-libewf export of split logical output with very small chunks terminated
-abnormally, so that configuration has no compatibility claim. Test a
-representative profile with the intended consumer.
+Independent coverage of split logical writer output includes the default 32 KiB
+chunks and 8 KiB chunks with pinned libewf 20260924. The EWF2 logical writer
+rejects smaller chunks because that exporter terminated abnormally on them.
+An older libewf 20251220 exporter omitted a file from a one-file split image
+even at 32 KiB. Test a representative profile with the intended consumer.
 
 ## Writer digest semantics
 

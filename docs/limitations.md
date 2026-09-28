@@ -10,7 +10,7 @@ AFF4 profiles and limits are described in the
 | Capability | Boundary |
 | --- | --- |
 | Encrypted EWF2 | Detected and rejected; no decryption or encrypted writing |
-| X-Ways encrypted EWF1 | Library reads AES-128/AES-256 CTR; no encrypted output or CLI password input |
+| X-Ways encrypted EWF1 | Library and CLI read AES-128/AES-256 CTR with a supplied password; no encrypted output |
 | X-Ways Zstandard | Read-only; copying that encoding into a writer is rejected |
 | Delta/shadow overlays | No base-plus-overlay reading or writing |
 | EWF2 BZip2 | Local reader/writer support; limited independent-tool coverage |
@@ -90,8 +90,9 @@ Collection is limited to 100,000 entries and 127 directory levels. Neither
 across files. Collect from a stable snapshot when consistency is required.
 
 EWF collection does not capture ACLs, ADS, xattrs, or sparse allocation.
-Selective extraction writes file content only and does not restore filesystem
-metadata or special objects. General filesystem mounting, service runtimes, and
+Selective extraction can restore recorded access and modification times when
+requested. It does not restore ACLs, xattrs, ADS, Unix mode, directory metadata,
+or special objects. General filesystem mounting, service runtimes, and
 native FFI wrappers are not implemented.
 
 ## Analysis and recovery
@@ -119,6 +120,9 @@ provide a snapshot.
 
 Physical hot-unplug, actual bad media, hardware write blockers, and power loss
 require separate acceptance testing. EnCase consumer import/export has not been
-tested. Independent logical EWF coverage uses 32 KiB chunks, and split logical
-output with very small chunks has no successful libewf result. See
+tested. The EWF2 logical writer requires chunks of at least 8 KiB: smaller
+split output crashed the pinned libewf 20260924 exporter. Split output at 8 KiB
+and the default 32 KiB passed that exporter. An older libewf 20251220 exporter
+still omitted a file from a one-file split image even at 32 KiB; its behavior
+needs separate investigation. See
 [device acceptance](device-acceptance.md).

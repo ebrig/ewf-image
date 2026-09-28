@@ -7,8 +7,11 @@ standard acquisition, conversion, and verification workflow, see the
 Commands print concise text summaries. Add `--json` for machine-readable results.
 Progress is written to stderr, and `-q` or `--quiet` hides it. Run
 `<command> --help` to list options. Read [results and exit codes](#results)
-before automating decisions based on command output. The CLI has no password
-option for encrypted EWF1 images.
+before automating decisions based on command output. For supported encrypted
+X-Ways EWF1 input, pass `--password-file PATH` to an image-reading command.
+Use `-` as PATH to read from stdin. The input is 1 to 32 password bytes; one
+trailing LF or CRLF is removed. The password is never placed in CLI arguments
+or the result report. Protect a password file with host filesystem permissions.
 
 | Task | Commands |
 | --- | --- |
@@ -31,6 +34,7 @@ ewf-cli ewf info case.E01
 ewf-cli ewf files case.L01 --limit 1000
 ewf-cli ewf verify case.L01 1
 ewf-cli ewf extract case.L01 1 selected.bin
+ewf-cli ewf --password-file password.txt verify encrypted.E01
 ewf-cli ewf analyze case.E01 --maximum-findings 1024
 ewf-cli ewf recover damaged.E01 recovered-case --maximum-output-bytes 107374182400
 ewf-cli ewf export case.E01 disk.raw
@@ -68,8 +72,10 @@ The report includes computed digests for independent comparison. Extraction with
 matching references exits with code 0.
 
 The caller chooses OUTPUT, and catalog names are never used as destination
-paths. Extraction copies content only. Timestamps, ACLs, links, extended
-attributes, and alternate streams are not restored. `verify IMAGE ENTRY` and
+paths. Extraction copies content and can restore recorded access and modification
+times with `--restore-times`. The `restored_times` result lists applied fields.
+ACLs, links, extended attributes, and alternate streams are not restored.
+`verify IMAGE ENTRY` and
 `extract` bypass decoded caches and zero-on-error recovery. Both commands check
 only the selected file, not the container media, and report `media_verified: false`.
 
@@ -83,9 +89,9 @@ successful inspection therefore reports `media_verified: false` and
 `verification: null`. Use `verify` for a full media check. Legacy password
 headers and raw metadata sections are omitted.
 
-The CLI detects encrypted images but cannot accept a password. When encrypted
-metadata cannot be opened, `info` exits with code 1 and reports the encryption
-flag and the open error.
+Without `--password-file`, encrypted metadata cannot be opened: `info` exits
+with code 1 and reports the encryption flag and the open error. Encrypted EWF2
+remains unsupported.
 
 ## Integrity analysis
 
@@ -313,10 +319,10 @@ A verification failure after publication keeps the output, reports
 `published: true`, and exits with code 3. Cancellation exits with code 130.
 Successful acquisition and verification exit with code 0.
 
-The fixed 32 KiB geometry is the CLI profile that has been validated with
-independent tools. Other library geometries behave as before but carry no
-broader consumer-compatibility claim. Split logical output with very small chunks
-is not certified against libewf.
+The fixed 32 KiB geometry is the CLI profile validated with independent tools.
+The library's EWF2 logical writer requires chunks of at least 8 KiB. Split
+logical output at 8 KiB also passed the pinned libewf 20260924 exporter; older
+consumer behavior remains under investigation.
 
 ## Cancellation and resume
 

@@ -354,9 +354,15 @@ mod tests {
     fn scratch_and_descriptors_do_not_grow_with_completed_segments() {
         for format in [WriteFormat::Ewf2Physical, WriteFormat::Ewf2Logical] {
             let dir = tempfile::tempdir().unwrap();
-            let mut options = SequentialOptions::new(512 * 100);
+            let sectors_per_chunk = if format == WriteFormat::Ewf2Logical {
+                16
+            } else {
+                1
+            };
+            let chunk_size = sectors_per_chunk * 512;
+            let mut options = SequentialOptions::new(u64::from(chunk_size) * 100);
             options.write.format = format;
-            options.write.sectors_per_chunk = 1;
+            options.write.sectors_per_chunk = sectors_per_chunk;
             options.chunks_per_segment = 3;
             let mut writer = SequentialWriter::create(
                 dir.path().join(if format == WriteFormat::Ewf2Physical {
@@ -367,12 +373,12 @@ mod tests {
                 options,
             )
             .unwrap();
-            let chunk: Vec<u8> = (0..512).map(|n| (n % 251) as u8).collect();
+            let chunk: Vec<u8> = (0..chunk_size).map(|n| (n % 251) as u8).collect();
             for _ in 0..100 {
                 writer.write_all(&chunk).unwrap();
                 assert!(writer.current.chunks.len() <= 3);
-                assert!(writer.current.spool.len <= 3 * 516);
-                assert!(writer.pending.len() < 512);
+                assert!(writer.current.spool.len <= u64::from(3 * (chunk_size + 4)));
+                assert!(writer.pending.len() < chunk_size as usize);
             }
             writer.finish().unwrap();
         }

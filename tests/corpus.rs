@@ -867,6 +867,55 @@ fn external_logical_builder_files_match_ewfexport() -> Result<(), Box<dyn Error>
 }
 
 #[test]
+#[ignore = "requires ewfexport and ewfinfo"]
+fn external_8k_chunk_split_logical_matches_ewfexport() -> Result<(), Box<dyn Error>> {
+    use ewf_image::{LogicalEntryMetadata, LogicalWriter, SequentialOptions, WriteFormat};
+
+    let ewfinfo = env::var_os("EWFINFO").unwrap_or_else(|| OsString::from("ewfinfo"));
+    let ewfexport = env::var_os("EWFEXPORT").unwrap_or_else(|| OsString::from("ewfexport"));
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("small.Lx01");
+    let data = patterned_data(32_769);
+    let mut settings = SequentialOptions::new(data.len() as u64);
+    settings.write.format = WriteFormat::Ewf2Logical;
+    settings.write.sectors_per_chunk = 16;
+    settings.chunks_per_segment = 2;
+    let mut writer = LogicalWriter::create_sequential(&path, settings)?;
+    let folder = writer.add_directory(
+        1,
+        LogicalEntryMetadata {
+            name: "folder".into(),
+            ..Default::default()
+        },
+    )?;
+    writer.add_file(
+        folder,
+        LogicalEntryMetadata {
+            name: "small.bin".into(),
+            ..Default::default()
+        },
+        data.len() as u64,
+        &mut std::io::Cursor::new(&data),
+    )?;
+    let written = writer.finish()?;
+    assert!(written.segment_paths.len() > 1);
+    assert!(ewfinfo_hierarchy(&ewfinfo, &path)?.contains("folder/small.bin"));
+    let target = dir.path().join("export");
+    let result = Command::new(&ewfexport)
+        .args(["-u", "-q", "-f", "files", "-t"])
+        .arg(&target)
+        .arg(&path)
+        .output()?;
+    assert!(
+        result.status.success(),
+        "ewfexport failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fs::read(target.join("folder/small.bin"))?, data);
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires real L01/Lx01 single-files fixtures and ewfinfo"]
 fn external_logical_single_files_fixtures_match_ewfinfo_hierarchy() -> Result<(), Box<dyn Error>> {
     let ewfinfo = env::var_os("EWFINFO").unwrap_or_else(|| OsString::from("ewfinfo"));

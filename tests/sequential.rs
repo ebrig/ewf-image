@@ -59,9 +59,10 @@ fn sequential_split_padding_compression_and_mirror() {
 fn sequential_logical_catalog_finishes_after_first_segment() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("case.Lx01");
-    let source = data(5001);
+    let source = data(73_729);
     let mut options = options(source.len());
     options.write.format = WriteFormat::Ewf2Logical;
+    options.write.sectors_per_chunk = 16;
     let mut writer = LogicalWriter::create_sequential(&path, options).unwrap();
     let folder = writer
         .add_directory(
@@ -143,6 +144,7 @@ fn sequential_logical_cancel_never_publishes_staged_segments() {
     let path = dir.path().join("case.Lx01");
     let mut options = options(2 * 1024 * 1024);
     options.write.format = WriteFormat::Ewf2Logical;
+    options.write.sectors_per_chunk = 16;
     let mut writer = LogicalWriter::create_sequential(&path, options).unwrap();
     assert!(
         writer

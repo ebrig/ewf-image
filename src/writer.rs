@@ -758,7 +758,10 @@ impl EwfWriter {
         self.ensure_configuration_mutable("sectors per chunk")?;
         let (chunk_size, chunk_capacity) =
             writer_chunk_geometry(sectors_per_chunk, self.options.bytes_per_sector)?;
-        self.options.sectors_per_chunk = sectors_per_chunk;
+        let mut options = self.options.clone();
+        options.sectors_per_chunk = sectors_per_chunk;
+        validate_options(&options)?;
+        self.options = options;
         self.chunk_size = chunk_size;
         self.chunk_capacity = chunk_capacity;
         self.encoded_chunks.clear();
@@ -780,7 +783,10 @@ impl EwfWriter {
         self.ensure_configuration_mutable("bytes per sector")?;
         let (chunk_size, chunk_capacity) =
             writer_chunk_geometry(self.options.sectors_per_chunk, bytes_per_sector)?;
-        self.options.bytes_per_sector = bytes_per_sector;
+        let mut options = self.options.clone();
+        options.bytes_per_sector = bytes_per_sector;
+        validate_options(&options)?;
+        self.options = options;
         self.chunk_size = chunk_size;
         self.chunk_capacity = chunk_capacity;
         self.encoded_chunks.clear();
@@ -1968,6 +1974,14 @@ fn validate_options(options: &WriteOptions) -> Result<()> {
     if options.bytes_per_sector == 0 {
         return Err(EwfError::Malformed(
             "writer bytes_per_sector is zero".into(),
+        ));
+    }
+    if options.format == WriteFormat::Ewf2Logical
+        && u64::from(options.sectors_per_chunk) * u64::from(options.bytes_per_sector) < 8192
+    {
+        return Err(EwfError::Unsupported(
+            "EWF2 logical output requires chunks of at least 8192 bytes for libewf interoperability"
+                .into(),
         ));
     }
     if matches!(options.compression, WriteCompression::Bzip2) && !is_ewf2_format(options.format) {
