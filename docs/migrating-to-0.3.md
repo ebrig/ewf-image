@@ -1,7 +1,8 @@
 # Migrating to 0.3
 
-This historical guide covers the upgrade from 0.2 to 0.3. For changes in the
-development checkout, see [Migrating to 0.5](migrating-to-0.5.md).
+This historical guide covers the upgrade from 0.2 to 0.3. For later changes,
+see the [0.4 release notes](../CHANGELOG.md#040---2026-09-12) and
+[Migrating to 0.5](migrating-to-0.5.md).
 
 Version 0.3 adds reader support for X-Ways EWF1 Zstandard compression. Images
 that use this encoding report `CompressionMethod::Zstd`, and their decoded chunks

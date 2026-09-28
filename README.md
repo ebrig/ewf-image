@@ -229,7 +229,9 @@ guide](docs/cli.md) for advanced acquisition and recovery options.
 - [Architecture](docs/architecture.md)
 - [Testing](docs/testing.md)
 - [Release process](RELEASING.md)
-- Migration guides: [0.5](docs/migrating-to-0.5.md), [0.3](docs/migrating-to-0.3.md), [0.2](docs/migrating-to-0.2.md)
+- Upgrading: [0.5 guide](docs/migrating-to-0.5.md),
+  [0.4 release notes](CHANGELOG.md#040---2026-09-12),
+  [0.3 guide](docs/migrating-to-0.3.md), [0.2 guide](docs/migrating-to-0.2.md)
 
 ## Contributing and security
 
