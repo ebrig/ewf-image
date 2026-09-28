@@ -1,7 +1,7 @@
 # Changelog
 
-Each released entry describes that version. The Unreleased section describes the
-0.5.0 release candidate, which has not been published. Some of these changes
+Each released entry describes that version. The Unreleased section records the
+0.5.0 source changes, which have not been published. Some of these changes
 require source updates in code written for 0.4.0. See
 [Migrating to 0.5](docs/migrating-to-0.5.md).
 
@@ -26,6 +26,9 @@ require source updates in code written for 0.4.0. See
   command-line quota options. Library defaults, structural validation, and
   verification before publication are unchanged.
 - Use fallible allocation when growing AFF4 decoded buffers and retained map records.
+- Accept a password file or stdin for encrypted EWF1 input in the unified CLI.
+  Keep passwords out of command arguments, and allow extraction to restore
+  recorded file access and modification times when requested.
 
 ### AFF4 integration
 
@@ -48,10 +51,11 @@ require source updates in code written for 0.4.0. See
   ranges, and configurable checkpoint intervals. Native bad-sector tables persist
   across resume, and media hashes include substituted bytes. Cumulative error
   ranges from continuation segments are merged without duplication.
-- Add `SequentialWriter` for Ex01/Lx01 output of known length and
+- Add `SequentialWriter` for E01/Ex01/Lx01 output of known length and
   `LogicalWriter::create_sequential`, with bounded payload scratch space,
   optional mirroring, and recoverable publication. Sequential output cannot be
-  resumed.
+  resumed. Use the sequential writer for known-length E01 conversion instead of
+  the general writer's full-image spools.
 - Add `LogicalWriter` for L01/Lx01 catalogs, with identifiers, extents, per-file
   MD5/SHA1, and cancellation. Add strict streaming, verification, and computed
   SHA256 for selected files.
@@ -69,7 +73,8 @@ require source updates in code written for 0.4.0. See
   while preserving intentional mismatches.
 - Write standard numeric logical entry types and complete catalog separators.
   Continue to read the older letter types. Store split EWF2 logical catalogs in
-  the final segment.
+  the final segment. Reject EWF2 logical chunks below 8 KiB because split output
+  at smaller chunk sizes crashed the pinned libewf exporter.
 - Preserve profile hints from the first segment across sparse headers and
   continuation names, including the rollover from `.EZZ` to `.FAA`. Keep explicit
   metadata consistency checks.
@@ -154,7 +159,8 @@ These commands are available as `ewf-cli ewf <command>`.
   runs fail when inputs are missing or empty.
 - Add an opt-in logical corpus test that reads every catalog entry, compares
   stored file MD5 and SHA1 values, and compares complete media SHA256 and size
-  with independently computed sidecar files.
+  with independently computed sidecar files. Add an independent JSON Lines
+  manifest comparison for the complete entry tree, names, and file bytes.
 - Add process-exit and I/O-failure coverage for acquisition, publication,
   history, export, and recovery. Add Linux loop and device-mapper suites and
   Windows VHDX suites on owned devices, with independent exports, ENOSPC and
@@ -164,8 +170,9 @@ These commands are available as `ewf-cli ewf <command>`.
   next one.
 - Add isolated bounded EWF and AFF4 fuzz targets, reproducible payload, catalog,
   and resume benchmarks, and consumer fixture preparation anchored to source
-  hashes. Independent logical EWF coverage uses 32 KiB chunks. The libewf export
-  failure for split logical output with very small chunks is unresolved.
+  hashes. Independent logical EWF coverage includes default 32 KiB split output.
+  Split output at 8 KiB and the default 32 KiB passed the pinned libewf
+  exporter. An older libewf version still needs separate investigation.
 - Add a local acceptance runner with isolated native builds, revision and tool
   provenance, hashed logs and artifacts, and explicit failed, blocked, and
   skipped statuses.

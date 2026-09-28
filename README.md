@@ -21,19 +21,29 @@ forbids unsafe code and runs without libewf or any other external tool.
   streaming writers.
 - **Analyze** damaged images and recover readable data with a provenance map.
 
-> **Release status:** this checkout is the unpublished 0.5.0 release candidate.
-> The [changelog](CHANGELOG.md#unreleased) lists its changes, and the
-> [migration guide](docs/migrating-to-0.5.md) covers upgrades from 0.4. For a
-> published version, use its [API reference](https://docs.rs/ewf-image).
+> **Release status:** the source in this repository is version 0.5.0 and has
+> not been published. The latest published `ewf-image` crate is 0.4.0. The
+> [changelog](CHANGELOG.md#unreleased) lists the pending changes, and the
+> [migration guide](docs/migrating-to-0.5.md) covers upgrades from 0.4. The
+> [API reference](https://docs.rs/ewf-image) describes the published crate.
 
 ## Installation
 
 ```toml
 [dependencies]
-ewf-image = "0.5"
+ewf-image = "0.4"
 ```
 
-The crate requires Rust 1.96 or later. Its runtime features are:
+That dependency selects the published 0.4 API. The examples below describe the
+0.5.0 source in this repository. To try that version before publication, clone
+the repository and use a local path dependency:
+
+```toml
+[dependencies]
+ewf-image = { path = "../ewf-image" }
+```
+
+The 0.5.0 source requires Rust 1.96 or later. Its runtime features are:
 
 | Feature | Effect |
 | --- | --- |

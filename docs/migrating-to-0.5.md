@@ -1,7 +1,7 @@
 # Migrating to 0.5
 
-This guide covers changes since 0.4.0. The 0.5.0 candidate is prepared locally
-but has not been published. See [the changelog](../CHANGELOG.md#unreleased)
+This guide covers changes since 0.4.0. The repository source is version 0.5.0,
+which has not been published. See [the changelog](../CHANGELOG.md#unreleased)
 for the full list of changes.
 
 ## Update digest handling
@@ -47,7 +47,7 @@ them. It requires a known, sector-aligned size, a stable source identity, raw or
 zlib compression, and hard-link support. Resume validates and rehashes the entire
 sealed prefix.
 
-For EWF2 output of known length, use `SequentialWriter` or
+For known-length E01 or EWF2 output, use `SequentialWriter` or
 `LogicalWriter::create_sequential`. These writers bound payload scratch space but
 cannot resume. Split Lx01 catalogs are written in the final segment, so open the
 complete set. See [acquisition](acquisition.md) for resource use and recovery
@@ -73,6 +73,10 @@ commands remain accepted for compatibility. The one-shot EWF2 commands report `p
 `null` value means the transaction must be recovered. EWF acquisition and
 collection verify output after publication, so a failed verification can leave a
 published image.
+
+For encrypted EWF1 input, provide `--password-file PATH` or
+`--password-file -` to read a password from stdin. Extraction can apply recorded
+file access and modification times with `--restore-times`.
 
 Windows device sessions created by the earlier PowerShell identity adapter must
 be completed with the original binary, because the native adapter uses different

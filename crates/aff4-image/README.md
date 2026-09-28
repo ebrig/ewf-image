@@ -5,6 +5,9 @@ evidence containers. The crate is versioned separately from `ewf-image` and adds
 no AFF4 dependencies or APIs to it. The supported profiles are listed below;
 public APIs and JSON output may change in future `0.x` releases.
 
+The source version is 0.1.0. This crate has not been published to crates.io;
+build it from this repository.
+
 ## Build and use
 
 For physical-device acquisition and for conversion between EWF, AFF4, and raw
