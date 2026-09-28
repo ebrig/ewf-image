@@ -108,12 +108,12 @@ destination. E01 acquisition supports checkpoints, resume, and acquisition
 history. Ex01, AFF4, and raw acquisition and all conversions run in a single pass
 and cannot be resumed.
 
-E01 conversion uses the general transactional writer, which spools the full raw
-and encoded data to disk. Ex01, Lx01, and AFF4 output stream payloads with
-buffers bounded by segment or bevy size. Metadata and catalog memory grows with
-the input size. Finalization in the general E01 writer cannot be cancelled
-partway through. A pending cancellation takes effect at the verification step
-that follows.
+E01, Ex01, Lx01, and AFF4 conversion stream payloads with scratch bounded by
+segment or bevy size. E01 conversion uses `SequentialWriter`, while the general
+`EwfWriter` still spools full images for positioned writes. Metadata and catalog
+memory grows with the input size. Final segment writing and publication have no
+cancellation callback; a pending cancellation takes effect during the following
+verification step.
 
 The CLI has no `--memory-limit` or resource-budget options. The CLI uses internal
 streaming buffers and sets AFF4 metadata and verification limits from platform

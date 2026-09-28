@@ -169,7 +169,8 @@ long-running jobs:
 
 - `AcquisitionWriter` acquires physical E01 images with checkpoints and can
   resume after an interruption.
-- `SequentialWriter` streams Ex01 and Lx01 output and stages one segment at a time.
+- `SequentialWriter` streams known-length E01, Ex01, and Lx01 output and stages
+  one segment at a time. The CLI uses it for E01 conversion.
 - `LogicalWriter` builds L01 and Lx01 file catalogs from files you supply.
 
 Writers return computed MD5, SHA1, and SHA256 digests but do not reread their

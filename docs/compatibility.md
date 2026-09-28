@@ -38,7 +38,7 @@ listed in the separate
 | Metadata and hashes | ✓ | Typed metadata, generic header values, stored MD5/SHA1, and generic hash values; available with or without default features. |
 | Acquisition errors, sessions, tracks | ✓ | EWF1 and EWF2 range-style metadata. |
 | Streaming physical E01 acquisition | ✓ | Known-size raw/zlib source acquisition, progress/cancellation, checkpoint inspection/resume, and cumulative bad-sector tables; validated with pinned libewf. |
-| Sequential EWF2 writing | ✓ | Known-length Ex01/Lx01 with segment-bounded payload scratch; no checkpoint resume. CLI raw/zlib output uses 32 KiB chunks. |
+| Sequential EWF1/EWF2 writing | ✓ | Known-length E01/Ex01/Lx01 with segment-bounded payload scratch; no checkpoint resume. Split E01 passed pinned libewf export, info, and verification. CLI raw/zlib output uses 32 KiB chunks. |
 | Logical catalog builder | ✓ | `LogicalWriter` supplies file hashes and extents; general L01/Lx01 or sequential Lx01 backend. |
 | Incomplete and resumed EWF1 output | ✓ | `finish_incomplete` writes `next`; `resume` appends and rewrites a complete image. |
 | Secondary/shadow target mirroring | ✓ | `WriteOptions::secondary_segment_filename` writes a byte-identical secondary segment set for file-backed finishes. |

@@ -33,10 +33,11 @@ logical output unchanged.
 
 ## Writer resources and recovery
 
-`EwfWriter` keeps full raw and encoded spools. `SequentialWriter` limits payload
-scratch space to one segment, but catalogs and output paths grow with their
+`EwfWriter` keeps full raw and encoded spools for positioned or patchable writes.
+Known-length E01 conversion now uses `SequentialWriter`, which limits payload
+scratch space to one segment. Catalogs and output paths still grow with their
 counts. Staged output occupies the size of the final image. Replacing existing
-output can require space for the new set and for backups, in addition to the spools.
+output can require space for the new set and for backups, in addition to scratch.
 
 `AcquisitionWriter` supports known-size, sector-aligned physical E01 output with
 raw or zlib compression, one destination, and a stable identity supplied by the

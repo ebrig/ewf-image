@@ -46,7 +46,7 @@ physical raw or zlib EWF1 images and records explicit provenance. See
 | API | Input model | Retained state | Publication / resume |
 | --- | --- | --- | --- |
 | `EwfWriter` | Sequential, positioned, or chunk writes | Full raw spool, then encoded spool and descriptors | Recoverable replacement/mirroring transaction; incomplete EWF1 resume rewrites output |
-| `SequentialWriter` | Exact known length, append-only EWF2 | One encoded segment, pending chunk, current descriptors, output paths | Same transaction; no checkpoint resume |
+| `SequentialWriter` | Exact known length, append-only EWF1 physical or EWF2 | One encoded segment, pending chunk, current descriptors, output paths | Same transaction; no checkpoint resume |
 | `AcquisitionWriter` | Known, sector-aligned physical E01 source | One segment's scratch and descriptors; growing checkpoint records | Exclusive hard-link publication; sealed-prefix resume |
 | `LogicalWriter` | Declared-length files with authored metadata | Catalog plus selected backend's state | General L01/Lx01 or sequential Lx01 backend; no checkpoint resume |
 

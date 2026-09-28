@@ -10,7 +10,7 @@ source checks and JSON reporting. See [CLI acquisition](cli.md#acquisition).
 | --- | --- | --- |
 | `EwfWriter` | You need seek/patch, encoded chunks, or general EWF1/EWF2 authoring | Full-source spooling; EWF1 resume rewrites output |
 | `AcquisitionWriter` | You need resumable physical E01 acquisition | Known aligned size, raw/zlib, one destination, hard links |
-| `SequentialWriter` | You need append-only Ex01/Lx01 with bounded payload scratch | Known size; no checkpoint resume |
+| `SequentialWriter` | You need append-only E01/Ex01/Lx01 with bounded payload scratch | Known size; no seek or checkpoint resume |
 | `LogicalWriter` | You are supplying files and metadata for L01/Lx01 | Retained catalog; general or sequential EWF2 backend |
 
 Library finalization computes hashes but does not reread the output. The EWF
@@ -222,12 +222,14 @@ and devices that ignore flushes are not certified. `AcquisitionWriter` does not
 open device handles, perform positioned output writes, replace an existing
 image, mirror output, or resume E01 files from other producers.
 
-## Bounded EWF2 writing
+## Bounded EWF1 and EWF2 writing
 
-`SequentialWriter` accepts an exact source length and streams physical Ex01 or
-logical Lx01 output into staged native segments. Set
+`SequentialWriter` accepts an exact source length and streams physical E01 or
+Ex01, or logical Lx01, into staged native segments. Set
 `SequentialOptions::chunks_per_segment` to at most 512 MiB of raw capacity. This
-setting is not a limit on encoded segment size. Chunks are limited to 16 MiB. The
+setting is not a limit on encoded EWF2 segment size. For E01,
+`WriteOptions::maximum_segment_size` conservatively lowers the chunks per
+segment to account for encoded bytes and metadata. Chunks are limited to 16 MiB. The
 example `cargo run --release --example sequential -- SOURCE OUTPUT [zlib]` uses
 32 MiB of raw capacity per segment and verifies the SHA256 of the published image.
 
@@ -243,11 +245,12 @@ included in image hashes but not in file hashes.
 `finish` uses the recoverable publication transaction, which supports mirrors and
 optional replacement. Staged native segments occupy the size of the final output.
 Only payload scratch space is bounded. Total disk use and catalog memory are not.
-Seeking, checkpoint resume, and splitting by encoded size are unsupported. After
+Seeking and checkpoint resume are unsupported. EWF2 splitting by encoded size
+is unsupported. After
 a process interruption, call `EwfWriter::recover_output` to discard uncommitted
 staging or complete an interrupted publication.
 
 Use `EwfWriter` for seek and patch operations and for EWF1 logical output. Use
-the E01 `AcquisitionWriter` for resumable acquisition. The sequential EWF2
+the E01 `AcquisitionWriter` for resumable acquisition. The sequential writer's
 transaction uses renames rather than hard links. Removable filesystems require
 their own durability acceptance tests.

@@ -56,6 +56,70 @@ fn sequential_split_padding_compression_and_mirror() {
 }
 
 #[test]
+fn sequential_ewf1_splits_with_bounded_segments_and_preserves_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("case.E01");
+    let mirror = dir.path().join("mirror.E01");
+    let source = data(18_777);
+    let mut settings = options(source.len());
+    settings.write.format = WriteFormat::Ewf1Physical;
+    settings.write.compression = WriteCompression::None;
+    settings.write.maximum_segment_size = Some(4096);
+    settings.write.secondary_segment_filename = Some(mirror.clone());
+    settings.write.metadata.case_number = Some("STREAM-E01".into());
+    settings.chunks_per_segment = 3;
+    let mut writer = SequentialWriter::create(&path, settings).unwrap();
+    for part in source.chunks(317) {
+        writer.write_all(part).unwrap();
+    }
+    let result = writer.finish().unwrap();
+    assert!(result.segment_paths.len() > 1);
+    assert_eq!(
+        result.segment_paths.len(),
+        result.secondary_segment_paths.len()
+    );
+    for (primary, secondary) in result
+        .segment_paths
+        .iter()
+        .zip(&result.secondary_segment_paths)
+    {
+        assert!(std::fs::metadata(primary).unwrap().len() <= 4096);
+        assert_eq!(
+            std::fs::read(primary).unwrap(),
+            std::fs::read(secondary).unwrap()
+        );
+    }
+    let mut expected = source;
+    expected.resize(expected.len().div_ceil(512) * 512, 0);
+    for input in [&path, &mirror] {
+        let image = Image::open(input).unwrap();
+        assert_eq!(
+            image.info().metadata.case_number.as_deref(),
+            Some("STREAM-E01")
+        );
+        let mut decoded = Vec::new();
+        image.cursor().read_to_end(&mut decoded).unwrap();
+        assert_eq!(decoded, expected);
+        #[cfg(feature = "verify")]
+        assert_eq!(image.verify().unwrap().md5_match, Some(true));
+    }
+}
+
+#[test]
+fn sequential_ewf1_rejects_mirror_segment_overlap_before_staging() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("case.E01");
+    let conflicting_mirror = dir.path().join("case.E02");
+    let mut settings = options(1536);
+    settings.write.format = WriteFormat::Ewf1Physical;
+    settings.write.secondary_segment_filename = Some(conflicting_mirror.clone());
+    settings.chunks_per_segment = 1;
+    assert!(SequentialWriter::create(&path, settings).is_err());
+    assert!(!path.exists());
+    assert!(!conflicting_mirror.exists());
+}
+
+#[test]
 fn sequential_logical_catalog_finishes_after_first_segment() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("case.Lx01");

@@ -4,7 +4,7 @@ use crate::{
     format::{self, Input, Output},
     invalid,
 };
-use ewf_image::{EwfMetadata, EwfWriter, SequentialOptions, SequentialWriter, VerifyOptions};
+use ewf_image::{EwfMetadata, SequentialOptions, SequentialWriter, VerifyOptions};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -472,8 +472,8 @@ fn transfer(
     let digest;
     match target {
         Output::E01 => {
-            // Conversion has no device session to resume. The transactional
-            // general writer preserves EWF metadata and cleans unpublished spools.
+            // Conversion has a known length and writes forward only. The
+            // transactional sequential writer bounds scratch to one segment.
             let mut options = source.ewf_options.clone().unwrap_or_default();
             options.format = ewf_image::WriteFormat::Ewf1Physical;
             options.bytes_per_sector = source.sector;
@@ -482,8 +482,10 @@ fn transfer(
             options.compression = ewf_image::WriteCompression::Zlib;
             options.maximum_segment_size = Some(512 * 1024 * 1024);
             options.metadata = source.metadata.clone();
-            let mut writer = EwfWriter::create(output, options)?;
-            struct Sink<'a>(&'a mut EwfWriter);
+            let mut settings = SequentialOptions::new(source.size);
+            settings.write = options;
+            let mut writer = SequentialWriter::create(output, settings)?;
+            struct Sink<'a>(&'a mut SequentialWriter);
             impl Write for Sink<'_> {
                 fn write(&mut self, b: &[u8]) -> io::Result<usize> {
                     self.0.write_all(b).map_err(io::Error::other)?;
