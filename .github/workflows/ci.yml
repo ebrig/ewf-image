@@ -2,6 +2,11 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      windows_device_acceptance:
+        description: Run VHDX acceptance on an elevated disposable Windows lab runner
+        type: boolean
+        default: false
   pull_request:
   push:
     branches:
@@ -16,8 +21,12 @@ concurrency:
 
 jobs:
   rust:
-    name: Rust checks
-    runs-on: ubuntu-latest
+    name: Rust checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - name: Checkout
@@ -47,17 +56,105 @@ jobs:
       - name: Examples
         run: cargo check --examples --all-features
 
+      - name: AFF4 sibling crate
+        run: |
+          cargo fmt --all --check
+          cargo test -p aff4-image
+          cargo test -p aff4-image --no-default-features --locked
+          cargo clippy -p aff4-image --no-default-features --all-targets --locked -- -D warnings
+          cargo clippy -p aff4-image --all-targets -- -D warnings
+
       - name: Doctests
         run: cargo test --doc --all-features
 
+      - name: Unified CLI
+        run: cargo test -p ewf-cli --locked
+
+      - name: Unified CLI lint
+        run: cargo clippy -p ewf-cli --all-targets --locked -- -D warnings
+
       - name: Docs
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --all-features --no-deps
 
       - name: Package contents
-        run: cargo package --list
+        run: |
+          cargo package -p ewf-image --list --locked
+          cargo package -p aff4-image --list --locked
 
       - name: Publish dry run
-        run: cargo publish --dry-run
+        run: |
+          cargo publish -p ewf-image --dry-run --all-features --locked
+          cargo publish -p aff4-image --dry-run --all-features --locked
+
+  interoperability:
+    name: Pinned libewf interoperability
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config zlib1g-dev libbz2-dev libssl-dev dmsetup e2fsprogs util-linux
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Build pinned oracle
+        run: bash scripts/install-libewf-oracle.sh "$RUNNER_TEMP/libewf"
+      - name: Compare generated fixtures and writer output
+        run: bash scripts/test-interoperability.sh "$RUNNER_TEMP/libewf"
+
+      - name: Canonical AFF4 reference
+        run: bash scripts/test-aff4-reference.sh
+
+      - name: Independent AFF4 producer and consumer
+        run: bash scripts/test-aff4-interoperability.sh
+      - name: Build unified CLI
+        run: cargo build --release --locked -p ewf-cli
+      - name: Sequential EWF2 filesystem-full and cancellation acceptance
+        run: sudo python3 scripts/test-sequential-storage.py --binary "$PWD/target/release/ewf-cli"
+      - name: AFF4 filesystem-full acceptance
+        run: |
+          cargo build --release --locked -p aff4-image --example acquire
+          sudo python3 scripts/test-aff4-storage.py --acquire "$PWD/target/release/examples/acquire" --binary "$PWD/target/release/ewf-cli"
+      - name: Kernel device and filesystem acceptance
+        run: |
+          sudo python3 scripts/test-device-acquisition.py \
+            --binary "$PWD/target/release/ewf-cli" \
+            --ewfexport "$RUNNER_TEMP/libewf/bin/ewfexport" \
+            --ewfverify "$RUNNER_TEMP/libewf/bin/ewfverify" \
+            --directory "$RUNNER_TEMP"
+
+  windows-devices:
+    name: Windows VHDX acceptance (opt-in lab)
+    if: github.event_name == 'workflow_dispatch' && inputs.windows_device_acceptance
+    runs-on: [self-hosted, Windows, ewf-device-lab]
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Build CLI
+        run: cargo build --release --locked -p ewf-cli
+      - name: Require pinned lab oracles
+        shell: pwsh
+        run: |
+          if (-not $env:EWFEXPORT -or -not $env:EWFVERIFY) { throw 'Configure pinned EWFEXPORT and EWFVERIFY paths on the lab runner' }
+      - name: Run owned VHDX tests
+        shell: pwsh
+        run: ./scripts/test-device-acquisition.ps1 -Binary ./target/release/ewf-cli.exe -Directory $env:RUNNER_TEMP -EwfExport $env:EWFEXPORT -EwfVerify $env:EWFVERIFY
+
+  fuzz-smoke:
+    name: Bounded parser fuzz smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install fuzz tooling
+        run: |
+          rustup toolchain install nightly-2026-07-16 --profile minimal
+          cargo install cargo-fuzz --locked --version 0.13.2
+      - name: Seed and exercise parser targets
+        run: bash scripts/fuzz-smoke.sh 30
 
   msrv:
     name: MSRV
@@ -73,4 +170,4 @@ jobs:
           rustup default 1.96.0
 
       - name: Check MSRV
-        run: cargo check --all-features
+        run: cargo check --workspace --all-features

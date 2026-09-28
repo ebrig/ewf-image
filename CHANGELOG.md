@@ -1,8 +1,175 @@
 # Changelog
 
-All notable changes to this project are documented here.
+Each released entry describes that version. The Unreleased section describes the
+0.5.0 release candidate, which has not been published. Some of these changes
+require source updates in code written for 0.4.0. See
+[Migrating to 0.5](docs/migrating-to-0.5.md).
 
 ## Unreleased
+
+### Command-line usability
+
+- Add the provisional `ewf-cli` workspace executable. It acquires physical media
+  to a single E01, Ex01, AFF4, or raw output, converts decoded physical images
+  between formats, and converts logical collections between Lx01 and AFF4 with
+  per-file verification and explicit reports of omitted metadata. Remove the
+  standalone `ewf-image` and `aff4-image` executables.
+- Run the native source adapter and EWF operational runtime inside `ewf-cli`.
+  Record physical sector geometry in AFF4 writer metadata.
+- Print concise text by default in `ewf-cli`. Add `--json` for
+  script-compatible reports that include verification, omission, and publication
+  outcomes.
+- Shorten help output, group case and image settings, and add `--version`
+  output. Add `verify IMAGE ENTRY` and `extract` for logical files. The older
+  `verify-file` and `extract-file` commands remain accepted under `ewf-cli ewf`.
+- Set AFF4 resource limits in `ewf-cli` from platform capacity instead of
+  command-line quota options. Library defaults, structural validation, and
+  verification before publication are unchanged.
+- Use fallible allocation when growing AFF4 decoded buffers and retained map records.
+
+### AFF4 integration
+
+- Discover all physical disks and metadata-linked companion containers, with
+  independent cursors, bounded shared caches, and identity-checked reopening.
+- Add explicit physical-disk selection and an owned `Read`/`Seek` cursor that
+  reports the decoded size, volume identity, and declared sector geometry.
+- Support reader-only dependencies with `default-features = false`. Acquisition
+  and writer dependencies are gated behind the `write` feature. CLI dependencies
+  live in the separate `ewf-cli` package.
+
+### EWF library
+
+- Add `AcquisitionWriter` for known-size raw/zlib physical E01 acquisition with
+  bounded segment scratch space, sealed-segment checkpoints, binding to the source
+  and configuration, progress, cancellation, inspection, and validation. Resume
+  validates and rehashes the acquired prefix without rewriting it. Publication
+  requires hard links.
+- Add retries for seekable sources, stop and zero-fill policies, bounded error
+  ranges, and configurable checkpoint intervals. Native bad-sector tables persist
+  across resume, and media hashes include substituted bytes. Cumulative error
+  ranges from continuation segments are merged without duplication.
+- Add `SequentialWriter` for Ex01/Lx01 output of known length and
+  `LogicalWriter::create_sequential`, with bounded payload scratch space,
+  optional mirroring, and recoverable publication. Sequential output cannot be
+  resumed.
+- Add `LogicalWriter` for L01/Lx01 catalogs, with identifiers, extents, per-file
+  MD5/SHA1, and cancellation. Add strict streaming, verification, and computed
+  SHA256 for selected files.
+- Stage file-backed output under a recoverable publication journal with backups.
+  Add `EwfWriter::recover_output`. Refuse existing segments unless replacement is
+  explicitly enabled, and have `resume()` enable replacement. Detect stale
+  continuation segments and validate mirrored namespaces before staging.
+- Verify embedded SHA256 and reject malformed or conflicting supported
+  references, including xhash identifiers in any letter case. Add
+  `computed_sha256` and `sha256_match` to `VerifyResult`. Downstream struct
+  literals must be updated.
+- Compute SHA256 in the writers and expose `WriteResult::computed_sha256`. Embed
+  the digest in complete EWF1 output when no explicit reference was supplied.
+  EWF2 callers must record the digest externally. Validate configured references
+  while preserving intentional mismatches.
+- Write standard numeric logical entry types and complete catalog separators.
+  Continue to read the older letter types. Store split EWF2 logical catalogs in
+  the final segment.
+- Preserve profile hints from the first segment across sparse headers and
+  continuation names, including the rollover from `.EZZ` to `.FAA`. Keep explicit
+  metadata consistency checks.
+- Store incompressible zlib chunks as raw data with a checksum for libewf
+  compatibility.
+- Keep logical entry names that contain unpaired UTF-16 surrogates. The new
+  `SingleFileEntry::name_utf16` field holds the original UTF-16 units, and `name`
+  holds a display string with replacement characters. Writers reject such names
+  before publication instead of re-encoding them. Invalid UTF-16 outside entry
+  names remains a malformed-catalog error.
+
+### EWF command line
+
+These commands are available as `ewf-cli ewf <command>`.
+
+- Add `acquire`, `resume`, checkpoint inspection and validation, progress,
+  source identity, immutable session manifests, JSON schema version 1, and
+  verification after publication.
+- Add read-only Windows and Linux device sources with discovered geometry, stable
+  identity, destination-overlap checks, and aligned uncached reads. Disconnects
+  are fatal and never substituted. On Windows, a narrow native module queries the
+  opened handle. Device sessions created by the older PowerShell adapter must be
+  completed with the original binary.
+- Add cancellation and per-request timeouts for source reads, discard late
+  results, and request native I/O cancellation on Windows. Discovery, output
+  I/O, and drivers that ignore cancellation are not covered by the deadline.
+- Persist acquisition history and consolidated reports across resume. Add
+  `report` and `report --write`. Keep checkpoints and completed image results
+  when logging or report persistence fails. History is a record of past events,
+  not a fresh verification.
+- Add `info`, strict `export`, bounded `analyze`, logical `files`, `verify-file`,
+  and selective `extract-file`. Export and extraction protect existing
+  destinations, check supported references, and report substitutions or missing
+  references.
+- Add `recover` for physical raw/zlib EWF1 images. Recovery produces a bundle
+  with raw output, a complete provenance map, output hashes, and a completion
+  report. Recovery keeps labeled partial output on failure or cancellation and
+  requires opt-in for bytes with suspect checksums.
+- Add one-shot `acquire-sequential`, strict directory `collect`, and
+  `recover-publication` for EWF2. These commands check sources and verify the
+  published media and files. Unresolved publication has an explicit JSON state.
+  The commands have no checkpoint resume or mirror option.
+
+### Experimental AFF4 sibling crate
+
+- Add the separate, experimental `aff4-image` crate. It is versioned and
+  packaged independently from `ewf-image`. It reads AFF4 1.0 ImageStreams,
+  Maps, and symbolic streams, and logical AFF4-L 1.1 and draft 2.1 containers,
+  with resource enumeration and resource limits.
+- Add single-volume streaming writers for physical AFF4 1.0 and logical
+  AFF4-L 1.1, with source digests, cancellation, and exclusive publication. Draft
+  2.1 output, multi-volume writing, and resume are unsupported.
+- Add linear and container-wide verification, metadata hashing over exact bytes,
+  imported-metadata checks, SHA512 and BLAKE2b, and supported block, map, and
+  index integrity checks. Missing references, unsupported constructions, and
+  byte coverage are reported explicitly.
+- Add physical volume-set reading with per-volume context and
+  `verify-set --full`, including foreign references, per-volume metadata, striped
+  roots, and aggregate budgets.
+- Add logical folders, roots, substreams, case metadata, ImageStreams for large
+  files, streaming RDF inventory, directory collection, JSON output, and
+  selective extraction.
+- Preflight ZIP directory allocation and bound metadata, triples, entries,
+  members, chunks, Maps, and verification work. Bound collection discovery and
+  account for metadata and entries incrementally. Expose limit overrides and
+  structured limit errors.
+- Verify the finalized collection staging file before publication. Add the
+  opt-in `Writer::finish_verified`, and keep `finish` unverified. Preserve
+  diagnostics from failed verification in `Error::VerificationFailed { report }`
+  and in CLI JSON.
+- Preserve published paths and digests through `Error::PublishedButUnsynced`
+  when parent-directory synchronization fails. Report publication and durability
+  separately.
+- Release finalized writer metadata and serialize reports without a duplicate
+  JSON tree, which reduces measured memory use for large catalogs.
+
+### Validation and documentation
+
+- Add Rust CI on Windows, Linux, and macOS, Linux MSRV checks, interoperability
+  tests with pinned libewf 20260924, canonical AFF4 references, and producer and
+  consumer tests with pinned independent aff4tools. Explicitly requested corpus
+  runs fail when inputs are missing or empty.
+- Add an opt-in logical corpus test that reads every catalog entry, compares
+  stored file MD5 and SHA1 values, and compares complete media SHA256 and size
+  with independently computed sidecar files.
+- Add process-exit and I/O-failure coverage for acquisition, publication,
+  history, export, and recovery. Add Linux loop and device-mapper suites and
+  Windows VHDX suites on owned devices, with independent exports, ENOSPC and
+  retry, cancellation, and source-preservation checks.
+- Extend Windows Ex01/Lx01 NTFS and exFAT acceptance with pinned independent
+  oracles. The harness detaches each completed destination before mounting the
+  next one.
+- Add isolated bounded EWF and AFF4 fuzz targets, reproducible payload, catalog,
+  and resume benchmarks, and consumer fixture preparation anchored to source
+  hashes. Independent logical EWF coverage uses 32 KiB chunks. The libewf export
+  failure for split logical output with very small chunks is unresolved.
+- Add a local acceptance runner with isolated native builds, revision and tool
+  provenance, hashed logs and artifacts, and explicit failed, blocked, and
+  skipped statuses.
+- Consolidate the user guides, writer selection, and migration guidance.
 
 ## 0.4.0 - 2026-09-12
 

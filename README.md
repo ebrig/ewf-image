@@ -1,6 +1,6 @@
 # ewf-image
 
-**A pure-Rust library for reading and writing Expert Witness Format (EWF) forensic images.**
+Read, verify, and write Expert Witness Format (EWF) forensic images in pure Rust.
 
 [![Crates.io](https://img.shields.io/crates/v/ewf-image.svg)](https://crates.io/crates/ewf-image)
 [![Documentation](https://docs.rs/ewf-image/badge.svg)](https://docs.rs/ewf-image)
@@ -9,255 +9,231 @@
 
 ![ewf-image project banner](https://raw.githubusercontent.com/ebrig/ewf-image/main/docs/assets/ewf-image-banner.png)
 
-`ewf-image` reads and writes the EWF/E01 image formats used in digital
-forensics — the physical, logical, SMART, and EWF2 families — with no unsafe
-code and no external tool dependencies. It exposes focused APIs for raw stream
-access, metadata inspection, logical single-file catalogs, and EWF output
-creation.
+`ewf-image` opens EnCase-style `.E01`, `.L01`, `.S01`, `.Ex01`, and `.Lx01`
+images and exposes their decoded media as ordinary Rust readers. The library
+forbids unsafe code and runs without libewf or any other external tool.
 
-## Highlights
+- **Read** physical, logical, and SMART images, including split segment sets.
+- **Verify** decoded media against stored and independently recorded MD5, SHA1,
+  and SHA256 digests.
+- **Browse** logical file catalogs, then verify and extract individual files.
+- **Write** EWF1 and EWF2 images, with resumable E01 acquisition and bounded
+  streaming writers.
+- **Analyze** damaged images and recover readable data with a provenance map.
 
-- **Broad format coverage.** Reads and writes EWF1 (`.E01`, `.L01`, `.S01`)
-  and EWF2 (`.Ex01`, `.Lx01`), including raw, zlib, BZip2, and pattern-fill
-  chunks. The EWF1 reader also supports X-Ways Forensics 20.9+ Zstandard
-  images and password-protected X-Ways AES-128/AES-256 images.
-- **Streaming reads.** Immutable `Image` handles offer positioned reads,
-  `Read + Seek` cursors, and bounded decoded-chunk caching.
-- **Rich metadata.** Inspect acquisition headers, stored MD5/SHA1 hashes,
-  acquisition errors, sessions, and tracks.
-- **Integrity verification.** Recompute and compare stored hashes with a single
-  `Image::verify()` call, or compute SHA256 and compare external references with
-  progress, cancellation, and optional parallel decompression.
-- **Analysis and recovery.** Typed integrity findings, bounded reports, section
-  inspection, and a separate physical raw/zlib EWF1 recovery API with provenance.
-- **Positioned backings.** Open EWF1/EWF2 segments from files, memory, bounded
-  subranges, or caller-provided thread-safe positioned sources.
-- **Flexible writing.** Compression, segment splitting, secondary/shadow
-  mirroring, authored metadata, and resume-by-rewrite.
-- **Safe by construction.** `#![forbid(unsafe_code)]`, linted under clippy
-  pedantic/nursery, and tested against external EWF tool oracles.
-
-> This release ships the Rust library. Command-line, mount, and service runtime
-> layers are planned but not yet implemented.
+> **Release status:** this checkout is the unpublished 0.5.0 release candidate.
+> The [changelog](CHANGELOG.md#unreleased) lists its changes, and the
+> [migration guide](docs/migrating-to-0.5.md) covers upgrades from 0.4. For a
+> published version, use its [API reference](https://docs.rs/ewf-image).
 
 ## Installation
 
 ```toml
 [dependencies]
-ewf-image = "0.4"
+ewf-image = "0.5"
 ```
 
-The default `verify` feature enables streamed MD5/SHA1 verification through
-`Image::verify()`. Drop it if you don't need that API:
+The crate requires Rust 1.96 or later. Its runtime features are:
 
-```toml
-[dependencies]
-ewf-image = { version = "0.4", default-features = false }
-```
+| Feature | Effect |
+| --- | --- |
+| `verify` | Media verification, per-file verification, and integrity analysis. Enabled by default. |
+| `parallel` | Verification across multiple worker threads. Enables `verify`. |
+| `serde` | Serialization of reports and metadata types. |
 
-## Quick Start
+Stored-hash parsing, section integrity checks, and writer hashing remain available
+with `default-features = false`.
 
-Open an image, inspect its format, and read from the logical media stream:
+## Read an image
 
-```rust
+Open the first segment. The remaining segments are found automatically.
+
+```rust,no_run
 use std::io::Read;
 
-let image = ewf_image::Image::open("case.E01")?;
-let info = image.info();
+fn main() -> ewf_image::Result<()> {
+    let image = ewf_image::Image::open("case.E01")?;
+    let info = image.info();
+    println!("{:?}, {} bytes in {} segments", info.format, info.logical_size, info.segment_count);
 
-println!("{:?}: {} bytes across {} segment(s)",
-    info.format, info.logical_size, info.segment_count);
+    // Read sequentially through a Read + Seek cursor.
+    let mut first_sector = [0u8; 512];
+    image.cursor().read_exact(&mut first_sector)?;
 
-// Read the first sector from the cursor...
-let mut first_sector = vec![0; 512];
-image.cursor().read_exact(&mut first_sector)?;
-
-// ...or read directly at any offset.
-let mut sector_at_offset = vec![0; 512];
-image.read_at(&mut sector_at_offset, 4096)?;
-```
-
-Open a password-protected X-Ways EWF1 image by keeping password bytes in the
-zeroizing `EwfPassword` wrapper:
-
-```rust
-let password = ewf_image::EwfPassword::utf8("operator-supplied-password");
-let image = ewf_image::Image::open_with_password("case.E01", &password)?;
-
-if let Some(encryption) = image.encryption_info() {
-    println!("encryption: {:?}", encryption.method());
+    // Or read at an absolute offset without a cursor.
+    let mut buffer = [0u8; 4096];
+    image.read_at(&mut buffer, 1024 * 1024)?;
+    Ok(())
 }
 ```
 
-`EwfPassword::from_bytes` is available when the password must be supplied in
-an encoding other than UTF-8. X-Ways AES-128 accepts at most 16 password bytes;
-AES-256 accepts at most 32.
+`Image` is a cheap, shareable handle. Clones and cursors share bounded caches,
+so one image can serve many readers. `OpenOptions` adjusts cache sizes, handle
+limits, and strictness. Segment files must remain unchanged while an image is open.
 
-Each open attempt accepts one password; callers own candidate iteration.
-Password and derived-key storage is zeroized where owned, and public diagnostics
-do not include cryptographic material. AES-CTR is not authenticated encryption:
-a stored verifier confirms the password, while verifier-less images rely on
-strict validation of the first decrypted media chunk during open. Existing EWF
-checksums and `Image::verify()` remain the integrity mechanisms for later data.
+## Verify an image
 
-Read forensic metadata and verify stored hashes:
+`verify` decodes the complete media and compares it with the digests stored in
+the image. Verification bypasses caches, so corrupt data cannot pass as valid.
 
-```rust
-let image = ewf_image::Image::open("case.E01")?;
+```rust,no_run
+use ewf_image::{Image, VerifyOptions};
 
-if let Some(case_number) = image.header_value("case_number") {
-    println!("case: {case_number}");
+fn main() -> ewf_image::Result<()> {
+    let image = Image::open("case.E01")?;
+
+    let result = image.verify()?;
+    println!("MD5 match: {:?}", result.md5_match);
+    println!("SHA256 match: {:?}", result.sha256_match);
+
+    // Compare against a digest recorded outside the image.
+    let acquisition_sha256 = [0u8; 32]; // Replace with the recorded value.
+    let options = VerifyOptions::default().with_expected_sha256(acquisition_sha256);
+    let report = image.verify_with_options(&options)?;
+    println!("references match: {:?}", report.references_match());
+    Ok(())
 }
-
-let result = image.verify()?;
-println!("MD5 match: {:?}", result.md5_match);
 ```
 
-### Reader tuning and diagnostics
+A match value of `None` means the image stores no digest of that type. A match
+shows that the decoded media equals what was hashed at acquisition. It cannot
+show whether unreadable source sectors were replaced with zeros at that time. See
+[verification, analysis, and recovery](docs/reader-analysis.md).
 
-Reader caches are shared by every clone and cursor created from an `Image`.
-The decoded-chunk cache defaults to 64 chunks, and table entries use a bounded
-4 MiB page cache. Configure byte limits and opt into cumulative diagnostics
-with `OpenOptions`:
+## Work with logical files
 
-```rust
-let options = ewf_image::OpenOptions::default()
-    .with_chunk_cache_size_bytes(32 * 1024 * 1024)
-    .with_table_entry_cache_size_bytes(8 * 1024 * 1024)
-    .with_maximum_open_handles(Some(32))
-    .with_reader_statistics(true);
+Logical images (`.L01` and `.Lx01`) contain a catalog of files and folders.
 
-let image = ewf_image::Image::open_with_options("case.E01", options)?;
-let before = image.reader_statistics().expect("statistics enabled");
+```rust,no_run
+use ewf_image::{Image, SingleFileEntryType};
+use std::{fs::File, io};
 
-// Perform the reads being measured.
-let mut sector = [0; 512];
-image.read_at(&mut sector, 0)?;
+fn main() -> ewf_image::Result<()> {
+    let image = Image::open("files.L01")?;
+    let Some(root) = image.root_file_entry() else {
+        println!("not a logical image");
+        return Ok(());
+    };
 
-let delta = image
-    .reader_statistics()
-    .expect("statistics enabled")
-    .saturating_delta(before);
-println!("chunk cache misses: {}", delta.chunk_cache_misses());
+    for entry in &root.children {
+        println!("{} ({} bytes)", entry.name().unwrap_or("?"), entry.size().unwrap_or(0));
+    }
 
-let cache = image.reader_cache_info();
-println!(
-    "table cache: {} / {} bytes",
-    cache.table_entry_cache_current_bytes(),
-    cache.table_entry_cache_capacity_bytes()
-);
+    let first_file = root
+        .children
+        .iter()
+        .find(|entry| entry.entry_type() == Some(SingleFileEntryType::File));
+    if let Some(entry) = first_file {
+        let check = image.verify_single_file(entry)?;
+        println!("stored file hashes match: {:?}", check.references_match());
+
+        let mut output = File::create_new("extracted.bin")?;
+        io::copy(&mut image.single_file_cursor(entry), &mut output)?;
+    }
+    Ok(())
+}
 ```
 
-Statistics collection is disabled by default. `reader_statistics()` returns
-`None` unless it was enabled when the image was opened. See
-[Migrating to 0.2](docs/migrating-to-0.2.md) for the `OpenOptions` builder
-migration.
+Extraction copies file content only. Timestamps and other recorded metadata
+remain available on each catalog entry but are not applied to extracted files.
 
-### Verification and analysis
+## Write an image
 
-`Image::verify_with_options` computes MD5, SHA1, and SHA256 and accepts external
-reference digests through `VerifyOptions`. `verify_with_progress` supports
-per-operation cancellation. Verification always validates backing chunks,
-including when ordinary reads permit zero-filling damaged data.
+`EwfWriter` creates EWF1 or EWF2 images from any readable source.
 
-`Image::analyze` collects typed findings and reports incomplete media coverage
-without producing partial-stream hashes. `EwfRecovery` separately exports
-recoverable physical raw/zlib EWF1 data to a new raw file, recording primary,
-redundant-table, suspect, and zero-filled outcomes.
+```rust,no_run
+use ewf_image::{EwfWriter, WriteCompression, WriteFormat, WriteOptions};
+use std::{fs::File, io};
 
-The optional `parallel` feature enables bounded parallel scans; `serde` enables
-report serialization. Defaults remain single-threaded. See
-[Verification, analysis, and recovery](docs/reader-analysis.md) for APIs,
-cancellation, source backings, memory budgets, and recovery limits.
+fn main() -> ewf_image::Result<()> {
+    let mut options = WriteOptions {
+        format: WriteFormat::Ewf2Physical,
+        compression: WriteCompression::Zlib,
+        ..WriteOptions::default()
+    };
+    options.metadata.set_header_value("case_number", "CASE-001");
 
-Write a new compressed EWF2 image from raw bytes:
-
-```rust
-use std::fs::File;
-
-let mut input = File::open("disk.raw")?;
-
-let mut options = ewf_image::WriteOptions::default();
-options.format = ewf_image::WriteFormat::Ewf2Physical;
-options.compression = ewf_image::WriteCompression::Zlib;
-options.metadata.set_header_value("case_number", "CASE-001");
-
-let mut writer = ewf_image::EwfWriter::create("case.Ex01", options)?;
-std::io::copy(&mut input, &mut writer)?;
-let result = writer.finish()?;
-
-println!("wrote {} segment(s)", result.segment_paths.len());
+    let mut writer = EwfWriter::create("case.Ex01", options)?;
+    io::copy(&mut File::open("disk.raw")?, &mut writer)?;
+    let result = writer.finish()?;
+    println!("wrote {} segments", result.segment_paths.len());
+    Ok(())
+}
 ```
 
-See [`examples/`](examples) for complete, runnable programs, including reading,
-raw export, logical inspection, and mirrored secondary output.
+`EwfWriter` supports every output format and positioned writes, but it spools
+the complete source to temporary storage. Specialized writers cover large or
+long-running jobs:
 
-## Supported Formats
+- `AcquisitionWriter` acquires physical E01 images with checkpoints and can
+  resume after an interruption.
+- `SequentialWriter` streams Ex01 and Lx01 output and stages one segment at a time.
+- `LogicalWriter` builds L01 and Lx01 file catalogs from files you supply.
 
-| Family | Read | Write | Notes |
-| --- | :---: | :---: | --- |
-| EWF1 physical `.E01` / EVF | ✓ | ✓ | Segment discovery, raw/zlib chunks, metadata, hashes, acquisition errors, sessions, tracks, and split output. Reading additionally supports the X-Ways 20.9+ Zstandard profile and X-Ways AES-128/AES-256 encryption. |
-| EWF1 logical `.L01` / LVF | ✓ | ✓ | Logical single-file catalogs and path lookup. |
-| EWF1 SMART `.S01` | ✓ | ✓ | SMART media profile handling. |
-| EWF2 physical `.Ex01` | ✓ | ✓ | Raw, zlib, BZip2, and pattern-fill chunks; EWF2 metadata, memory extents, and split output. |
-| EWF2 logical `.Lx01` | ✓ | ✓ | Logical single-file catalogs and auxiliary single-file tables. |
+Writers return computed MD5, SHA1, and SHA256 digests but do not reread their
+output. [Acquisition and writing](docs/acquisition.md) explains resume,
+publication, and recovery for each writer.
 
-The writer additionally supports SMART output, compression, segment splitting,
-secondary/shadow mirroring, authored metadata, stored hashes, incomplete EWF1
-output, and resume-by-rewrite.
+## Supported formats
 
-## Limitations
+| Format | Read | Write |
+| --- | --- | --- |
+| EWF1 physical `.E01` | Raw and zlib; X-Ways Zstandard; X-Ways AES-128/AES-256 encryption | Raw and zlib |
+| EWF1 logical `.L01` | Media and file catalog | Media and file catalog |
+| EWF1 SMART `.S01` | Media | Media |
+| EWF2 physical `.Ex01` | Raw, zlib, BZip2, and pattern-fill | Raw, zlib, BZip2, and pattern-fill |
+| EWF2 logical `.Lx01` | Media and file catalog | Media and file catalog |
 
-- Encrypted EWF2 images are detected and rejected; decryption is not yet
-  implemented.
-- Encrypted writing is not yet implemented.
-- Base-plus-overlay delta/shadow images are not yet implemented.
-- X-Ways Zstandard EWF1 images are read-only; the writer does not generate or
-  preserve X-Ways Zstandard chunks.
-- EWF2 BZip2 chunks are supported locally, but some external EWF tools cannot
-  generate or export BZip2 fixtures, so external oracle coverage for them is
-  tracked separately.
+Encrypted X-Ways images open with `Image::open_with_password`. Encrypted EWF2
+images, encrypted output, and delta (overlay) images are not supported.
+[Compatibility](docs/compatibility.md) describes tested producers and consumers,
+and [limitations](docs/limitations.md) lists unsupported workflows.
 
-See [docs/limitations.md](docs/limitations.md) for details.
+AFF4 containers are handled by the separate, experimental
+[`aff4-image`](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image)
+crate. `ewf-image` has no AFF4 dependencies.
 
-## Testing
+## Command-line tool
 
-Compatibility is covered by local synthetic fixtures, writer round trips, and
-optional external EWF tool oracle tests. The routine checks are:
+The workspace includes `ewf-cli`, an unpublished command-line tool for EWF, AFF4,
+and raw images. Build it from this repository:
 
-```bash
-cargo fmt --check
-cargo test --no-default-features
-cargo test
-cargo test --all-features
-cargo clippy --all-targets --all-features -- -D warnings
-cargo check --examples --all-features
-cargo test --doc --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
+```sh
+cargo build -p ewf-cli --release --locked
 ```
 
-External corpus and tool oracle checks are ignored by default, since they
-require local fixtures and installed EWF tools. See
-[docs/testing.md](docs/testing.md) and
-[docs/compatibility.md](docs/compatibility.md).
+```text
+ewf-cli info case.E01
+ewf-cli verify case.E01
+ewf-cli acquire /dev/sdb case.E01
+ewf-cli convert case.E01 case.aff4
+ewf-cli collect evidence-folder files.Lx01
+ewf-cli extract files.Lx01 2 recovered.bin
+```
+
+The output file extension selects the format. Commands never overwrite existing
+files. Acquisition requires a stable source, and directory collection does not
+create a filesystem snapshot. See the [CLI guide](docs/ewf-cli.md) for device
+acquisition, conversion, JSON output, and exit codes, and the [EWF command
+guide](docs/cli.md) for advanced acquisition and recovery options.
 
 ## Documentation
 
+- [API reference](https://docs.rs/ewf-image) and [runnable examples](examples)
+- [Verification, analysis, and recovery](docs/reader-analysis.md)
+- [Acquisition and writing](docs/acquisition.md)
+- [CLI guide](docs/ewf-cli.md) and [EWF command guide](docs/cli.md)
+- [Compatibility](docs/compatibility.md) and [limitations](docs/limitations.md)
 - [Architecture](docs/architecture.md)
-- [Compatibility](docs/compatibility.md)
-- [Limitations](docs/limitations.md)
 - [Testing](docs/testing.md)
 - [Release process](RELEASING.md)
-- [Verification, analysis, and recovery](docs/reader-analysis.md)
-- [Migrating to 0.3](docs/migrating-to-0.3.md)
-- [Migrating to 0.2](docs/migrating-to-0.2.md)
-- [API reference (docs.rs)](https://docs.rs/ewf-image)
+- Migration guides: [0.5](docs/migrating-to-0.5.md), [0.3](docs/migrating-to-0.3.md), [0.2](docs/migrating-to-0.2.md)
 
-## Contributing
+## Contributing and security
 
-Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) to get started,
-and [SECURITY.md](SECURITY.md) for reporting security issues.
+Read [Contributing](CONTRIBUTING.md) before opening a pull request. Report
+vulnerabilities privately as described in the [security policy](SECURITY.md).
 
 ## License
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
+Licensed under the [Apache License 2.0](LICENSE).

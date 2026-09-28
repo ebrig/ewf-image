@@ -1,10 +1,12 @@
 # Compatibility
 
-This crate targets practical read/write compatibility with common Expert
-Witness Format image families while keeping a Rust-first API. The tables below
-summarize the public support surface.
+These tables describe the EWF development checkout. A supported operation does
+not imply that every producer variant or consumer has been tested. For changes in
+published packages, see the [changelog](../CHANGELOG.md). AFF4 profiles are
+listed in the separate
+[AFF4 guide](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image).
 
-## Reader Support
+## Reader support
 
 | Area | Status | Notes |
 | --- | :---: | --- |
@@ -15,52 +17,77 @@ summarize the public support surface.
 | EWF2 physical `.Ex01` | ✓ | Raw, zlib, BZip2, pattern-fill chunks, EWF2 metadata, memory extents, and split segments. |
 | EWF2 logical `.Lx01` | ✓ | Logical single-file catalogs and auxiliary single-file tables. |
 | Multi-segment discovery | ✓ | EWF1 and EWF2 sibling naming schemes, plus explicit segment lists. |
-| Metadata and hashes | ✓ | Typed fields and compatibility-oriented generic header/hash value maps. |
-| Stored MD5/SHA1 parsing | ✓ | Available with or without default features. |
-| Streamed media verification | ✓ | MD5, SHA1, and SHA256 hashing, stored/external reference comparisons, progress, and cancellation through `Image::verify*`; enabled by the default `verify` feature. Optional bounded parallel scans use the `parallel` feature. |
+| Metadata and hashes | ✓ | Typed fields and generic header and hash value maps for compatibility. |
+| Stored MD5/SHA1/SHA256 parsing | ✓ | Available with or without default features. |
+| Streamed MD5/SHA1/SHA256 verification | ✓ | `Image::verify()` and `VerifyResult`, enabled by the default `verify` feature. |
 | EWF2 section integrity checks | ✓ | Available with or without default features. |
 | Corruption and encryption probes | ✓ | Lightweight file and segment probes that run without fully opening an image. |
-| Positioned sources and section inspection | ✓ | File, memory, bounded-subrange, and caller-provided positioned segment sources, plus EWF1/EWF2 section summaries. |
-| Integrity analysis | ✓ | Typed, bounded findings with media coverage and EWF1 redundant-table comparison. Optional report serialization uses the `serde` feature. |
-| Physical EWF1 recovery | ✓ | Separate raw/zlib recovery with redundant-table fallback, suspect-data policy, provenance, cancellation, and output bounds. |
-| Encrypted EWF2 decryption | — | Not yet implemented; encrypted images are detected and rejected. |
-| Base-plus-overlay delta/shadow images | — | Not yet implemented; no confirmed public reference surface is available. |
+| Logical-file verification/extraction | ✓ | Strict selected-file reads and MD5/SHA1 comparisons; computed SHA256; content-only extraction. |
+| Encrypted EWF2 decryption | No | Not implemented. Encrypted images are detected and rejected. |
+| Base-plus-overlay delta/shadow images | No | Not implemented. No confirmed public reference is available. |
 
-## Writer Support
+## Writer support
 
 | Area | Status | Notes |
 | --- | :---: | --- |
 | EWF1 physical `.E01` | ✓ | Raw/zlib chunks, metadata, hashes, range sections, and segment splitting. |
-| EWF1 logical `.L01` | ✓ | Logical single-file catalog emission. |
+| EWF1 logical `.L01` | ✓ | Logical single-file catalog output. |
 | EWF1 SMART `.S01` | ✓ | SMART profile output. |
 | EWF2 physical `.Ex01` | ✓ | Raw, zlib, BZip2, pattern-fill chunks, metadata, memory extents, and segment splitting. |
 | EWF2 logical `.Lx01` | ✓ | Logical single-file metadata and auxiliary tables. |
 | Metadata and hashes | ✓ | Typed metadata, generic header values, stored MD5/SHA1, and generic hash values; available with or without default features. |
 | Acquisition errors, sessions, tracks | ✓ | EWF1 and EWF2 range-style metadata. |
+| Streaming physical E01 acquisition | ✓ | Known-size raw/zlib source acquisition, progress/cancellation, checkpoint inspection/resume, and cumulative bad-sector tables; validated with pinned libewf. |
+| Sequential EWF2 writing | ✓ | Known-length Ex01/Lx01 with segment-bounded payload scratch; no checkpoint resume. CLI raw/zlib output uses 32 KiB chunks. |
+| Logical catalog builder | ✓ | `LogicalWriter` supplies file hashes and extents; general L01/Lx01 or sequential Lx01 backend. |
 | Incomplete and resumed EWF1 output | ✓ | `finish_incomplete` writes `next`; `resume` appends and rewrites a complete image. |
 | Secondary/shadow target mirroring | ✓ | `WriteOptions::secondary_segment_filename` writes a byte-identical secondary segment set for file-backed finishes. |
-| Encrypted writing | — | Not yet implemented for X-Ways EWF1 or EWF2 output. |
-| Base-plus-overlay delta/shadow writing | — | Not yet implemented; a verified reference format/API is needed first. |
+| Encrypted writing | No | Not implemented for X-Ways EWF1 or EWF2 output. |
+| Base-plus-overlay delta/shadow writing | No | Not implemented. A verified reference format or API is required first. |
 
-## Oracle Coverage
+## Independent-tool coverage
 
-Compatibility is tested in layers:
+An opt-in regression test over a synthetic corpus covers native WinAcq 20.3 E01
+inputs, both compressed and uncompressed with split segments. EnCase 25.3 imports
+of EWF and AFF4 output from this project have not been tested.
+
+Evidence is separated by source and direction:
 
 - Synthetic unit fixtures cover malformed inputs, boundary checks, table
   variants, chunk encodings, logical files, metadata, hashes, and writer round
   trips.
-- Ignored external corpus tests compare raw stream output, metadata, hash
-  values, and verification behavior against external EWF tools.
-- Generated fixture tests exercise externally-created EWF1 and extended EWF
-  profiles, plus writer-created EWF2 and logical single-file cases.
-- Recovery oracle tests compare recovery from externally generated truncated
-  raw/zlib EWF1 images with independently exported media.
-- X-Ways encryption coverage crosses AES-128/AES-256 with compatible Deflate
-  and X-Ways Zstandard compression. Native uncompressed and verifier-less
-  X-Ways fixtures are not currently available; verifier-less fallback behavior
-  is covered with a derived test fixture. The encrypted split-segment path is
-  implemented but does not yet have an authentic split-image oracle.
+- Ignored external corpus tests compare raw stream output, metadata, hash values,
+  and verification behavior against external EWF tools.
+- Generated fixture tests exercise EWF1 and extended EWF profiles created by
+  external tools, plus EWF2 and logical single-file cases created by the writer.
+- X-Ways encryption coverage includes AES-128 and AES-256, each with compatible
+  Deflate and with X-Ways Zstandard compression. Native uncompressed and
+  verifier-less X-Ways fixtures are unavailable. A derived test fixture covers
+  the verifier-less fallback behavior. The encrypted split-segment path is
+  implemented but has no native split-image oracle.
 
-EWF2 BZip2 support is covered locally. Some external tools cannot produce or
-export EWF2 BZip2 images, so BZip2 external oracle coverage is tracked
-separately from local read/write behavior.
+EWF2 BZip2 support is covered by local tests. Some external tools cannot produce
+or export EWF2 BZip2 images, so external oracle coverage for BZip2 is tracked
+separately from local read and write behavior.
+
+Independent coverage of logical writer output uses the default 32 KiB chunks. A
+libewf export of split logical output with very small chunks terminated
+abnormally, so that configuration has no compatibility claim. Test a
+representative profile with the intended consumer.
+
+## Writer digest semantics
+
+Finalization hashes the complete logical media, including sector padding. The
+SHA256 is returned in `WriteResult::computed_sha256`, even without the `verify`
+feature. Complete EWF1 output embeds the computed SHA256 in its xhash section
+unless an explicit SHA256 reference was supplied. EWF2 output written by this
+library has no SHA256 section, so keep the returned digest in an external
+acquisition record. Incomplete EWF1 output does not embed final digests.
+
+Explicit MD5, SHA1, and SHA256 references are validated for syntax and for
+consistency with each other. Explicit references are not replaced when they
+differ from the computed media hash, which supports workflows that record an
+intentional mismatch. `create_from_image` and `resume` recompute media digests
+and do not copy the source's references. Calling `copy_hash_values_from_*` opts
+into preserving those references. Callers that edit the media must then clear or
+replace the copied references.

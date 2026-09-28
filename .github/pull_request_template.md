@@ -1,19 +1,21 @@
-## Summary
+## Change
 
-- 
+Describe the user-visible problem and the resulting behavior. Identify the
+affected crate and any changes to the API, format, publication, or JSON output.
 
-## Verification
+## Validation
 
-- [ ] `cargo fmt --check`
-- [ ] `cargo test --no-default-features`
-- [ ] `cargo test`
-- [ ] `cargo test --all-features`
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings`
-- [ ] `cargo check --examples --all-features`
-- [ ] `cargo test --doc --all-features`
-- [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps`
+List the checks you ran and their results. Mark unavailable checks as skipped or
+blocked and give the reason. [Testing](https://github.com/ebrig/ewf-image/blob/main/docs/testing.md)
+lists the commands.
 
-## Notes
+- [ ] Workspace formatting, tests, Clippy, and examples
+- [ ] Workspace doctests and rustdoc
+- [ ] Relevant independent-tool or corpus checks
+- [ ] Package verification when packaged files or public APIs change
+- [ ] User documentation and Unreleased changelog updated
 
-Document any external fixture or external EWF tool coverage used for this change.
-Note documentation and changelog updates, or explain why they are not needed.
+For external evidence, record the tested revision, tool version, fixture
+provenance, and scope. Do not attach private images, passwords, or case data.
+Report suspected vulnerabilities through
+[private vulnerability reporting](https://github.com/ebrig/ewf-image/security/advisories/new).
