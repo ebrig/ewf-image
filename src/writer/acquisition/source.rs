@@ -314,11 +314,11 @@ impl AcquisitionWriter {
             };
             self.chunks.push(descriptor);
             self.scratch_write_duration += scratch_started.elapsed();
-            if self.chunks.len() == self.chunks_per_segment || self.offset == self.source_size {
-                if let Err(error) = self.seal(self.offset == self.source_size) {
-                    self.failed = true;
-                    return Err(error);
-                }
+            if (self.chunks.len() == self.chunks_per_segment || self.offset == self.source_size)
+                && let Err(error) = self.seal(self.offset == self.source_size)
+            {
+                self.failed = true;
+                return Err(error);
             }
             self.after_source_write(options, progress, callback)?;
         }
