@@ -239,13 +239,17 @@ fn read_source(
                     "Some source AFF4 integrity references are missing or unsupported.".into(),
                 );
             }
-            let v = c.verify(&disk.resource_id, |a, b| {
-                ctx.progress("source verification", a, b)
-            })?;
-            if v.references_match == Some(false) {
+            let selected = all
+                .resources
+                .iter()
+                .find(|resource| resource.resource == disk.resource_id)
+                .and_then(|resource| resource.verification.as_ref())
+                .ok_or_else(|| invalid("selected AFF4 disk was not fully verified"))?;
+            if selected.references_match == Some(false) {
                 report["exit_code"] = json!(3);
                 return Err(invalid("source disk reference hashes do not match"));
             }
+            let selected_sha256 = format::parse_hash(&selected.sha256)?;
             report["source_verification"] = json!(all);
             let mut omissions = Vec::new();
             if disks.len() > 1 {
@@ -264,7 +268,7 @@ fn read_source(
                 sector: sector(disk.block_size, supplied_sector)?,
                 metadata,
                 ewf_options: None,
-                expected: Some(format::parse_hash(&v.sha256)?),
+                expected: Some(selected_sha256),
                 snapshots,
                 paths,
                 warnings,
