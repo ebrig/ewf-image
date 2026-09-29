@@ -69,6 +69,14 @@ fn physical_codecs_bevies_padding_and_logical_zip_roundtrip() {
             .unwrap();
         let result = writer.finish().unwrap();
         let mut image = Container::open(&path).unwrap();
+        for offset in [0, 4096, 28672, 32768, 61440, 65536] {
+            let mut bytes = [0; 4096];
+            let count = image.read_at(&id, &mut bytes, offset).unwrap();
+            assert_eq!(
+                &bytes[..count],
+                &data[offset as usize..offset as usize + count]
+            );
+        }
         let full = image
             .verify_all(Some(&result.metadata_sha256), |_, _, _| {
                 ControlFlow::Continue(())

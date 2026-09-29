@@ -155,8 +155,10 @@ file. An independently recorded expected SHA256 provides an external reference.
 
 Sequential verification decodes ZIP content once. A positioned read of a
 compressed ZIP member decodes from the start of the member, so random access to
-large ZIP-backed files is expensive. ImageStream reads cache one bevy and its
-index. Metadata scanning retains statement source members and repeated subjects
+large ZIP-backed files is expensive. ImageStream reads cache one bevy, its
+index, and at most one decoded chunk of up to 4 MiB for small positioned reads.
+Verification bypasses decoded chunks and rereads the backing data. Metadata
+scanning retains statement source members and repeated subjects
 without building the graph. Full verification uses the bounded graph.
 
 ## Multi-volume reads

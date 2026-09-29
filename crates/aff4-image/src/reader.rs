@@ -43,6 +43,7 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const LOGICAL_NS: &str = "https://aff4.org/Schema/2022/#";
 const LEGACY_LOGICAL_NS: &str = "http://aff4.org/Schema/2022/#";
 const BASE64: &str = "http://www.w3.org/2001/XMLSchema#base64Binary";
+const DECODED_CACHE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Limits on retained metadata, map/index members, and decoded chunks.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -155,6 +156,7 @@ pub struct Container {
     limits: Limits,
     cache: Option<(String, Vec<u8>)>,
     index_cache: Option<(String, Vec<u8>)>,
+    decoded_cache: Option<(String, u64, Vec<u8>)>,
     maps: BTreeMap<String, Arc<Map>>,
     version: (u32, u32),
     metadata_members: BTreeMap<String, String>,
@@ -288,6 +290,7 @@ impl Container {
             limits,
             cache: None,
             index_cache: None,
+            decoded_cache: None,
             maps: BTreeMap::new(),
             version,
             metadata_members,
@@ -348,12 +351,32 @@ impl Container {
     /// Reads a selected stream at a byte offset. Missing targets, cycles,
     /// corrupt chunks, and unknown/unreadable symbolic data return errors.
     pub fn read_at(&mut self, id: &str, buffer: &mut [u8], offset: u64) -> Result<usize> {
+        self.read_at_impl(id, buffer, offset, true)
+    }
+
+    fn read_at_uncached(&mut self, id: &str, buffer: &mut [u8], offset: u64) -> Result<usize> {
+        self.read_at_impl(id, buffer, offset, false)
+    }
+
+    fn read_at_impl(
+        &mut self,
+        id: &str,
+        buffer: &mut [u8],
+        offset: u64,
+        use_decoded_cache: bool,
+    ) -> Result<usize> {
         let size = self.size(id)?;
         if offset >= size || buffer.is_empty() {
             return Ok(0);
         }
         let length = (size - offset).min(buffer.len() as u64) as usize;
-        self.read_inner(id, &mut buffer[..length], offset, &mut Vec::new())?;
+        self.read_inner(
+            id,
+            &mut buffer[..length],
+            offset,
+            &mut Vec::new(),
+            use_decoded_cache,
+        )?;
         Ok(length)
     }
 
@@ -382,8 +405,9 @@ impl Container {
         }
         self.cache = None;
         self.index_cache = None;
+        self.decoded_cache = None;
         self.maps.clear();
-        self.read_inner(id, &mut [], 0, &mut Vec::new())?;
+        self.read_inner(id, &mut [], 0, &mut Vec::new(), false)?;
         let mut md5 = Md5::new();
         let mut sha1 = Sha1::new();
         let mut sha256 = Sha256::new();
@@ -490,7 +514,7 @@ impl Container {
         } else {
             let mut offset = 0;
             while offset < size {
-                let read = self.read_at(id, &mut buffer, offset)?;
+                let read = self.read_at_uncached(id, &mut buffer, offset)?;
                 if read == 0 {
                     return Err(malformed("truncated stream"));
                 }
@@ -660,9 +684,10 @@ impl Container {
         buffer: &mut [u8],
         offset: u64,
         visited: &mut Vec<String>,
+        use_decoded_cache: bool,
     ) -> Result<()> {
         enter(id, visited)?;
-        let result = self.read_inner_impl(id, buffer, offset, visited);
+        let result = self.read_inner_impl(id, buffer, offset, visited, use_decoded_cache);
         visited.pop();
         result
     }
@@ -672,6 +697,7 @@ impl Container {
         buffer: &mut [u8],
         offset: u64,
         visited: &mut Vec<String>,
+        use_decoded_cache: bool,
     ) -> Result<()> {
         if id == format!("{NS}Zero") {
             buffer.fill(0);
@@ -717,7 +743,7 @@ impl Container {
                     return Err(malformed("truncated contiguous image map"));
                 }
             }
-            return self.read_inner(&target, buffer, offset, visited);
+            return self.read_inner(&target, buffer, offset, visited, use_decoded_cache);
         }
         if self.has_type(id, "ZipSegment") || self.has_type(id, "zip_segment") {
             let path = self.path(id)?;
@@ -765,6 +791,7 @@ impl Container {
                     &mut buffer[done..done + length],
                     target_offset,
                     visited,
+                    use_decoded_cache,
                 )?;
                 done += length;
             }
@@ -784,6 +811,17 @@ impl Container {
         while done < buffer.len() {
             let position = offset + done as u64;
             let chunk = position / chunk_size;
+            if use_decoded_cache
+                && let Some((cached_id, cached_chunk, decoded)) = &self.decoded_cache
+                && cached_id == id
+                && *cached_chunk == chunk
+            {
+                let begin = (position % chunk_size) as usize;
+                let take = (decoded.len() - begin).min(buffer.len() - done);
+                buffer[done..done + take].copy_from_slice(&decoded[begin..begin + take]);
+                done += take;
+                continue;
+            }
             let name = format!("{path}/{:08}", chunk / per_bevy);
             if self
                 .index_cache
@@ -839,6 +877,9 @@ impl Container {
             let take = (decoded.len() - begin).min(buffer.len() - done);
             buffer[done..done + take].copy_from_slice(&decoded[begin..begin + take]);
             done += take;
+            if use_decoded_cache && decoded.len() <= DECODED_CACHE_BYTES {
+                self.decoded_cache = Some((id.to_owned(), chunk, decoded));
+            }
         }
         Ok(())
     }

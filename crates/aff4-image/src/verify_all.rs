@@ -546,9 +546,9 @@ impl Container {
                         .checked_sub(take as u64)
                         .ok_or_else(|| malformed("verification byte limit exceeded"))?;
                     if let Some(reader) = source.as_deref_mut() {
-                        reader.read_at(id, &mut buffer[..take], offset)?;
+                        reader.read_at_uncached(id, &mut buffer[..take], offset)?;
                     } else {
-                        self.read_at(id, &mut buffer[..take], offset)?;
+                        self.read_at_uncached(id, &mut buffer[..take], offset)?;
                     }
                     let start = (n * width) as usize;
                     let expected = hex(&recorded[start..start + width as usize]);

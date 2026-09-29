@@ -291,9 +291,21 @@ impl VolumeSet {
         buffer: &mut [u8],
         offset: u64,
     ) -> Result<usize> {
+        self.read_disk_at_impl(primary, mapped, id, buffer, offset, true)
+    }
+
+    fn read_disk_at_impl(
+        &mut self,
+        primary: usize,
+        mapped: bool,
+        id: &str,
+        buffer: &mut [u8],
+        offset: u64,
+        use_decoded_cache: bool,
+    ) -> Result<usize> {
         if !mapped {
             self.clear_previous_cache(primary);
-            return self.volumes[primary].read_at(id, buffer, offset);
+            return self.volumes[primary].read_at_impl(id, buffer, offset, use_decoded_cache);
         }
         let (map, size) = self.image_map_in(primary, id)?;
         if offset >= size {
@@ -327,6 +339,7 @@ impl VolumeSet {
                 &mut buffer[done..done + take],
                 start,
                 &mut Vec::new(),
+                use_decoded_cache,
             )?;
             done += take;
         }
@@ -338,6 +351,7 @@ impl VolumeSet {
             if let Some(previous) = self.cached_owner {
                 self.volumes[previous].cache = None;
                 self.volumes[previous].index_cache = None;
+                self.volumes[previous].decoded_cache = None;
                 self.volumes[previous].maps.clear();
             }
             self.cached_owner = Some(owner);
@@ -391,7 +405,7 @@ impl VolumeSet {
             if offset == size {
                 break;
             }
-            let read = self.read_at(id, &mut buffer, offset)?;
+            let read = self.read_disk_at_impl(0, true, id, &mut buffer, offset, false)?;
             if read == 0 {
                 return Err(malformed("truncated volume set"));
             }
