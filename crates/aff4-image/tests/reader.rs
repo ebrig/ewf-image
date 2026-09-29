@@ -202,6 +202,76 @@ fn direct_data_stream_alias_reuses_bytes_but_checks_its_own_reference_and_limit(
     ));
 }
 
+#[test]
+fn only_complete_identity_maps_reuse_their_targets_digest() {
+    let size = 2 * 1024 * 1024;
+    let mut bytes = vec![0; size];
+    bytes[size / 2..].fill(1);
+    let metadata = format!(
+        "@prefix a: <http://aff4.org/Schema#> . \
+         <aff4://volume/data> a a:Image, a:ZipSegment; a:size {size} . \
+         <aff4://volume/map> a a:Map; a:size {size} . \
+         <aff4://volume/disk> a a:Image, a:DiskImage, a:ContiguousImage; \
+         a:size {size}; a:dataStream <aff4://volume/map> .",
+    );
+    let record = |start: u64, length: u64, offset: u64| {
+        [
+            start.to_le_bytes().as_slice(),
+            length.to_le_bytes().as_slice(),
+            offset.to_le_bytes().as_slice(),
+            &0u32.to_le_bytes(),
+        ]
+        .concat()
+    };
+    for reordered in [false, true] {
+        let ranges = if reordered {
+            [
+                record(0, (size / 2) as u64, (size / 2) as u64),
+                record((size / 2) as u64, (size / 2) as u64, 0),
+            ]
+            .concat()
+        } else {
+            record(0, size as u64, 0)
+        };
+        let file = fixture(
+            &metadata,
+            &[
+                ("data", &bytes),
+                ("map/map", &ranges),
+                ("map/idx", b"aff4://volume/data\n"),
+            ],
+        );
+        let mut image = Container::open(file.path()).unwrap();
+        let mut intermediate = Vec::new();
+        let report = image
+            .verify_all(None, |id, done, total| {
+                if done > 0 && done < total {
+                    intermediate.push(id.to_owned());
+                }
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        let digest = |id: &str| {
+            &report
+                .resources
+                .iter()
+                .find(|resource| resource.resource == id)
+                .unwrap()
+                .verification
+                .as_ref()
+                .unwrap()
+                .sha256
+        };
+        let data = digest("aff4://volume/data");
+        let map = digest("aff4://volume/map");
+        let disk = digest("aff4://volume/disk");
+        assert_eq!(map, disk);
+        assert_eq!(data == map, !reordered);
+        assert_eq!(intermediate.len(), if reordered { 2 } else { 1 });
+        assert!(intermediate.contains(&"aff4://volume/data".to_owned()));
+    }
+}
+
 fn index(length: u32) -> Vec<u8> {
     let mut data = 0u64.to_le_bytes().to_vec();
     data.extend_from_slice(&length.to_le_bytes());

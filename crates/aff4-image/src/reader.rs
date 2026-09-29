@@ -525,9 +525,11 @@ impl Container {
         Ok(result)
     }
 
-    // A dataStream wrapper reads the same bytes as its terminal target. Map
-    // mappings are deliberately not followed: their range layout may alter bytes.
-    fn linear_backing(&self, id: &str) -> Result<String> {
+    // A dataStream wrapper reads the same bytes as its target. A Map is also
+    // equivalent only when one range covers the entire equally sized target
+    // from offset zero. Sparse, partial, and reordered maps retain their own
+    // traversal in full-container verification.
+    fn linear_backing(&mut self, id: &str) -> Result<String> {
         let mut target = id.to_owned();
         let mut visited = Vec::new();
         loop {
@@ -535,10 +537,24 @@ impl Container {
             if self.inline_data(&target)?.is_some() {
                 return Ok(target);
             }
-            match self.value(&target, "dataStream")? {
-                Some(next) => target = next,
-                None => return Ok(target),
+            if let Some(next) = self.value(&target, "dataStream")? {
+                target = next;
+                continue;
             }
+            if self.has_type(&target, "Map") {
+                self.load_map(&target)?;
+                let map = &self.maps[&target];
+                if let [range] = map.ranges.as_slice()
+                    && range.start == 0
+                    && range.offset == 0
+                    && range.end == self.size(&target)?
+                    && self.size(&range.target).ok() == Some(range.end)
+                {
+                    target = range.target.clone();
+                    continue;
+                }
+            }
+            return Ok(target);
         }
     }
 
