@@ -6,28 +6,19 @@ code written for 0.4.0. See
 
 ## Unreleased
 
+## 0.6.0 - 2026-09-29
+
 ### Command-line reliability and performance
 
 - Use the native maximum EWF2 segment capacity by default, reducing segment
   creation and discovery overhead. Bound CLI readers to 32 simultaneous EWF
   segment handles so highly split images leave descriptors available for
   conversion and publication resources.
-- Encode automatically bounded batches of EWF chunks in parallel during
-  healthy acquisition and sequential E01/Ex01 writing while preserving output
-  order, progress, cancellation, and resumable segment boundaries.
-- Encode and block-hash automatically bounded AFF4 chunk batches in parallel,
-  retaining deterministic bevy order and cooperative cancellation without a
-  writer-tuning option.
-- Fuse AFF4 linear and paired MD5/SHA256 block verification into one decoded
-  chunk pass while retaining the existing work budgets, progress callbacks,
-  mismatch reporting, and complete verification report.
 - Compare embedded EWF source hashes during physical conversion instead of
   decoding the source in a separate preliminary verification pass. Only the
   stored digest algorithms are added to the transfer hasher. Feed the source
   through bounded two-buffer read-ahead to overlap decoding with destination
   hashing and encoding.
-
-## 0.6.0 - 2026-09-29
 
 ### Reader and verification performance
 
@@ -41,6 +32,9 @@ code written for 0.4.0. See
 
 ### Acquisition and conversion performance
 
+- Encode automatically bounded batches of EWF chunks in parallel during
+  healthy acquisition and sequential E01/Ex01 writing while preserving output
+  order, progress, cancellation, and resumable segment boundaries.
 - Automatically coalesce healthy resumable-acquisition reads across complete
   image chunks, up to 256 KiB, while retaining sector-by-sector fallback after a
   read error and progress or cancellation between accepted chunks.
@@ -61,9 +55,18 @@ code written for 0.4.0. See
   members. Expose counters for the direct range reads.
 - Hash paired AFF4 block references in one chunk pass and reuse complete
   verification digests when converting or verifying selected physical disks.
+- Fuse AFF4 linear and paired MD5/SHA256 block verification into one decoded
+  chunk pass while retaining the existing work budgets, progress callbacks,
+  mismatch reporting, and complete verification report.
 - Stream identity-mapped ZIP resources and logical conversion input instead of
   retaining complete payloads in memory.
 - Record the actual `aff4-image` package version in newly written containers.
+
+### Acquisition and conversion performance
+
+- Encode and block-hash automatically bounded AFF4 chunk batches in parallel,
+  retaining deterministic bevy order and cooperative cancellation without a
+  writer-tuning option.
 
 ## 0.5.0 - 2026-09-28
 
