@@ -1,7 +1,7 @@
 //! AFF4 bounds, map semantics, and independent reference regressions.
 use aff4_image::{Container, Error, Limits};
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::ops::ControlFlow;
 use zip::{ZipWriter, write::SimpleFileOptions};
 
@@ -321,6 +321,20 @@ fn logical_zip_inline_imports_and_metadata() {
     let mut buffer = [0; 3];
     image.read_at("aff4://inline", &mut buffer, 0).unwrap();
     assert_eq!(&buffer, b"abc");
+    let mut sequential = Vec::new();
+    image
+        .sequential_reader("aff4://file")
+        .unwrap()
+        .read_to_end(&mut sequential)
+        .unwrap();
+    assert_eq!(sequential, b"abc");
+    sequential.clear();
+    image
+        .sequential_reader("aff4://inline")
+        .unwrap()
+        .read_to_end(&mut sequential)
+        .unwrap();
+    assert_eq!(sequential, b"abc");
     assert!(
         image.metadata()["aff4://file"]
             .iter()

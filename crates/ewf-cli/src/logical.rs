@@ -55,28 +55,8 @@ impl Origin {
             Self::Ewf(image) => Ok(Box::new(
                 image.single_file_cursor(entry.ewf.as_ref().unwrap()),
             )),
-            Self::Aff4(c, _) => Ok(Box::new(Aff4Reader {
-                container: c,
-                id: entry.key.clone(),
-                position: 0,
-            })),
+            Self::Aff4(c, _) => Ok(c.sequential_reader(&entry.key)?),
         }
-    }
-}
-
-struct Aff4Reader<'a> {
-    container: &'a mut aff4_image::Container,
-    id: String,
-    position: u64,
-}
-impl Read for Aff4Reader<'_> {
-    fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
-        let n = self
-            .container
-            .read_at(&self.id, b, self.position)
-            .map_err(io::Error::other)?;
-        self.position += n as u64;
-        Ok(n)
     }
 }
 struct Hashing<'a> {

@@ -163,6 +163,23 @@ pub struct Container {
     usage: archive::Usage,
 }
 
+struct PositionedReader<'a> {
+    container: &'a mut Container,
+    id: String,
+    position: u64,
+}
+
+impl Read for PositionedReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self
+            .container
+            .read_at(&self.id, buffer, self.position)
+            .map_err(std::io::Error::other)?;
+        self.position += count as u64;
+        Ok(count)
+    }
+}
+
 #[derive(Clone)]
 struct Range {
     start: u64,
@@ -352,6 +369,39 @@ impl Container {
     /// corrupt chunks, and unknown/unreadable symbolic data return errors.
     pub fn read_at(&mut self, id: &str, buffer: &mut [u8], offset: u64) -> Result<usize> {
         self.read_at_impl(id, buffer, offset, true)
+    }
+
+    /// Reads a resource sequentially. ZIP segments retain one decompressor
+    /// across reads; other resources use positioned reads through their maps.
+    /// The caller must read the declared size to detect a truncated stream.
+    pub fn sequential_reader(&mut self, id: &str) -> Result<Box<dyn Read + '_>> {
+        let size = self.size(id)?;
+        self.read_inner(id, &mut [], 0, &mut Vec::new(), false)?;
+        let mut target = id.to_owned();
+        let mut visited = Vec::new();
+        loop {
+            enter(&target, &mut visited)?;
+            if self.inline_data(&target)?.is_some() {
+                break;
+            }
+            match self.value(&target, "dataStream")? {
+                Some(next) => target = next,
+                None => break,
+            }
+        }
+        if self.has_type(&target, "ZipSegment") || self.has_type(&target, "zip_segment") {
+            let path = self.path(&target)?;
+            let file = self.archive.by_name(&path)?;
+            if file.size() != size {
+                return Err(malformed("ZIP segment size mismatch"));
+            }
+            return Ok(Box::new(file));
+        }
+        Ok(Box::new(PositionedReader {
+            container: self,
+            id: id.to_owned(),
+            position: 0,
+        }))
     }
 
     fn read_at_uncached(&mut self, id: &str, buffer: &mut [u8], offset: u64) -> Result<usize> {

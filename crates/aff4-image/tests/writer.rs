@@ -1,7 +1,7 @@
 //! Stream writer failure isolation and independent-consumer contracts.
 use aff4_image::{Compression, Container, Profile, WriteOptions, Writer};
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::ops::ControlFlow;
 
 fn proceed(_: u64, _: u64) -> ControlFlow<()> {
@@ -86,6 +86,13 @@ fn physical_codecs_bevies_padding_and_logical_zip_roundtrip() {
         let report = image.verify(&id, proceed).unwrap();
         assert_eq!(report.references_match, Some(true));
         assert_eq!(report.sha256, result.streams[0].sha256);
+        let mut sequential = Vec::new();
+        image
+            .sequential_reader(&id)
+            .unwrap()
+            .read_to_end(&mut sequential)
+            .unwrap();
+        assert_eq!(sequential, data);
         let mut bytes = vec![0; data.len()];
         image.read_at(&id, &mut bytes, 0).unwrap();
         assert_eq!(bytes, data);
@@ -119,6 +126,13 @@ fn physical_codecs_bevies_padding_and_logical_zip_roundtrip() {
             image.verify(&id, proceed).unwrap().references_match,
             Some(true)
         );
+        let mut sequential = Vec::new();
+        image
+            .sequential_reader(&id)
+            .unwrap()
+            .read_to_end(&mut sequential)
+            .unwrap();
+        assert_eq!(sequential, data);
         assert_eq!(
             image.verify(&empty, proceed).unwrap().references_match,
             Some(true)
