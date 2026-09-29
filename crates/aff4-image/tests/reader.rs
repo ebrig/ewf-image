@@ -614,6 +614,72 @@ fn full_verification_reports_block_corruption_and_gap_coverage() {
 }
 
 #[test]
+fn paired_block_hashes_report_each_algorithm_and_preserve_work_limit() {
+    use aff4_image::CheckOutcome;
+    use md5::{Digest, Md5};
+    use sha2::Sha256;
+    let first_md5 = Md5::digest(b"abcd");
+    let mut second_md5 = Md5::digest(b"ef").to_vec();
+    second_md5[0] ^= 1;
+    let first_sha256 = Sha256::digest(b"abcd");
+    let mut second_sha256 = Sha256::digest(b"ef").to_vec();
+    second_sha256[0] ^= 1;
+    let file = fixture(
+        &metadata(),
+        &[
+            ("data/00000000", b"abcd"),
+            ("data/00000001", b"ef\0\0"),
+            ("data/00000000.index", &index(4)),
+            ("data/00000001.index", &index(4)),
+            ("data/00000000.blockHash.md5", &first_md5),
+            ("data/00000001.blockHash.md5", &second_md5),
+            ("data/00000000.blockHash.sha256", &first_sha256),
+            ("data/00000001.blockHash.sha256", &second_sha256),
+        ],
+    );
+    let mut image = Container::open(file.path()).unwrap();
+    let report = image
+        .verify_all(None, |_, _, _| ControlFlow::Continue(()))
+        .unwrap();
+    let blocks: Vec<_> = report
+        .checks
+        .iter()
+        .filter(|check| check.reference_source.contains("blockHash"))
+        .collect();
+    assert_eq!(blocks.len(), 4);
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|check| check.algorithm.as_str())
+            .collect::<Vec<_>>(),
+        ["MD5", "MD5", "SHA256", "SHA256"]
+    );
+    assert_eq!(blocks[0].outcome, CheckOutcome::Match);
+    assert_eq!(blocks[1].outcome, CheckOutcome::Mismatch);
+    assert_eq!(blocks[2].outcome, CheckOutcome::Match);
+    assert_eq!(blocks[3].outcome, CheckOutcome::Mismatch);
+
+    let mut bounded = Container::open_with_limits(
+        file.path(),
+        Limits {
+            verification_bytes: 23,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    let report = bounded
+        .verify_all(None, |_, _, _| ControlFlow::Continue(()))
+        .unwrap();
+    assert!(report.checks.iter().any(|check| {
+        check.reference_source == "block hashes"
+            && check
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("verification byte limit"))
+    }));
+}
+
+#[test]
 #[ignore = "requires pinned Base-Linear-AllHashes canonical image"]
 fn canonical_full_integrity_tree_matches_independent_producer() {
     use aff4_image::CheckOutcome;
