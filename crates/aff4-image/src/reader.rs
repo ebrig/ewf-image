@@ -371,24 +371,14 @@ impl Container {
         self.read_at_impl(id, buffer, offset, true)
     }
 
-    /// Reads a resource sequentially. ZIP segments retain one decompressor
-    /// across reads; other resources use positioned reads through their maps.
+    /// Reads a resource sequentially. ZIP segments, including those behind
+    /// identity maps, retain one decompressor across reads; other resources
+    /// use positioned reads through their maps.
     /// The caller must read the declared size to detect a truncated stream.
     pub fn sequential_reader(&mut self, id: &str) -> Result<Box<dyn Read + '_>> {
         let size = self.size(id)?;
         self.read_inner(id, &mut [], 0, &mut Vec::new(), false)?;
-        let mut target = id.to_owned();
-        let mut visited = Vec::new();
-        loop {
-            enter(&target, &mut visited)?;
-            if self.inline_data(&target)?.is_some() {
-                break;
-            }
-            match self.value(&target, "dataStream")? {
-                Some(next) => target = next,
-                None => break,
-            }
-        }
+        let target = self.linear_backing(id)?;
         if self.has_type(&target, "ZipSegment") || self.has_type(&target, "zip_segment") {
             let path = self.path(&target)?;
             let file = self.archive.by_name(&path)?;
@@ -569,18 +559,8 @@ impl Container {
         if consume(&[], 0).is_break() {
             return Err(Error::Aborted);
         }
-        let mut target = id.to_owned();
-        let mut visited = Vec::new();
-        loop {
-            enter(&target, &mut visited)?;
-            if self.inline_data(&target)?.is_some() {
-                break;
-            }
-            match self.value(&target, "dataStream")? {
-                Some(next) => target = next,
-                None => break,
-            }
-        }
+        self.read_inner(id, &mut [], 0, &mut Vec::new(), false)?;
+        let target = self.linear_backing(id)?;
         let mut buffer = vec![0; 1024 * 1024];
         if self.has_type(&target, "ZipSegment") || self.has_type(&target, "zip_segment") {
             let path = self.path(&target)?;

@@ -242,6 +242,30 @@ fn only_complete_identity_maps_reuse_their_targets_digest() {
             ],
         );
         let mut image = Container::open(file.path()).unwrap();
+        let expected: Vec<u8> = if reordered {
+            bytes[size / 2..]
+                .iter()
+                .chain(&bytes[..size / 2])
+                .copied()
+                .collect()
+        } else {
+            bytes.clone()
+        };
+        for id in ["aff4://volume/map", "aff4://volume/disk"] {
+            let mut read = Vec::new();
+            image
+                .sequential_reader(id)
+                .unwrap()
+                .read_to_end(&mut read)
+                .unwrap();
+            assert_eq!(read, expected);
+            let mut copied = Vec::new();
+            let verified = image
+                .copy_verified(id, &mut copied, |_, _| ControlFlow::Continue(()))
+                .unwrap();
+            assert_eq!(verified.bytes_verified, size as u64);
+            assert_eq!(copied, expected);
+        }
         let mut intermediate = Vec::new();
         let report = image
             .verify_all(None, |id, done, total| {
