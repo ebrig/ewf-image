@@ -1555,6 +1555,8 @@ fn cli_repeated_pause_inspect_validate_resume_preserves_bytes() {
             "acquire",
             "source.raw",
             "case.E01",
+            "--compression",
+            "zlib-fast",
             "--sectors-per-chunk",
             "2",
             "--chunks-per-segment",
