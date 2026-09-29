@@ -233,7 +233,6 @@ guide](docs/cli.md) for advanced acquisition and recovery options.
 - [Compatibility](docs/compatibility.md) and [limitations](docs/limitations.md)
 - [Architecture](docs/architecture.md)
 - [Testing](docs/testing.md)
-- [Acquisition performance measurements](docs/performance.md)
 - [Release process](RELEASING.md)
 - Upgrading: [0.5 guide](docs/migrating-to-0.5.md),
   [0.4 release notes](CHANGELOG.md#040---2026-09-12),
