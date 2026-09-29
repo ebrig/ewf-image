@@ -23,7 +23,9 @@ code written for 0.4.0. See
   mismatch reporting, and complete verification report.
 - Compare embedded EWF source hashes during physical conversion instead of
   decoding the source in a separate preliminary verification pass. Only the
-  stored digest algorithms are added to the transfer hasher.
+  stored digest algorithms are added to the transfer hasher. Feed the source
+  through bounded two-buffer read-ahead to overlap decoding with destination
+  hashing and encoding.
 
 ## 0.6.0 - 2026-09-29
 

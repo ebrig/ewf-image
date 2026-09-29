@@ -184,7 +184,7 @@ fn read_source(
                 vec![]
             };
             Ok(Source {
-                reader: Box::new(image.cursor()),
+                reader: Box::new(crate::prefetch::Reader::new(image.cursor())?),
                 physical: None,
                 size: image.media_size(),
                 sector: sector(Some(options.bytes_per_sector), supplied_sector)?,

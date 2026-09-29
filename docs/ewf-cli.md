@@ -133,7 +133,8 @@ verification step.
 Physical EWF conversion checks embedded source hashes as bytes pass to the
 destination, avoiding a separate source decode. The transfer automatically
 computes only the embedded digest algorithms that require comparison, in
-addition to the SHA256 used to compare the destination.
+addition to the SHA256 used to compare the destination. A bounded two-buffer
+read-ahead overlaps source decoding with destination hashing and encoding.
 
 The CLI has no `--memory-limit` or resource-budget options. The CLI uses internal
 streaming buffers and sets AFF4 metadata and verification limits from platform
