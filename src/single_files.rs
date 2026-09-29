@@ -1317,6 +1317,11 @@ fn parse_hex_byte_stream(value: &str, label: &str) -> Result<Vec<u8>> {
             "EWF2 single files {label} has odd hexadecimal size"
         )));
     }
+    if !hex.is_ascii() {
+        return Err(EwfError::Malformed(format!(
+            "invalid EWF2 single files {label} hexadecimal value"
+        )));
+    }
 
     (0..hex.len())
         .step_by(2)
@@ -1432,5 +1437,14 @@ mod entry_type_tests {
     fn unbacked_catalog_counts_do_not_reserve_memory() {
         assert!(parse_binary_extents("ffffffffffffffff").is_err());
         assert!(parse_binary_extents("4000000 0 1").is_err());
+    }
+
+    #[test]
+    fn extended_attribute_hex_rejects_multibyte_characters() {
+        assert!(parse_hex_byte_stream("䀊a", "extended attributes").is_err());
+        assert_eq!(
+            parse_hex_byte_stream("ab cd", "extended attributes").unwrap(),
+            vec![0xab, 0xcd]
+        );
     }
 }

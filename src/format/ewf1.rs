@@ -225,7 +225,7 @@ impl Volume {
             sector_count,
             set_identifier,
             media_type: has_full_volume_profile.then_some(buf[0]),
-            media_flags: has_full_volume_profile.then_some(buf[36]),
+            media_flags: has_full_volume_profile.then(|| buf[36]),
             compression_level: buf.get(52).copied(),
             error_granularity,
             smart: smart_volume,
@@ -387,6 +387,12 @@ mod tests {
         assert_eq!(volume.bytes_per_sector, 512);
         assert_eq!(volume.sector_count, 64_000);
         assert_eq!(volume.logical_size().unwrap(), 32_768_000);
+    }
+
+    #[test]
+    fn short_volume_profile_does_not_read_optional_flags() {
+        let volume = Volume::parse(&[0; 28]).unwrap();
+        assert_eq!(volume.media_flags, None);
     }
 
     #[test]
