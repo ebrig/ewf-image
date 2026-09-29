@@ -1,10 +1,10 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Mutex,
+    Arc, Condvar, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Instant;
@@ -72,7 +72,7 @@ pub trait SegmentReader: Read + Seek + Send {
 
 impl<T> SegmentReader for T where T: Read + Seek + Send {}
 
-type SegmentReaderHandle = Box<dyn SegmentReader>;
+type SuppliedSegmentReader = Box<dyn SegmentReader>;
 
 #[derive(Debug, Clone)]
 /// Opened EWF image and logical media reader.
@@ -88,9 +88,11 @@ struct ImageInner {
     encryption_info: Option<EncryptionInfo>,
     encryption_contexts: Vec<Option<EncryptionContext>>,
     segments: Mutex<SegmentFilePool>,
+    segment_handle_available: Condvar,
     positioned_sources: Option<Vec<SegmentSource>>,
     index: LazyChunkIndex,
     chunk_cache: Mutex<LruCache<u64, Arc<Vec<u8>>>>,
+    chunk_in_flight: Mutex<HashMap<u64, Arc<ChunkFlight>>>,
     chunk_cache_capacity_bytes: u64,
     table_page_cache: Mutex<TablePageCache>,
     statistics: Arc<ReaderStatisticsCollector>,
@@ -100,13 +102,34 @@ struct ImageInner {
 }
 
 struct SegmentFilePool {
-    files: Vec<Option<SegmentReaderHandle>>,
+    files: Vec<Option<SegmentFileHandle>>,
     lengths: Vec<Option<u64>>,
     ever_opened: Vec<bool>,
     open_order: VecDeque<usize>,
     maximum_open_handles: Option<usize>,
     mode: SegmentFilePoolMode,
     statistics: Arc<ReaderStatisticsCollector>,
+}
+
+enum SegmentFileHandle {
+    Path(PathSegmentReader),
+    Supplied(SuppliedSegmentReader),
+}
+
+struct PathSegmentReader {
+    file: Arc<File>,
+    position: u64,
+}
+
+struct PositionedSegmentLease<'a> {
+    file: Option<Arc<File>>,
+    available: &'a Condvar,
+}
+
+#[derive(Debug)]
+struct ChunkFlight {
+    complete: Mutex<bool>,
+    ready: Condvar,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +160,66 @@ impl std::fmt::Debug for SegmentFilePool {
             .field("mode", &self.mode)
             .field("statistics_enabled", &self.statistics.enabled())
             .finish()
+    }
+}
+
+impl SegmentFileHandle {
+    fn as_reader_mut(&mut self) -> &mut dyn SegmentReader {
+        match self {
+            Self::Path(reader) => reader,
+            Self::Supplied(reader) => reader.as_mut(),
+        }
+    }
+
+    fn path_file(&self) -> Option<&Arc<File>> {
+        match self {
+            Self::Path(reader) => Some(&reader.file),
+            Self::Supplied(_) => None,
+        }
+    }
+
+    fn idle_path_handle(&self) -> bool {
+        self.path_file()
+            .is_some_and(|file| Arc::strong_count(file) == 1)
+    }
+}
+
+impl Read for PathSegmentReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let count = read_file_at(&self.file, buffer, self.position)?;
+        self.position = self.position.saturating_add(count as u64);
+        Ok(count)
+    }
+}
+
+impl Seek for PathSegmentReader {
+    fn seek(&mut self, seek: SeekFrom) -> io::Result<u64> {
+        let position = match seek {
+            SeekFrom::Start(offset) => Some(offset),
+            SeekFrom::Current(offset) => self.position.checked_add_signed(offset),
+            SeekFrom::End(offset) => self.file.metadata()?.len().checked_add_signed(offset),
+        }
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "segment seek out of range"))?;
+        self.position = position;
+        Ok(position)
+    }
+}
+
+impl Drop for PositionedSegmentLease<'_> {
+    fn drop(&mut self) {
+        // Release the active lease before waking a waiter. Otherwise the waiter
+        // can observe this handle as busy and go back to sleep after the only
+        // notification associated with the release.
+        self.file.take();
+        self.available.notify_one();
+    }
+}
+
+impl PositionedSegmentLease<'_> {
+    fn file(&self) -> &File {
+        self.file
+            .as_deref()
+            .expect("positioned segment lease retains its file until drop")
     }
 }
 
@@ -318,7 +401,7 @@ impl Image {
         let mut readers = Vec::new();
         for (name, reader) in segments {
             paths.push(name.into());
-            readers.push(Box::new(reader) as SegmentReaderHandle);
+            readers.push(Box::new(reader) as SuppliedSegmentReader);
         }
         Self::open_segment_readers(paths, readers, options, None)
     }
@@ -347,7 +430,7 @@ impl Image {
         let mut readers = Vec::new();
         for (name, reader) in segments {
             paths.push(name.into());
-            readers.push(Box::new(reader) as SegmentReaderHandle);
+            readers.push(Box::new(reader) as SuppliedSegmentReader);
         }
         Self::open_segment_readers(paths, readers, options, Some(password))
     }
@@ -394,7 +477,7 @@ impl Image {
 
     fn open_segment_readers(
         paths: Vec<PathBuf>,
-        readers: Vec<SegmentReaderHandle>,
+        readers: Vec<SuppliedSegmentReader>,
         options: OpenOptions,
         password: Option<&EwfPassword>,
     ) -> Result<Self> {
@@ -458,7 +541,7 @@ impl Image {
         ));
         let readers = sources
             .iter()
-            .map(|source| Box::new(source.cursor()) as SegmentReaderHandle)
+            .map(|source| Box::new(source.cursor()) as SuppliedSegmentReader)
             .collect();
         let segments =
             SegmentFilePool::new_readers(readers, options.maximum_open_handles(), statistics)?;
@@ -510,7 +593,7 @@ impl Image {
             statistics.record_segment_parse();
             let (parsed, encryption_context, observed_encryption_info) = {
                 let file = segments.file_mut(segment_index, path)?;
-                let encryption_metadata = ewf1::read_xways_encryption(file.as_mut())?;
+                let encryption_metadata = ewf1::read_xways_encryption(file.as_reader_mut())?;
                 let observed_encryption_info =
                     encryption_metadata.as_ref().map(EncryptionInfo::from_xways);
                 let encryption_context = encryption_metadata
@@ -521,7 +604,7 @@ impl Image {
                     })
                     .transpose()?;
                 let parsed = parse_segment(
-                    file.as_mut(),
+                    file.as_reader_mut(),
                     &paths[0],
                     segment_index,
                     Ewf1SegmentContext {
@@ -752,9 +835,11 @@ impl Image {
                 encryption_info,
                 encryption_contexts,
                 segments: Mutex::new(segments),
+                segment_handle_available: Condvar::new(),
                 positioned_sources,
                 index,
                 chunk_cache: Mutex::new(LruCache::new(cache_size)),
+                chunk_in_flight: Mutex::new(HashMap::new()),
                 chunk_cache_capacity_bytes,
                 table_page_cache: Mutex::new(TablePageCache::new(
                     options.table_entry_cache_size_bytes(),
@@ -910,7 +995,12 @@ impl Image {
         let mut size = 0_u64;
         for (segment_index, path) in paths.iter().enumerate() {
             size = size
-                .checked_add(segments.file_mut(segment_index, path)?.segment_len()?)
+                .checked_add(
+                    segments
+                        .file_mut(segment_index, path)?
+                        .as_reader_mut()
+                        .segment_len()?,
+                )
                 .ok_or_else(|| EwfError::Malformed("segment set size overflow".into()))?;
         }
         Ok(size)
@@ -1655,29 +1745,83 @@ impl Image {
 
     fn read_chunk(&self, chunk_id: u64) -> Result<Arc<Vec<u8>>> {
         self.ensure_not_aborted()?;
-        let cached = self
-            .inner
-            .chunk_cache
-            .lock()
-            .map_err(|_| EwfError::Malformed("chunk cache lock poisoned".into()))?
-            .get(&chunk_id)
-            .cloned();
-        self.inner
-            .statistics
-            .record_chunk_cache_access(cached.is_some());
-        if let Some(cached) = cached {
-            return Ok(cached);
-        }
+        let mut first_cache_check = true;
+        loop {
+            let cached = self
+                .inner
+                .chunk_cache
+                .lock()
+                .map_err(|_| EwfError::Malformed("chunk cache lock poisoned".into()))?
+                .get(&chunk_id)
+                .cloned();
+            if first_cache_check {
+                self.inner
+                    .statistics
+                    .record_chunk_cache_access(cached.is_some());
+                first_cache_check = false;
+            }
+            if let Some(cached) = cached {
+                return Ok(cached);
+            }
 
-        let chunk = self.lookup_chunk(chunk_id)?;
-        let (decoded, _) = self.decode_chunk_with_policy(chunk_id, chunk)?;
-        let decoded = Arc::new(decoded);
-        self.inner
-            .chunk_cache
-            .lock()
-            .map_err(|_| EwfError::Malformed("chunk cache lock poisoned".into()))?
-            .put(chunk_id, Arc::clone(&decoded));
-        Ok(decoded)
+            let (flight, decode_here) = {
+                let mut in_flight = self
+                    .inner
+                    .chunk_in_flight
+                    .lock()
+                    .map_err(|_| EwfError::Malformed("chunk flight lock poisoned".into()))?;
+                if let Some(flight) = in_flight.get(&chunk_id) {
+                    (Arc::clone(flight), false)
+                } else {
+                    let flight = Arc::new(ChunkFlight {
+                        complete: Mutex::new(false),
+                        ready: Condvar::new(),
+                    });
+                    in_flight.insert(chunk_id, Arc::clone(&flight));
+                    (flight, true)
+                }
+            };
+
+            if !decode_here {
+                self.inner.statistics.record_chunk_cache_coalesced();
+                let mut complete = flight
+                    .complete
+                    .lock()
+                    .map_err(|_| EwfError::Malformed("chunk flight lock poisoned".into()))?;
+                while !*complete {
+                    complete = flight
+                        .ready
+                        .wait(complete)
+                        .map_err(|_| EwfError::Malformed("chunk flight lock poisoned".into()))?;
+                }
+                continue;
+            }
+
+            let decoded = (|| {
+                let chunk = self.lookup_chunk(chunk_id)?;
+                let (decoded, _) = self.decode_chunk_with_policy(chunk_id, chunk)?;
+                let decoded = Arc::new(decoded);
+                self.inner
+                    .chunk_cache
+                    .lock()
+                    .map_err(|_| EwfError::Malformed("chunk cache lock poisoned".into()))?
+                    .put(chunk_id, Arc::clone(&decoded));
+                Ok(decoded)
+            })();
+            let mut complete = flight
+                .complete
+                .lock()
+                .map_err(|_| EwfError::Malformed("chunk flight lock poisoned".into()))?;
+            *complete = true;
+            flight.ready.notify_all();
+            drop(complete);
+            self.inner
+                .chunk_in_flight
+                .lock()
+                .map_err(|_| EwfError::Malformed("chunk flight lock poisoned".into()))?
+                .remove(&chunk_id);
+            return decoded;
+        }
     }
 
     fn lookup_chunk(&self, chunk_id: u64) -> Result<Chunk> {
@@ -1934,6 +2078,51 @@ impl Image {
             .segment_paths
             .get(segment_index)
             .ok_or_else(|| EwfError::Malformed("missing segment source".into()))?;
+
+        #[cfg(any(unix, windows))]
+        if !self.has_supplied_segment_readers()? {
+            let wait_started = Instant::now();
+            let (file, length) = {
+                let mut segments =
+                    self.inner.segments.lock().map_err(|_| {
+                        EwfError::Malformed("segment file pool lock poisoned".into())
+                    })?;
+                loop {
+                    if let Some(file) = segments.acquire_path_file(segment_index, path)? {
+                        let length = file.metadata()?.len();
+                        break (file, length);
+                    }
+                    segments =
+                        self.inner
+                            .segment_handle_available
+                            .wait(segments)
+                            .map_err(|_| {
+                                EwfError::Malformed("segment file pool lock poisoned".into())
+                            })?;
+                }
+            };
+            self.inner
+                .statistics
+                .record_segment_pool_wait(wait_started.elapsed());
+            let lease = PositionedSegmentLease {
+                file: Some(file),
+                available: &self.inner.segment_handle_available,
+            };
+            let size = bounded_size(length)?;
+            let mut bytes = vec![
+                0;
+                usize::try_from(size).map_err(|_| EwfError::Malformed(
+                    "segment read size exceeds usize".into()
+                ))?
+            ];
+            let read_started = Instant::now();
+            read_file_exact_at(lease.file(), &mut bytes, offset)?;
+            self.inner
+                .statistics
+                .record_segment_read(bytes.len(), read_started.elapsed());
+            return Ok(bytes);
+        }
+
         let mut segments = self
             .inner
             .segments
@@ -1941,7 +2130,7 @@ impl Image {
             .map_err(|_| EwfError::Malformed("segment file pool lock poisoned".into()))?;
         let size = bounded_size(segments.segment_len(segment_index, path)?)?;
         read_exact_at(
-            segments.file_mut(segment_index, path)?.as_mut(),
+            segments.file_mut(segment_index, path)?.as_reader_mut(),
             offset,
             size,
         )
@@ -2085,7 +2274,7 @@ impl SegmentFilePool {
     }
 
     fn new_readers(
-        readers: Vec<SegmentReaderHandle>,
+        readers: Vec<SuppliedSegmentReader>,
         maximum_open_handles: Option<usize>,
         statistics: Arc<ReaderStatisticsCollector>,
     ) -> Result<Self> {
@@ -2099,7 +2288,10 @@ impl SegmentFilePool {
 
         statistics.record_segment_handle_open(segment_count);
         Ok(Self {
-            files: readers.into_iter().map(Some).collect(),
+            files: readers
+                .into_iter()
+                .map(|reader| Some(SegmentFileHandle::Supplied(reader)))
+                .collect(),
             lengths: vec![None; segment_count],
             ever_opened: vec![true; segment_count],
             open_order: (0..segment_count).collect(),
@@ -2122,7 +2314,10 @@ impl SegmentFilePool {
             return Ok(*length);
         }
 
-        let length = self.file_mut(segment_index, path)?.segment_len()?;
+        let length = self
+            .file_mut(segment_index, path)?
+            .as_reader_mut()
+            .segment_len()?;
         let cached = self
             .lengths
             .get_mut(segment_index)
@@ -2161,13 +2356,17 @@ impl SegmentFilePool {
                 ));
             }
             while self.open_count() >= maximum_open_handles {
-                self.close_least_recently_used()?;
+                if !self.close_least_recently_used()? {
+                    return Err(EwfError::Unsupported(
+                        "maximum open handles are all serving active reads".into(),
+                    ));
+                }
             }
         }
         Ok(())
     }
 
-    fn file_mut(&mut self, segment_index: usize, path: &Path) -> Result<&mut SegmentReaderHandle> {
+    fn file_mut(&mut self, segment_index: usize, path: &Path) -> Result<&mut SegmentFileHandle> {
         let slot = self
             .files
             .get(segment_index)
@@ -2180,7 +2379,10 @@ impl SegmentFilePool {
                 .ok_or_else(|| EwfError::Malformed("segment index out of range".into()))?;
             let file = match self.mode {
                 SegmentFilePoolMode::ReopenFromPath => {
-                    Some(Box::new(File::open(path)?) as SegmentReaderHandle)
+                    Some(SegmentFileHandle::Path(PathSegmentReader {
+                        file: Arc::new(File::open(path)?),
+                        position: 0,
+                    }))
                 }
                 SegmentFilePoolMode::SuppliedReaders => None,
             }
@@ -2203,6 +2405,52 @@ impl SegmentFilePool {
         self.files[segment_index]
             .as_mut()
             .ok_or_else(|| EwfError::Malformed("segment file was not opened".into()))
+    }
+
+    fn acquire_path_file(
+        &mut self,
+        segment_index: usize,
+        path: &Path,
+    ) -> Result<Option<Arc<File>>> {
+        if self.mode != SegmentFilePoolMode::ReopenFromPath {
+            return Err(EwfError::Malformed(
+                "positioned file requested for a supplied segment reader".into(),
+            ));
+        }
+        let slot = self
+            .files
+            .get(segment_index)
+            .ok_or_else(|| EwfError::Malformed("segment index out of range".into()))?;
+        if slot.is_none() {
+            if let Some(maximum_open_handles) = self.maximum_open_handles {
+                while self.open_count() >= maximum_open_handles {
+                    if !self.close_least_recently_used()? {
+                        return Ok(None);
+                    }
+                }
+            }
+            let was_opened = *self
+                .ever_opened
+                .get(segment_index)
+                .ok_or_else(|| EwfError::Malformed("segment index out of range".into()))?;
+            self.files[segment_index] = Some(SegmentFileHandle::Path(PathSegmentReader {
+                file: Arc::new(File::open(path)?),
+                position: 0,
+            }));
+            self.ever_opened[segment_index] = true;
+            if was_opened {
+                self.statistics.record_segment_handle_reopen();
+            } else {
+                self.statistics.record_segment_handle_open(1);
+            }
+        }
+        self.mark_used(segment_index);
+        self.files[segment_index]
+            .as_ref()
+            .and_then(SegmentFileHandle::path_file)
+            .map(Arc::clone)
+            .map(Some)
+            .ok_or_else(|| EwfError::Malformed("path segment file was not opened".into()))
     }
 
     fn can_close_handles(&self) -> bool {
@@ -2232,23 +2480,37 @@ impl SegmentFilePool {
                 ));
             }
             while self.open_count() > maximum_open_handles {
-                self.close_least_recently_used()?;
+                if !self.close_least_recently_used()? {
+                    return Err(EwfError::Unsupported(
+                        "maximum open handles are all serving active reads".into(),
+                    ));
+                }
             }
         }
         Ok(())
     }
 
-    fn close_least_recently_used(&mut self) -> Result<()> {
-        while let Some(segment_index) = self.open_order.pop_front() {
-            if let Some(slot) = self.files.get_mut(segment_index)
-                && slot.take().is_some()
+    fn close_least_recently_used(&mut self) -> Result<bool> {
+        let candidates = self.open_order.len();
+        for _ in 0..candidates {
+            let Some(segment_index) = self.open_order.pop_front() else {
+                break;
+            };
+            let Some(slot) = self.files.get_mut(segment_index) else {
+                return Err(EwfError::Malformed("segment index out of range".into()));
+            };
+            if slot
+                .as_ref()
+                .is_some_and(SegmentFileHandle::idle_path_handle)
             {
-                return Ok(());
+                slot.take();
+                return Ok(true);
+            }
+            if slot.is_some() {
+                self.open_order.push_back(segment_index);
             }
         }
-        Err(EwfError::Malformed(
-            "segment file pool has no open handle to close".into(),
-        ))
+        Ok(false)
     }
 }
 
@@ -3964,6 +4226,44 @@ fn read_exact_at(file: &mut dyn SegmentReader, offset: u64, size: u64) -> Result
     Ok(data)
 }
 
+#[cfg(unix)]
+fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(file, buffer, offset)
+}
+
+#[cfg(windows)]
+fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    std::os::windows::fs::FileExt::seek_read(file, buffer, offset)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    let mut file = file.try_clone()?;
+    file.seek(SeekFrom::Start(offset))?;
+    file.read(buffer)
+}
+
+fn read_file_exact_at(file: &File, buffer: &mut [u8], mut offset: u64) -> io::Result<()> {
+    let mut remaining = buffer;
+    while !remaining.is_empty() {
+        match read_file_at(file, remaining, offset) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "segment file ended before requested range",
+                ));
+            }
+            Ok(count) => {
+                offset = offset.saturating_add(count as u64);
+                remaining = &mut remaining[count..];
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 fn table_entry_offset(range: &TableRange, local_index: u64, entry_size: u64) -> Result<u64> {
     range
         .entries_offset
@@ -4812,6 +5112,24 @@ mod tests {
         assert_eq!(pool.segment_len(0, path).unwrap(), 128);
         assert_eq!(pool.segment_len(0, path).unwrap(), 128);
         assert_eq!(seek_from_end_calls.load(AtomicOrdering::Relaxed), 1);
+    }
+
+    #[test]
+    fn active_positioned_reads_preserve_the_handle_limit() {
+        let first = tempfile::NamedTempFile::new().unwrap();
+        let second = tempfile::NamedTempFile::new().unwrap();
+        let mut pool =
+            SegmentFilePool::new_path(2, Some(1), Arc::new(ReaderStatisticsCollector::new(false)))
+                .unwrap();
+
+        let active = pool.acquire_path_file(0, first.path()).unwrap().unwrap();
+        assert_eq!(pool.open_count(), 1);
+        assert!(pool.acquire_path_file(1, second.path()).unwrap().is_none());
+        assert_eq!(pool.open_count(), 1);
+
+        drop(active);
+        assert!(pool.acquire_path_file(1, second.path()).unwrap().is_some());
+        assert_eq!(pool.open_count(), 1);
     }
 
     #[test]

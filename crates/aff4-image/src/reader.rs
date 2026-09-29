@@ -3,8 +3,10 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::ops::ControlFlow;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use lru::LruCache;
 use md5::{Digest, Md5};
 use oxrdf::{NamedOrBlankNode, Term};
 use oxttl::TurtleParser;
@@ -43,7 +45,238 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const LOGICAL_NS: &str = "https://aff4.org/Schema/2022/#";
 const LEGACY_LOGICAL_NS: &str = "http://aff4.org/Schema/2022/#";
 const BASE64: &str = "http://www.w3.org/2001/XMLSchema#base64Binary";
-const DECODED_CACHE_BYTES: usize = 4 * 1024 * 1024;
+const DECODED_CACHE_CAPACITY_BYTES: usize = 128 * 1024 * 1024;
+const LOGICAL_READ_AHEAD_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+/// Cumulative performance counters for one shared AFF4 payload cache.
+///
+/// Physical readers for disks in the same discovered volume set share these
+/// counters and the cache itself.
+pub struct ReaderStatistics {
+    decoded_cache_hits: u64,
+    decoded_cache_misses: u64,
+    read_ahead_cache_hits: u64,
+    read_ahead_cache_misses: u64,
+    read_ahead_prefetches: u64,
+    decoded_cache_evictions: u64,
+    decoded_bytes: u64,
+    decode_nanos: u64,
+}
+
+impl ReaderStatistics {
+    /// Returns decoded chunk-cache hits.
+    pub fn decoded_cache_hits(&self) -> u64 {
+        self.decoded_cache_hits
+    }
+
+    /// Returns decoded chunk-cache misses.
+    pub fn decoded_cache_misses(&self) -> u64 {
+        self.decoded_cache_misses
+    }
+
+    /// Returns logical read-ahead page-cache hits.
+    pub fn read_ahead_cache_hits(&self) -> u64 {
+        self.read_ahead_cache_hits
+    }
+
+    /// Returns logical read-ahead page-cache misses.
+    pub fn read_ahead_cache_misses(&self) -> u64 {
+        self.read_ahead_cache_misses
+    }
+
+    /// Returns logical pages fetched automatically after small positioned reads.
+    pub fn read_ahead_prefetches(&self) -> u64 {
+        self.read_ahead_prefetches
+    }
+
+    /// Returns decoded pages or chunks evicted to retain the automatic memory bound.
+    pub fn decoded_cache_evictions(&self) -> u64 {
+        self.decoded_cache_evictions
+    }
+
+    /// Returns logical chunk bytes decoded after cache misses.
+    pub fn decoded_bytes(&self) -> u64 {
+        self.decoded_bytes
+    }
+
+    /// Returns nanoseconds spent decoding chunks after cache misses.
+    pub fn decode_nanos(&self) -> u64 {
+        self.decode_nanos
+    }
+
+    /// Returns a field-wise saturating delta from an earlier snapshot.
+    #[must_use]
+    pub fn saturating_delta(self, earlier: Self) -> Self {
+        Self {
+            decoded_cache_hits: self
+                .decoded_cache_hits
+                .saturating_sub(earlier.decoded_cache_hits),
+            decoded_cache_misses: self
+                .decoded_cache_misses
+                .saturating_sub(earlier.decoded_cache_misses),
+            read_ahead_cache_hits: self
+                .read_ahead_cache_hits
+                .saturating_sub(earlier.read_ahead_cache_hits),
+            read_ahead_cache_misses: self
+                .read_ahead_cache_misses
+                .saturating_sub(earlier.read_ahead_cache_misses),
+            read_ahead_prefetches: self
+                .read_ahead_prefetches
+                .saturating_sub(earlier.read_ahead_prefetches),
+            decoded_cache_evictions: self
+                .decoded_cache_evictions
+                .saturating_sub(earlier.decoded_cache_evictions),
+            decoded_bytes: self.decoded_bytes.saturating_sub(earlier.decoded_bytes),
+            decode_nanos: self.decode_nanos.saturating_sub(earlier.decode_nanos),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+/// Configured and observed payload bytes for the automatic AFF4 reader cache.
+pub struct ReaderCacheInfo {
+    capacity_bytes: u64,
+    current_bytes: u64,
+    peak_bytes: u64,
+    entries: u64,
+}
+
+impl ReaderCacheInfo {
+    /// Returns the automatic decoded payload-cache byte ceiling.
+    pub fn capacity_bytes(&self) -> u64 {
+        self.capacity_bytes
+    }
+
+    /// Returns currently retained decoded page and chunk bytes.
+    pub fn current_bytes(&self) -> u64 {
+        self.current_bytes
+    }
+
+    /// Returns peak retained decoded page and chunk bytes.
+    pub fn peak_bytes(&self) -> u64 {
+        self.peak_bytes
+    }
+
+    /// Returns the number of retained decoded pages and chunks.
+    pub fn entries(&self) -> u64 {
+        self.entries
+    }
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+enum DecodedCacheKey {
+    Chunk {
+        volume: String,
+        resource: String,
+        chunk: u64,
+    },
+    DiskPage {
+        volume: String,
+        resource: String,
+        offset: u64,
+    },
+}
+
+struct DecodedChunkCache {
+    entries: LruCache<DecodedCacheKey, Arc<Vec<u8>>>,
+    capacity_bytes: usize,
+    current_bytes: usize,
+    peak_bytes: usize,
+    statistics: ReaderStatistics,
+}
+
+impl DecodedChunkCache {
+    fn new() -> Self {
+        Self::with_capacity(DECODED_CACHE_CAPACITY_BYTES)
+    }
+
+    fn with_capacity(capacity_bytes: usize) -> Self {
+        Self {
+            entries: LruCache::unbounded(),
+            capacity_bytes,
+            current_bytes: 0,
+            peak_bytes: 0,
+            statistics: ReaderStatistics::default(),
+        }
+    }
+
+    fn get_chunk(&mut self, key: &DecodedCacheKey) -> Option<Arc<Vec<u8>>> {
+        let result = self.entries.get(key).cloned();
+        if result.is_some() {
+            self.statistics.decoded_cache_hits =
+                self.statistics.decoded_cache_hits.saturating_add(1);
+        } else {
+            self.statistics.decoded_cache_misses =
+                self.statistics.decoded_cache_misses.saturating_add(1);
+        }
+        result
+    }
+
+    fn get_page(&mut self, key: &DecodedCacheKey) -> Option<Arc<Vec<u8>>> {
+        let result = self.entries.get(key).cloned();
+        if result.is_some() {
+            self.statistics.read_ahead_cache_hits =
+                self.statistics.read_ahead_cache_hits.saturating_add(1);
+        } else {
+            self.statistics.read_ahead_cache_misses =
+                self.statistics.read_ahead_cache_misses.saturating_add(1);
+        }
+        result
+    }
+
+    fn insert(&mut self, key: DecodedCacheKey, decoded: Arc<Vec<u8>>) {
+        let bytes = decoded.len();
+        if bytes > self.capacity_bytes {
+            return;
+        }
+        if let Some(previous) = self.entries.put(key, decoded) {
+            self.current_bytes = self.current_bytes.saturating_sub(previous.len());
+        }
+        self.current_bytes = self.current_bytes.saturating_add(bytes);
+        while self.current_bytes > self.capacity_bytes {
+            let Some((_, evicted)) = self.entries.pop_lru() else {
+                break;
+            };
+            self.current_bytes = self.current_bytes.saturating_sub(evicted.len());
+            self.statistics.decoded_cache_evictions =
+                self.statistics.decoded_cache_evictions.saturating_add(1);
+        }
+        self.peak_bytes = self.peak_bytes.max(self.current_bytes);
+    }
+
+    fn record_decode(&mut self, bytes: usize, elapsed: Duration) {
+        self.statistics.decoded_bytes = self
+            .statistics
+            .decoded_bytes
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+        self.statistics.decode_nanos = self
+            .statistics
+            .decode_nanos
+            .saturating_add(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX));
+    }
+
+    fn record_read_ahead_prefetch(&mut self) {
+        self.statistics.read_ahead_prefetches =
+            self.statistics.read_ahead_prefetches.saturating_add(1);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.current_bytes = 0;
+    }
+
+    fn info(&self) -> ReaderCacheInfo {
+        ReaderCacheInfo {
+            capacity_bytes: self.capacity_bytes as u64,
+            current_bytes: self.current_bytes as u64,
+            peak_bytes: self.peak_bytes as u64,
+            entries: self.entries.len() as u64,
+        }
+    }
+}
 
 /// Limits on retained metadata, map/index members, and decoded chunks.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -156,7 +389,7 @@ pub struct Container {
     limits: Limits,
     cache: Option<(String, Vec<u8>)>,
     index_cache: Option<(String, Vec<u8>)>,
-    decoded_cache: Option<(String, u64, Vec<u8>)>,
+    decoded_cache: Arc<Mutex<DecodedChunkCache>>,
     maps: BTreeMap<String, Arc<Map>>,
     version: (u32, u32),
     metadata_members: BTreeMap<String, String>,
@@ -307,7 +540,7 @@ impl Container {
             limits,
             cache: None,
             index_cache: None,
-            decoded_cache: None,
+            decoded_cache: Arc::new(Mutex::new(DecodedChunkCache::new())),
             maps: BTreeMap::new(),
             version,
             metadata_members,
@@ -328,6 +561,22 @@ impl Container {
     /// Declared container version; 2.1 refers to the evolving AFF4-L draft.
     pub fn version(&self) -> (u32, u32) {
         self.version
+    }
+
+    /// Returns cumulative decoded-chunk reader counters.
+    pub fn reader_statistics(&self) -> ReaderStatistics {
+        self.decoded_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .statistics
+    }
+
+    /// Returns automatic decoded-chunk cache usage.
+    pub fn reader_cache_info(&self) -> ReaderCacheInfo {
+        self.decoded_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .info()
     }
 
     /// Enumerates image resources and storage streams. Selection is never implicit.
@@ -445,7 +694,10 @@ impl Container {
         }
         self.cache = None;
         self.index_cache = None;
-        self.decoded_cache = None;
+        self.decoded_cache
+            .lock()
+            .map_err(|_| malformed("AFF4 decoded cache lock poisoned"))?
+            .clear();
         self.maps.clear();
         self.read_inner(id, &mut [], 0, &mut Vec::new(), false)?;
         let mut md5 = Md5::new();
@@ -880,11 +1132,20 @@ impl Container {
         while done < buffer.len() {
             let position = offset + done as u64;
             let chunk = position / chunk_size;
-            if use_decoded_cache
-                && let Some((cached_id, cached_chunk, decoded)) = &self.decoded_cache
-                && cached_id == id
-                && *cached_chunk == chunk
-            {
+            let cache_key = DecodedCacheKey::Chunk {
+                volume: self.volume.clone(),
+                resource: id.to_owned(),
+                chunk,
+            };
+            let cached = if use_decoded_cache {
+                self.decoded_cache
+                    .lock()
+                    .map_err(|_| malformed("AFF4 decoded cache lock poisoned"))?
+                    .get_chunk(&cache_key)
+            } else {
+                None
+            };
+            if let Some(decoded) = cached {
                 let begin = (position % chunk_size) as usize;
                 let take = (decoded.len() - begin).min(buffer.len() - done);
                 buffer[done..done + take].copy_from_slice(&decoded[begin..begin + take]);
@@ -934,11 +1195,16 @@ impl Container {
                 .filter(|end| *end <= data.len() as u64)
                 .ok_or_else(|| malformed("chunk outside bevy"))?;
             let encoded = &data[start as usize..end as usize];
+            let decode_started = Instant::now();
             let decoded = if length == chunk_size {
                 encoded.to_vec()
             } else {
                 decode(encoded, compression.as_deref(), chunk_size as usize)?
             };
+            self.decoded_cache
+                .lock()
+                .map_err(|_| malformed("AFF4 decoded cache lock poisoned"))?
+                .record_decode(decoded.len(), decode_started.elapsed());
             if decoded.len() != chunk_size as usize {
                 return Err(malformed("decoded chunk length mismatch"));
             }
@@ -946,8 +1212,11 @@ impl Container {
             let take = (decoded.len() - begin).min(buffer.len() - done);
             buffer[done..done + take].copy_from_slice(&decoded[begin..begin + take]);
             done += take;
-            if use_decoded_cache && decoded.len() <= DECODED_CACHE_BYTES {
-                self.decoded_cache = Some((id.to_owned(), chunk, decoded));
+            if use_decoded_cache {
+                self.decoded_cache
+                    .lock()
+                    .map_err(|_| malformed("AFF4 decoded cache lock poisoned"))?
+                    .insert(cache_key, Arc::new(decoded));
             }
         }
         Ok(())
@@ -1085,4 +1354,41 @@ fn escape(value: &str) -> String {
         }
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chunk(chunk: u64) -> DecodedCacheKey {
+        DecodedCacheKey::Chunk {
+            volume: "aff4://volume".into(),
+            resource: "aff4://volume/data".into(),
+            chunk,
+        }
+    }
+
+    #[test]
+    fn decoded_cache_is_byte_bounded_and_lru() {
+        let mut cache = DecodedChunkCache::with_capacity(8);
+        cache.insert(chunk(0), Arc::new(vec![0; 4]));
+        cache.insert(chunk(1), Arc::new(vec![1; 4]));
+        assert!(cache.get_chunk(&chunk(0)).is_some());
+        cache.insert(chunk(2), Arc::new(vec![2; 4]));
+
+        assert!(cache.get_chunk(&chunk(0)).is_some());
+        assert!(cache.get_chunk(&chunk(1)).is_none());
+        assert!(cache.get_chunk(&chunk(2)).is_some());
+        assert_eq!(cache.current_bytes, 8);
+        assert_eq!(cache.statistics.decoded_cache_evictions, 1);
+        assert_eq!(cache.info().capacity_bytes(), 8);
+    }
+
+    #[test]
+    fn oversized_entry_is_not_retained() {
+        let mut cache = DecodedChunkCache::with_capacity(4);
+        cache.insert(chunk(0), Arc::new(vec![0; 5]));
+        assert_eq!(cache.current_bytes, 0);
+        assert_eq!(cache.entries.len(), 0);
+    }
 }

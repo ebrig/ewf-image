@@ -131,8 +131,12 @@ fn reader_diagnostic_snapshots_have_future_proof_getters() {
 
     assert_eq!(statistics.chunk_cache_hits(), 0);
     assert_eq!(statistics.chunk_cache_misses(), 0);
+    assert_eq!(statistics.chunk_cache_coalesced(), 0);
     assert_eq!(statistics.table_page_cache_hits(), 0);
     assert_eq!(statistics.table_page_cache_misses(), 0);
+    assert_eq!(statistics.segment_read_bytes(), 0);
+    assert_eq!(statistics.segment_read_nanos(), 0);
+    assert_eq!(statistics.segment_pool_wait_nanos(), 0);
     assert_eq!(statistics.encoded_bytes_read(), 0);
     assert_eq!(statistics.decoded_bytes(), 0);
     assert_eq!(statistics.saturating_delta(statistics), statistics);

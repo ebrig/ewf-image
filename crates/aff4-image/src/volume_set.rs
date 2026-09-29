@@ -81,7 +81,10 @@ impl VolumeSet {
         Self::from_containers(volumes, paths.to_vec())
     }
 
-    pub(super) fn from_containers(volumes: Vec<Container>, paths: Vec<PathBuf>) -> Result<Self> {
+    pub(super) fn from_containers(
+        mut volumes: Vec<Container>,
+        paths: Vec<PathBuf>,
+    ) -> Result<Self> {
         let ids: BTreeSet<_> = volumes.iter().map(|volume| volume.volume.clone()).collect();
         if ids.len() != volumes.len() {
             return Err(malformed("duplicate volume identifier"));
@@ -150,6 +153,10 @@ impl VolumeSet {
                 }
             }
         }
+        let decoded_cache = Arc::new(Mutex::new(DecodedChunkCache::new()));
+        for volume in &mut volumes {
+            volume.decoded_cache = Arc::clone(&decoded_cache);
+        }
         Ok(Self {
             volumes,
             paths,
@@ -179,6 +186,16 @@ impl VolumeSet {
                 path: self.paths[n].clone(),
             })
             .collect()
+    }
+
+    /// Returns cumulative payload-reader counters shared by all volumes.
+    pub fn reader_statistics(&self) -> ReaderStatistics {
+        self.volumes[0].reader_statistics()
+    }
+
+    /// Returns shared automatic decoded payload-cache usage.
+    pub fn reader_cache_info(&self) -> ReaderCacheInfo {
+        self.volumes[0].reader_cache_info()
     }
 
     /// Opens a primary map and validates all referenced storage before reading.
@@ -291,7 +308,128 @@ impl VolumeSet {
         buffer: &mut [u8],
         offset: u64,
     ) -> Result<usize> {
-        self.read_disk_at_impl(primary, mapped, id, buffer, offset, true)
+        let size = self.disk_size(primary, mapped, id)?;
+        if offset >= size || buffer.is_empty() {
+            return Ok(0);
+        }
+        let length = (size - offset).min(buffer.len() as u64) as usize;
+        if length >= LOGICAL_READ_AHEAD_BYTES {
+            let read =
+                self.read_disk_at_impl(primary, mapped, id, &mut buffer[..length], offset, false)?;
+            self.retain_complete_pages(primary, id, &buffer[..read], offset)?;
+            return Ok(read);
+        }
+
+        let mut done = 0;
+        while done < length {
+            let position = offset
+                .checked_add(done as u64)
+                .ok_or_else(|| malformed("AFF4 read offset overflow"))?;
+            let page_start =
+                position / LOGICAL_READ_AHEAD_BYTES as u64 * LOGICAL_READ_AHEAD_BYTES as u64;
+            let page_offset = usize::try_from(position - page_start)
+                .map_err(|_| malformed("AFF4 page offset overflow"))?;
+            let key = self.disk_page_key(primary, id, page_start)?;
+            let cached = self.volumes[primary]
+                .decoded_cache
+                .lock()
+                .map_err(|_| malformed("AFF4 decoded cache lock poisoned"))?
+                .get_page(&key);
+            let page = if let Some(cached) = cached {
+                Some(cached)
+            } else {
+                let page_length = LOGICAL_READ_AHEAD_BYTES
+                    .min(usize::try_from(size - page_start).unwrap_or(LOGICAL_READ_AHEAD_BYTES));
+                let mut page = vec![0; page_length];
+                match self.read_disk_at_impl(primary, mapped, id, &mut page, page_start, false) {
+                    Ok(read) if read == page_length => {
+                        let page = Arc::new(page);
+                        let mut cache = self.volumes[primary]
+                            .decoded_cache
+                            .lock()
+                            .map_err(|_| malformed("AFF4 decoded cache lock poisoned"))?;
+                        cache.record_read_ahead_prefetch();
+                        cache.insert(key, Arc::clone(&page));
+                        Some(page)
+                    }
+                    Ok(_) => return Err(malformed("truncated AFF4 disk page")),
+                    Err(_) => None,
+                }
+            };
+            let Some(page) = page else {
+                // Read-ahead must not make a valid requested range fail only
+                // because later bytes in the same page are unreadable.
+                let page_remaining = LOGICAL_READ_AHEAD_BYTES - page_offset;
+                let take = page_remaining.min(length - done);
+                let read = self.read_disk_at_impl(
+                    primary,
+                    mapped,
+                    id,
+                    &mut buffer[done..done + take],
+                    position,
+                    false,
+                )?;
+                if read != take {
+                    return Err(malformed("truncated AFF4 disk read"));
+                }
+                done += take;
+                continue;
+            };
+            let take = (page.len() - page_offset).min(length - done);
+            buffer[done..done + take].copy_from_slice(&page[page_offset..page_offset + take]);
+            done += take;
+        }
+        Ok(length)
+    }
+
+    fn disk_page_key(&self, primary: usize, id: &str, offset: u64) -> Result<DecodedCacheKey> {
+        let volume = self
+            .volumes
+            .get(primary)
+            .ok_or_else(|| malformed("AFF4 primary volume index out of range"))?
+            .volume
+            .clone();
+        Ok(DecodedCacheKey::DiskPage {
+            volume,
+            resource: id.to_owned(),
+            offset,
+        })
+    }
+
+    fn retain_complete_pages(
+        &self,
+        primary: usize,
+        id: &str,
+        buffer: &[u8],
+        offset: u64,
+    ) -> Result<()> {
+        let request_end = offset
+            .checked_add(buffer.len() as u64)
+            .ok_or_else(|| malformed("AFF4 read offset overflow"))?;
+        let page_bytes = LOGICAL_READ_AHEAD_BYTES as u64;
+        let mut page_start = match offset % page_bytes {
+            0 => offset,
+            remainder => offset
+                .checked_add(page_bytes - remainder)
+                .ok_or_else(|| malformed("AFF4 page offset overflow"))?,
+        };
+        while let Some(page_end) = page_start.checked_add(page_bytes) {
+            if page_end > request_end {
+                break;
+            }
+            let begin = usize::try_from(page_start - offset)
+                .map_err(|_| malformed("AFF4 page offset overflow"))?;
+            let page = Arc::new(buffer[begin..begin + LOGICAL_READ_AHEAD_BYTES].to_vec());
+            let key = self.disk_page_key(primary, id, page_start)?;
+            let mut cache = self.volumes[primary]
+                .decoded_cache
+                .lock()
+                .map_err(|_| malformed("AFF4 decoded cache lock poisoned"))?;
+            cache.record_read_ahead_prefetch();
+            cache.insert(key, page);
+            page_start = page_end;
+        }
+        Ok(())
     }
 
     fn read_disk_at_impl(
@@ -351,7 +489,6 @@ impl VolumeSet {
             if let Some(previous) = self.cached_owner {
                 self.volumes[previous].cache = None;
                 self.volumes[previous].index_cache = None;
-                self.volumes[previous].decoded_cache = None;
                 self.volumes[previous].maps.clear();
             }
             self.cached_owner = Some(owner);

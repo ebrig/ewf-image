@@ -141,6 +141,47 @@ fn physical_codecs_bevies_padding_and_logical_zip_roundtrip() {
 }
 
 #[test]
+fn decoded_cache_retains_multiple_chunks_and_reports_usage() {
+    let data = data();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cache.aff4");
+    let mut writer = Writer::create(
+        &path,
+        Profile::Physical,
+        WriteOptions {
+            chunk_bytes: 32768,
+            chunks_per_bevy: 4,
+            compression: Compression::Zlib,
+        },
+    )
+    .unwrap();
+    let id = writer
+        .add_image(data.len() as u64, &mut Cursor::new(&data), proceed)
+        .unwrap();
+    writer.finish().unwrap();
+
+    let mut image = Container::open(path).unwrap();
+    let opened = image.reader_statistics();
+    for offset in [0, 32768, 0] {
+        let mut bytes = [0; 4096];
+        image.read_at(&id, &mut bytes, offset).unwrap();
+        assert_eq!(
+            &bytes,
+            &data[offset as usize..offset as usize + bytes.len()]
+        );
+    }
+    let statistics = image.reader_statistics().saturating_delta(opened);
+    assert_eq!(statistics.decoded_cache_misses(), 2);
+    assert_eq!(statistics.decoded_cache_hits(), 1);
+    assert_eq!(statistics.decoded_bytes(), 2 * 32768);
+    let cache = image.reader_cache_info();
+    assert_eq!(cache.entries(), 2);
+    assert_eq!(cache.current_bytes(), 2 * 32768);
+    assert!(cache.peak_bytes() >= cache.current_bytes());
+    assert!(cache.current_bytes() <= cache.capacity_bytes());
+}
+
+#[test]
 fn failures_cancellation_and_late_collisions_do_not_publish() {
     for profile in [Profile::Physical, Profile::Logical] {
         for cancel in [true, false] {

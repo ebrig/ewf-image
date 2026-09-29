@@ -6,6 +6,19 @@ code written for 0.4.0. See
 
 ## Unreleased
 
+### Reader performance
+
+- Let path-backed EWF readers perform native positioned I/O outside the global
+  segment-handle pool lock while preserving the configured descriptor ceiling.
+  Concurrent misses for the same logical chunk now share one decode.
+- Add EWF counters for positioned segment I/O, handle-pool wait time, and
+  coalesced chunk-cache misses.
+- Replace AFF4's single decoded-chunk slot with an automatic 128 MiB shared LRU.
+  Physical disk readers also coalesce small positioned requests into automatic
+  1 MiB read-ahead pages within the same bound, without new reader settings.
+- Expose AFF4 cache, decoding, eviction, and read-ahead statistics from
+  containers, volume sets, and discovered physical disk readers.
+
 ## 0.5.0 - 2026-09-28
 
 ### Command-line usability
