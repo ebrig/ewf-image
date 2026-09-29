@@ -92,8 +92,8 @@ enum Command {
         /// Sector size for raw files; devices supply their own geometry.
         #[arg(long, value_name = "BYTES")]
         sector_size: Option<u32>,
-        /// Compression for the selected image format. EWF: raw/zlib; AFF4: stored/zlib/snappy/lz4.
-        #[arg(long, value_name = "CODEC", value_parser = ["raw", "stored", "zlib", "snappy", "lz4"])]
+        /// Compression for the selected image format. EWF: raw/zlib/zlib-fast; AFF4: stored/zlib/snappy/lz4.
+        #[arg(long, value_name = "CODEC", value_parser = ["raw", "stored", "zlib", "zlib-fast", "snappy", "lz4"])]
         compression: Option<String>,
         /// AFF4 physical chunk size in bytes (default: 32 KiB).
         #[arg(long, value_name = "BYTES")]
@@ -310,9 +310,9 @@ fn run(cli: &Cli, ctx: &mut Context, report: &mut Value) -> Result<()> {
                 }
                 if compression
                     .as_deref()
-                    .is_some_and(|value| !matches!(value, "raw" | "zlib"))
+                    .is_some_and(|value| !matches!(value, "raw" | "zlib" | "zlib-fast"))
                 {
-                    return Err(invalid("EWF compression must be raw or zlib"));
+                    return Err(invalid("EWF compression must be raw, zlib, or zlib-fast"));
                 }
                 let mut args = vec![
                     if format == Output::E01 {

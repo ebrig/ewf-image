@@ -215,7 +215,8 @@ still records every emitted chunk.
 
 Regular-file sources must be nonempty and sector-aligned. The default sector size
 is 512 bytes, and `--sector-size` accepts 512, 1024, 2048, or 4096. Output is
-physical E01 with zlib compression by default, or raw with `--compression raw`.
+physical E01 with zlib compression by default, raw with `--compression raw`,
+or faster zlib with `--compression zlib-fast`.
 `--sectors-per-chunk` and `--chunks-per-segment` set the acquisition geometry.
 `--bulk-read-bytes BYTES` can group several chunks into one healthy read
 attempt. It defaults to one chunk, preserving existing error and cancellation

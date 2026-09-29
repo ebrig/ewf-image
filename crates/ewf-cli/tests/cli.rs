@@ -117,6 +117,15 @@ fn physical_acquisition_exposes_supported_compression_choices() {
     let ewf = dir.path().join("ewf-fast.E01");
     succeeds(&["acquire", path(&source), path(&ewf), "--compression", "raw"]);
     assert_eq!(read_image(&ewf), bytes);
+    let fast = dir.path().join("ewf-zlib-fast.Ex01");
+    succeeds(&[
+        "acquire",
+        path(&source),
+        path(&fast),
+        "--compression",
+        "zlib-fast",
+    ]);
+    assert_eq!(read_image(&fast), bytes);
     let raw = dir.path().join("output.raw");
     assert!(
         !run(&[

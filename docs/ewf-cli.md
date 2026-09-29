@@ -60,6 +60,9 @@ resumable E01 default remains one 32 KiB image chunk per bulk attempt. A failed
 larger attempt is discarded and re-read sector by sector; cancellation cannot
 accept a partially completed attempt. Use `--compression raw` to store E01
 chunks without zlib when the source data compresses poorly.
+`--compression zlib-fast` uses the faster zlib level for E01 and Ex01. It can
+reduce encoder time while producing larger images; the selected mode is retained
+for E01 resume. Compare both elapsed time and stored size on representative data.
 
 AFF4 acquisition accepts `--compression stored|zlib|snappy|lz4` and
 `--chunk-bytes BYTES`; its defaults remain zlib and 32 KiB. Physical chunk size

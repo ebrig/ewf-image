@@ -10,10 +10,10 @@ use tempfile::NamedTempFile;
 
 use super::{
     ChunkDescriptor, ChunkSpool, EWF1_TABLE_GROUP_MAX_ENTRIES, Ewf1SegmentSections,
-    Ewf1SegmentWriteContext, TerminalSection, WriteCompression, WriteHashState, WriteOptions,
-    WriteResult, effective_write_hashes, encode_chunk, header_payload, header2_payload,
-    publication_segment_paths, segment_path, validate_options, write_ewf1_segment,
-    writer_chunk_geometry, xheader_payload,
+    Ewf1SegmentWriteContext, TerminalSection, WriteCompression, WriteCompressionLevel,
+    WriteCompressionValues, WriteHashState, WriteOptions, WriteResult, effective_write_hashes,
+    encode_chunk, header_payload, header2_payload, publication_segment_paths, segment_path,
+    validate_options, write_ewf1_segment, writer_chunk_geometry, xheader_payload,
 };
 use crate::publication::{OutputLock, acquisition_path, sync_dir};
 use crate::{AcquisitionError, EwfError, EwfMetadata, Result};
@@ -48,6 +48,8 @@ pub struct AcquisitionOptions {
     pub chunks_per_segment: u32,
     /// Raw or zlib compression. `BZip2` is not supported by this EWF1 API.
     pub compression: WriteCompression,
+    /// Zlib compression level; defaults to the standard level.
+    pub compression_level: WriteCompressionLevel,
     /// Acquisition metadata, fixed at creation and checked on resume.
     pub metadata: EwfMetadata,
 }
@@ -61,6 +63,7 @@ impl AcquisitionOptions {
             sectors_per_chunk: 64,
             chunks_per_segment: EWF1_TABLE_GROUP_MAX_ENTRIES as u32,
             compression: WriteCompression::Zlib,
+            compression_level: WriteCompressionLevel::Default,
             metadata: EwfMetadata::default(),
         }
     }
@@ -84,6 +87,10 @@ impl AcquisitionOptions {
             sectors_per_chunk: self.sectors_per_chunk,
             bytes_per_sector: self.bytes_per_sector,
             compression: self.compression,
+            compression_values: WriteCompressionValues {
+                level: self.compression_level,
+                ..WriteCompressionValues::default()
+            },
             media_size: Some(self.source_size),
             metadata: self.metadata.clone(),
             ..WriteOptions::default()
@@ -741,6 +748,17 @@ fn fingerprint(
     hash.update(acquisition.sectors_per_chunk.to_le_bytes());
     hash.update(acquisition.chunks_per_segment.to_le_bytes());
     hash.update([u8::from(acquisition.compression == WriteCompression::Zlib)]);
+    // Preserve fingerprints of checkpoints created before compression levels
+    // were exposed while binding every non-default level to its own journal.
+    if acquisition.compression_level != WriteCompressionLevel::Default {
+        hash.update(b"compression-level:");
+        hash.update([match acquisition.compression_level {
+            WriteCompressionLevel::None => 0,
+            WriteCompressionLevel::Fast => 1,
+            WriteCompressionLevel::Best => 2,
+            WriteCompressionLevel::Default => unreachable!(),
+        }]);
+    }
     let path = first.as_os_str().as_encoded_bytes();
     hash.update((path.len() as u64).to_le_bytes());
     hash.update(path);

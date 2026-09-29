@@ -181,7 +181,7 @@ pub(crate) struct Acquire {
     #[arg(long, default_value_t = 16375, value_name = "COUNT", help_heading = "Image settings", value_parser = clap::value_parser!(u32).range(1..=16375))]
     chunks_per_segment: u32,
     /// Image compression.
-    #[arg(long, default_value = "zlib", help_heading = "Image settings", value_parser = ["raw", "zlib"])]
+    #[arg(long, default_value = "zlib", help_heading = "Image settings", value_parser = ["raw", "zlib", "zlib-fast"])]
     compression: String,
     /// Case identifier.
     #[arg(long, value_name = "ID", help_heading = "Case details")]

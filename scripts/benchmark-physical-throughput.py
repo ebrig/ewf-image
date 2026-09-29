@@ -21,6 +21,7 @@ MIB = 1024 * 1024
 CASES = {
     "raw": ("image.raw", []),
     "e01_zlib": ("image.E01", []),
+    "e01_zlib_fast": ("image.E01", ["--compression", "zlib-fast"]),
     "e01_raw": ("image.E01", ["--compression", "raw"]),
     "aff4_zlib": ("image.aff4", []),
     "aff4_lz4_256k": (
@@ -108,7 +109,7 @@ def main():
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--baseline-binary", type=Path)
     parser.add_argument("--mib", type=int, default=128)
-    parser.add_argument("--trials", type=int, default=3)
+    parser.add_argument("--trials", type=int, default=4)
     parser.add_argument("--directory", type=Path)
     parser.add_argument("--cases", nargs="+", choices=CASES, default=list(CASES))
     parser.add_argument(

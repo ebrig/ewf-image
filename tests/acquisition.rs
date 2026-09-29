@@ -5,12 +5,38 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use ewf_image::{
-    AcquisitionOptions, AcquisitionWriter, EwfWriter, Image, WriteCompression, WriteOptions,
+    AcquisitionOptions, AcquisitionWriter, EwfWriter, Image, WriteCompression,
+    WriteCompressionLevel, WriteOptions,
 };
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
 const IDENTITY: [u8; 32] = [0x51; 32];
+
+#[test]
+fn fast_zlib_acquisition_resumes_only_with_the_recorded_level() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("fast.E01");
+    let bytes: Vec<u8> = (0..8192).map(|i| (i % 251) as u8).collect();
+    let options = AcquisitionOptions {
+        sectors_per_chunk: 2,
+        chunks_per_segment: 2,
+        compression_level: WriteCompressionLevel::Fast,
+        ..AcquisitionOptions::new(bytes.len() as u64)
+    };
+    let mut writer = AcquisitionWriter::create(&path, &options, IDENTITY).unwrap();
+    writer.write_all(&bytes[..2048]).unwrap();
+    assert_eq!(writer.checkpoint_offset(), 2048);
+    drop(writer);
+
+    let mut changed = options.clone();
+    changed.compression_level = WriteCompressionLevel::Default;
+    assert!(AcquisitionWriter::resume(&path, &changed, IDENTITY).is_err());
+    let mut writer = AcquisitionWriter::resume(&path, &options, IDENTITY).unwrap();
+    writer.write_all(&bytes[2048..]).unwrap();
+    writer.finish().unwrap();
+    check_image(&path, &bytes);
+}
 
 #[test]
 fn optional_bulk_reads_span_chunks_without_changing_media_bytes() {
