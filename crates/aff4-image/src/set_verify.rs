@@ -247,7 +247,7 @@ impl VolumeSet {
                         match owners.get(&id).copied() {
                             None => Err(malformed("stream has no owning volume")),
                             Some(owner) if owner == context => self.volumes[context]
-                                .check_blocks_from(&id, None, &mut remaining, &mut progress),
+                                .check_blocks_from(&id, None, &mut remaining, &mut progress, None),
                             Some(owner) => {
                                 let (reference, data) =
                                     two_volumes(&mut self.volumes, context, owner);
@@ -256,6 +256,7 @@ impl VolumeSet {
                                     Some(data),
                                     &mut remaining,
                                     &mut progress,
+                                    None,
                                 )
                             }
                         };

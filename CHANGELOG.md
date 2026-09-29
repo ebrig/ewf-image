@@ -18,6 +18,9 @@ code written for 0.4.0. See
 - Encode and block-hash automatically bounded AFF4 chunk batches in parallel,
   retaining deterministic bevy order and cooperative cancellation without a
   writer-tuning option.
+- Fuse AFF4 linear and paired MD5/SHA256 block verification into one decoded
+  chunk pass while retaining the existing work budgets, progress callbacks,
+  mismatch reporting, and complete verification report.
 
 ## 0.6.0 - 2026-09-29
 

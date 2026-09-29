@@ -724,8 +724,33 @@ impl Container {
         &mut self,
         id: &str,
         output: &mut impl Write,
-        mut progress: impl FnMut(u64, u64) -> ControlFlow<()>,
+        progress: impl FnMut(u64, u64) -> ControlFlow<()>,
     ) -> Result<Verification> {
+        self.copy_verified_impl(id, output, None, progress)
+            .map(|(verification, _)| verification)
+    }
+
+    fn verify_with_paired_blocks(
+        &mut self,
+        id: &str,
+        block_size: usize,
+        progress: impl FnMut(u64, u64) -> ControlFlow<()>,
+    ) -> Result<(Verification, PairedBlockDigests)> {
+        let (verification, blocks) =
+            self.copy_verified_impl(id, &mut std::io::sink(), Some(block_size), progress)?;
+        Ok((
+            verification,
+            blocks.expect("paired block hashing requested"),
+        ))
+    }
+
+    fn copy_verified_impl(
+        &mut self,
+        id: &str,
+        output: &mut impl Write,
+        block_size: Option<usize>,
+        mut progress: impl FnMut(u64, u64) -> ControlFlow<()>,
+    ) -> Result<(Verification, Option<PairedBlockDigests>)> {
         let size = self.size(id)?;
         if size > self.limits.verification_bytes {
             return Err(malformed("verification byte limit exceeded"));
@@ -743,6 +768,7 @@ impl Container {
         let mut sha256 = Sha256::new();
         let mut sha512 = sha2::Sha512::new();
         let mut blake2b = <blake2::Blake2b512 as blake2::Digest>::new();
+        let mut blocks = block_size.map(PairedBlockHasher::new);
         let mut write_error = None;
         let walked = self.walk_bytes(id, |bytes, done| {
             if let Err(error) = output.write_all(bytes) {
@@ -754,6 +780,9 @@ impl Container {
             sha256.update(bytes);
             sha512.update(bytes);
             blake2::Digest::update(&mut blake2b, bytes);
+            if let Some(blocks) = &mut blocks {
+                blocks.update(bytes);
+            }
             progress(done, size)
         });
         if let Some(error) = write_error {
@@ -770,7 +799,8 @@ impl Container {
             references_match: None,
             unsupported_hashes: Vec::new(),
         };
-        self.with_linear_references(id, result)
+        let result = self.with_linear_references(id, result)?;
+        Ok((result, blocks.map(PairedBlockHasher::finish)))
     }
 
     fn with_linear_references(&self, id: &str, mut result: Verification) -> Result<Verification> {
@@ -1329,6 +1359,70 @@ impl Container {
             }
         }
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct PairedBlockDigests {
+    md5: Vec<[u8; 16]>,
+    sha256: Vec<[u8; 32]>,
+}
+
+struct PairedBlockHasher {
+    block_size: usize,
+    used: usize,
+    md5: Md5,
+    sha256: Sha256,
+    result: PairedBlockDigests,
+}
+
+impl PairedBlockHasher {
+    fn new(block_size: usize) -> Self {
+        debug_assert!(block_size > 0);
+        Self {
+            block_size,
+            used: 0,
+            md5: Md5::new(),
+            sha256: Sha256::new(),
+            result: PairedBlockDigests {
+                md5: Vec::new(),
+                sha256: Vec::new(),
+            },
+        }
+    }
+
+    fn update(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            let take = bytes.len().min(self.block_size - self.used);
+            self.md5.update(&bytes[..take]);
+            self.sha256.update(&bytes[..take]);
+            self.used += take;
+            bytes = &bytes[take..];
+            if self.used == self.block_size {
+                self.finish_block();
+            }
+        }
+    }
+
+    fn finish(mut self) -> PairedBlockDigests {
+        if self.used != 0 {
+            self.finish_block();
+        }
+        self.result
+    }
+
+    fn finish_block(&mut self) {
+        self.result.md5.push(
+            std::mem::replace(&mut self.md5, Md5::new())
+                .finalize()
+                .into(),
+        );
+        self.result.sha256.push(
+            std::mem::replace(&mut self.sha256, Sha256::new())
+                .finalize()
+                .into(),
+        );
+        self.used = 0;
     }
 }
 

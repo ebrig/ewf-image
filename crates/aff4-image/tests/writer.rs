@@ -105,12 +105,18 @@ fn physical_codecs_bevies_padding_and_logical_zip_roundtrip() {
                 &data[offset as usize..offset as usize + count]
             );
         }
+        let before_full_verification = image.reader_statistics();
         let full = image
             .verify_all(Some(&result.metadata_sha256), |_, _, _| {
                 ControlFlow::Continue(())
             })
             .unwrap();
         assert!(full.all_match(), "{full:#?}");
+        let verification_reads = image
+            .reader_statistics()
+            .saturating_delta(before_full_verification)
+            .stored_member_range_reads();
+        assert_eq!(verification_reads, data.len().div_ceil(32768) as u64);
         let report = image.verify(&id, proceed).unwrap();
         assert_eq!(report.references_match, Some(true));
         assert_eq!(report.sha256, result.streams[0].sha256);
