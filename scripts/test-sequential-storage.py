@@ -64,7 +64,7 @@ def main():
         with source.open("wb") as stream:
             stream.truncate(512 * 1024 * 1024)
         output = volume / "cancel.Ex01"
-        child = subprocess.Popen([str(binary), "ewf", "acquire-sequential", str(source), str(output)],
+        child = subprocess.Popen([str(binary), "--json", "ewf", "acquire-sequential", str(source), str(output)],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             first = child.stderr.readline()

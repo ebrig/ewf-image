@@ -613,7 +613,7 @@ impl Container {
         let mut retained = 0_usize;
         let mut previous = 0;
         let size = self.number(id, "size")?;
-        for record in data.chunks_exact(28) {
+        for record in data.as_chunks::<28>().0 {
             let start = u64::from_le_bytes(record[..8].try_into().unwrap());
             let length = u64::from_le_bytes(record[8..16].try_into().unwrap());
             let offset = u64::from_le_bytes(record[16..24].try_into().unwrap());
