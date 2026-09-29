@@ -35,6 +35,9 @@ code written for 0.4.0. See
   1 MiB read-ahead pages within the same bound, without new reader settings.
 - Expose AFF4 cache, decoding, eviction, and read-ahead statistics from
   containers, volume sets, and discovered physical disk readers.
+- Read encoded chunks directly from stored ZIP bevies instead of loading each
+  complete bevy, while retaining the compatible fallback for ZIP-compressed
+  members. Expose counters for the direct range reads.
 - Hash paired AFF4 block references in one chunk pass and reuse complete
   verification digests when converting or verifying selected physical disks.
 - Stream identity-mapped ZIP resources and logical conversion input instead of
