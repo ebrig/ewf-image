@@ -3,8 +3,9 @@
 These are local measurements for choosing a format and compression setting, not
 device throughput guarantees. The benchmark reads a 64 MiB regular file, writes
 an image, publishes it, and verifies the decoded output. Each value is the median
-of four release-build trials. Paired comparisons alternate binary order and use
-the same seeded random and repeating-text inputs. Source SHA256 is checked
+of three or four release-build trials, as noted below. Paired comparisons
+alternate binary order and use the same seeded random and repeating-text inputs.
+Source SHA256 is checked
 against each acquisition report.
 
 Run the benchmark with:
