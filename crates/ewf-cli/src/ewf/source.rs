@@ -327,11 +327,10 @@ pub(crate) fn metadata_identity(metadata: &fs::Metadata) -> Result<String> {
     Ok(identity)
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", windows)))]
 mod tests {
     use super::*;
 
-    #[cfg(any(target_os = "linux", windows))]
     #[test]
     fn uncached_reads_use_aligned_bounce_storage() {
         let root = tempfile::tempdir().unwrap();
