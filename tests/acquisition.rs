@@ -30,6 +30,39 @@ fn automatic_bulk_reads_span_chunks_without_changing_media_bytes() {
 }
 
 #[test]
+fn cancellation_inside_bulk_batch_preserves_hash_and_resume_offset() {
+    use std::ops::ControlFlow;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("bulk-cancel.E01");
+    let bytes: Vec<u8> = (0..128 * 1024).map(|n| (n % 251) as u8).collect();
+    let options = AcquisitionOptions::new(bytes.len() as u64);
+    let mut writer = AcquisitionWriter::create(&path, &options, IDENTITY).unwrap();
+    let mut source = std::io::Cursor::new(bytes.clone());
+    let result = writer
+        .acquire_with_progress(
+            &mut source,
+            &AcquisitionReadOptions::default(),
+            |progress| {
+                if progress.bytes_written == 32 * 1024 {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(result.status, ewf_image::AcquisitionStatus::Cancelled);
+    assert_eq!(result.progress.bytes_written, 32 * 1024);
+    assert_eq!(result.progress.checkpoint_bytes, 32 * 1024);
+    writer
+        .acquire_from(&mut source, &AcquisitionReadOptions::default())
+        .unwrap();
+    writer.finish().unwrap();
+    check_image(&path, &bytes);
+}
+
+#[test]
 fn zlib_writers_bound_incompressible_chunks_and_resume_mixed_encodings() {
     let mut bytes = Vec::new();
     for counter in 0_u32..8192 {

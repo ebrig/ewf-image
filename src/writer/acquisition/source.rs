@@ -1,7 +1,7 @@
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::ControlFlow;
 
-use super::super::segment_path;
+use super::super::{encode_chunks, segment_path};
 use super::{AcquisitionError, AcquisitionWriter, EwfError, Result};
 
 const AUTOMATIC_BULK_READ_BYTES: usize = 256 * 1024;
@@ -219,10 +219,7 @@ impl AcquisitionWriter {
                 false
             };
             if read {
-                for chunk in buffer[..size].chunks(self.chunk_size) {
-                    self.write_all(chunk)?;
-                    self.after_source_write(options, progress, callback)?;
-                }
+                self.append_healthy_batch(&buffer[..size], options, progress, callback)?;
                 continue;
             }
             // Re-read the entire failed bulk range by sector; even a successful
@@ -254,6 +251,76 @@ impl AcquisitionWriter {
                 self.write_all(sector)?;
                 self.after_source_write(options, progress, callback)?;
             }
+        }
+        Ok(())
+    }
+
+    fn append_healthy_batch(
+        &mut self,
+        bytes: &[u8],
+        options: &AcquisitionReadOptions,
+        progress: &mut AcquisitionProgress,
+        callback: &mut impl FnMut(AcquisitionProgress) -> ControlFlow<()>,
+    ) -> Result<()> {
+        self.ensure_healthy()?;
+        if !self.pending.is_empty()
+            || bytes.is_empty()
+            || bytes.len() as u64 > self.source_size - self.offset
+        {
+            return Err(EwfError::Malformed(
+                "invalid healthy acquisition batch".into(),
+            ));
+        }
+
+        let processing_started = std::time::Instant::now();
+        let mut hash_states = Vec::with_capacity(bytes.len().div_ceil(self.chunk_size));
+        let mut hashes = self.hashes.clone();
+        let mut lengths = Vec::with_capacity(hash_states.capacity());
+        let chunks = bytes
+            .chunks(self.chunk_size)
+            .map(|chunk| {
+                hashes.update(chunk);
+                hash_states.push(hashes.clone());
+                lengths.push(chunk.len());
+                chunk.to_vec()
+            })
+            .collect();
+        let encoded = match encode_chunks(
+            chunks,
+            self.options.compression,
+            self.options.compression_values,
+            self.chunk_size as u64,
+            false,
+            false,
+        ) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                self.failed = true;
+                return Err(error);
+            }
+        };
+        self.processing_duration += processing_started.elapsed();
+
+        for ((chunk, length), hashes) in encoded.into_iter().zip(lengths).zip(hash_states) {
+            self.offset += length as u64;
+            self.hashes = hashes;
+            let scratch_started = std::time::Instant::now();
+            let descriptor = match self.spool.as_mut().expect("active spool").append(chunk) {
+                Ok(descriptor) => descriptor,
+                Err(error) => {
+                    self.failed = true;
+                    return Err(error);
+                }
+            };
+            self.chunks.push(descriptor);
+            self.scratch_write_duration += scratch_started.elapsed();
+            if self.chunks.len() == self.chunks_per_segment || self.offset == self.source_size {
+                if let Err(error) = self.seal(self.offset == self.source_size) {
+                    self.failed = true;
+                    return Err(error);
+                }
+            }
+            self.after_source_write(options, progress, callback)?;
         }
         Ok(())
     }

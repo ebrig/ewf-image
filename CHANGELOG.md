@@ -12,6 +12,9 @@ code written for 0.4.0. See
   creation and discovery overhead. Bound CLI readers to 32 simultaneous EWF
   segment handles so highly split images leave descriptors available for
   conversion and publication resources.
+- Encode automatically bounded batches of EWF chunks in parallel during
+  healthy acquisition and sequential E01/Ex01 writing while preserving output
+  order, progress, cancellation, and resumable segment boundaries.
 
 ## 0.6.0 - 2026-09-29
 
