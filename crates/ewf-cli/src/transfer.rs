@@ -588,7 +588,7 @@ fn transfer(
             report["recovery_command"] = Value::Null;
             report["segments"] = json!(written.segment_paths);
             let verify_started = Instant::now();
-            verify_written_ewf(output, digest, ctx, report)?;
+            verify_written_ewf(output, digest, 1, ctx, report)?;
             record_timing(report, "verification_seconds", verify_started);
         }
         Output::Ex01 => {
@@ -629,7 +629,7 @@ fn transfer(
             report["segments"] = json!(written.segment_paths);
             report["recovery_command"] = Value::Null;
             let verify_started = Instant::now();
-            verify_written_ewf(output, digest, ctx, report)?;
+            verify_written_ewf(output, digest, 1, ctx, report)?;
             record_timing(report, "verification_seconds", verify_started);
         }
         Output::Aff4 => {
@@ -745,11 +745,14 @@ fn transfer(
 fn verify_written_ewf(
     path: &Path,
     expected: [u8; 32],
+    workers: usize,
     ctx: &mut Context,
     report: &mut Value,
 ) -> Result<()> {
     let result = crate::password::open(path, ctx.password.as_ref())?.verify_with_progress(
-        &VerifyOptions::default().with_expected_sha256(expected),
+        &VerifyOptions::default()
+            .with_expected_sha256(expected)
+            .with_parallelism(workers),
         |p| ctx.progress("destination verification", p.bytes_verified, p.bytes_total),
     )?;
     report["verification"] = json!({"scope":"decoded media","bytes_verified":result.bytes_verified,"sha256":format::hex(&result.hashes.sha256),"references_match":result.references_match()});
@@ -799,6 +802,7 @@ pub(crate) fn verify_ewf(
     path: &Path,
     entry: Option<&str>,
     expected: Option<&str>,
+    workers: usize,
     ctx: &mut Context,
     report: &mut Value,
 ) -> Result<()> {
@@ -840,7 +844,13 @@ pub(crate) fn verify_ewf(
         report["exit_code"] = json!(if matched { 0 } else { 3 });
         return Ok(());
     }
-    verify_written_ewf(path, format::parse_hash(expected.unwrap())?, ctx, report)?;
+    verify_written_ewf(
+        path,
+        format::parse_hash(expected.unwrap())?,
+        workers,
+        ctx,
+        report,
+    )?;
     let substitutions = !image.info().acquisition_errors.is_empty();
     report["status"] = json!(if substitutions {
         "verified_with_substitutions"

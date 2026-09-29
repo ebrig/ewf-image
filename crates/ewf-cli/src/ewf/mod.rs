@@ -59,6 +59,9 @@ pub(crate) enum Command {
         image: PathBuf,
         /// Entry number from files; omit to verify the whole image.
         entry: Option<usize>,
+        /// Whole-image verification workers (default: 1).
+        #[arg(long, value_name = "COUNT", value_parser = clap::value_parser!(u32).range(1..=64))]
+        workers: Option<u32>,
     },
     /// List logical files and their entry numbers.
     Files {
@@ -512,11 +515,25 @@ fn run(
             });
             Ok(())
         }
-        Command::Verify { image, entry } => match entry {
+        Command::Verify {
+            image,
+            entry,
+            workers,
+        } => match entry {
+            Some(entry) if workers.is_some() => Err(invalid(
+                "--workers applies only to whole-image EWF verification",
+            )),
             Some(entry) => {
                 logical::read(image, *entry, None, false, password, &mut progress, report)
             }
-            None => verify(image, None, password, &mut progress, report),
+            None => verify(
+                image,
+                None,
+                workers.unwrap_or(1) as usize,
+                password,
+                &mut progress,
+                report,
+            ),
         },
         Command::Report { output, write } => {
             let output = session::normalize_output(output)?;
@@ -637,6 +654,7 @@ fn acquire(
     verify(
         &session.output,
         Some(finished.computed_sha256),
+        1,
         None,
         progress,
         report,
@@ -653,13 +671,14 @@ fn acquire(
 fn verify(
     path: &Path,
     expected: Option<[u8; 32]>,
+    workers: usize,
     password: Option<&EwfPassword>,
     progress: &mut Progress<'_>,
     report: &mut Value,
 ) -> Result<()> {
     report["phase"] = json!("verification");
     let image = crate::password::open(path, password)?;
-    let mut options = VerifyOptions::default();
+    let mut options = VerifyOptions::default().with_parallelism(workers);
     if let Some(hash) = expected {
         options = options.with_expected_sha256(hash);
     }

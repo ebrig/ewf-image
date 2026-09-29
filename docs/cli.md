@@ -30,6 +30,7 @@ ewf-cli ewf resume case.E01
 ewf-cli ewf checkpoint inspect case.E01
 ewf-cli ewf checkpoint validate case.E01
 ewf-cli ewf verify case.E01
+ewf-cli ewf verify case.Ex01 --workers 4
 ewf-cli ewf info case.E01
 ewf-cli ewf files case.L01 --limit 1000
 ewf-cli ewf verify case.L01 1

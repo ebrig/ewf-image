@@ -133,6 +133,42 @@ fn physical_acquisition_exposes_supported_compression_choices() {
 }
 
 #[test]
+fn ewf_verification_workers_cover_both_cli_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.raw");
+    fs::write(&source, data()).unwrap();
+    let image = dir.path().join("workers.E01");
+    let acquired = succeeds(&["acquire", path(&source), path(&image)]);
+    let expected = acquired["verification"]["sha256"].as_str().unwrap();
+    for args in [
+        vec!["verify", path(&image), "--workers", "4"],
+        vec!["ewf", "verify", path(&image), "--workers", "4"],
+        vec![
+            "verify",
+            path(&image),
+            "--sha256",
+            expected,
+            "--workers",
+            "4",
+        ],
+    ] {
+        let output = run(&args);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(report(&output)["verification"]["sha256"], expected);
+    }
+    assert!(
+        !run(&["verify", path(&source), "--workers", "4"])
+            .status
+            .success()
+    );
+    assert!(
+        !run(&["verify", path(&image), "--workers", "0"])
+            .status
+            .success()
+    );
+}
+
+#[test]
 fn rejects_aliases_geometry_conflicts_and_unknown_formats_without_publication() {
     let dir = tempfile::tempdir().unwrap();
     let raw = dir.path().join("source.raw");

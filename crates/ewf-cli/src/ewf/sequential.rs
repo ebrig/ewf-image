@@ -180,6 +180,7 @@ pub(super) fn acquire(
     verify(
         &output,
         Some(written.computed_sha256),
+        1,
         None,
         progress,
         report,
@@ -392,6 +393,7 @@ pub(super) fn collect(
     verify(
         &output,
         Some(written.computed_sha256),
+        1,
         None,
         progress,
         report,

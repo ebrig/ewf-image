@@ -147,8 +147,14 @@ in an AFF4 container. Select an AFF4 resource explicitly when the container hold
 more than one. The report states the scope of a selected-resource check
 separately from whole-container verification.
 
+For whole-image EWF verification, `--workers 1..64` enables bounded parallel
+chunk decoding; the default is one worker. Compressed EWF2 images may benefit,
+but storage and codec determine throughput. Selected-file, AFF4, and raw checks
+do not accept this option.
+
 ```text
 ewf-cli verify case.E01 --sha256 HASH
+ewf-cli verify case.Ex01 --workers 4
 ewf-cli verify case.aff4 --metadata-sha256 HASH
 ewf-cli verify-set primary.aff4 companion.aff4 --image RESOURCE-ID --full
 ewf-cli metadata case.aff4

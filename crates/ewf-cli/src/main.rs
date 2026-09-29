@@ -79,6 +79,9 @@ enum Command {
         /// Independently recorded AFF4 metadata SHA256 (whole-container checks).
         #[arg(long, value_name = "HASH", conflicts_with_all = ["entry", "sha256"])]
         metadata_sha256: Option<String>,
+        /// EWF whole-image verification workers (default: 1).
+        #[arg(long, value_name = "COUNT", value_parser = clap::value_parser!(u32).range(1..=64))]
+        workers: Option<u32>,
     },
     /// Acquire a file or physical disk to one image.
     Acquire {
@@ -401,6 +404,7 @@ fn run(cli: &Cli, ctx: &mut Context, report: &mut Value) -> Result<()> {
             entry,
             sha256,
             metadata_sha256,
+            workers,
         } => {
             if let Some(hash) = sha256 {
                 format::parse_hash(hash)?;
@@ -411,26 +415,47 @@ fn run(cli: &Cli, ctx: &mut Context, report: &mut Value) -> Result<()> {
                     return Err(invalid("--metadata-sha256 requires an AFF4 container"));
                 }
             }
+            if workers.is_some() && entry.is_some() {
+                return Err(invalid(
+                    "--workers applies only to whole-image EWF verification",
+                ));
+            }
             match format::detect(image)? {
                 Input::Ewf if sha256.is_none() => {
                     let mut args = vec!["verify".into(), image.as_os_str().into()];
                     if let Some(entry) = entry {
                         args.push(entry.into());
                     }
+                    if let Some(count) = workers {
+                        args.extend(["--workers".into(), count.to_string().into()]);
+                    }
                     ctx.ewf(args, report)
                 }
-                Input::Ewf => {
-                    transfer::verify_ewf(image, entry.as_deref(), sha256.as_deref(), ctx, report)
-                }
-                Input::Aff4 => aff4::verify(
+                Input::Ewf => transfer::verify_ewf(
                     image,
                     entry.as_deref(),
                     sha256.as_deref(),
-                    metadata_sha256.as_deref(),
+                    workers.unwrap_or(1) as usize,
                     ctx,
                     report,
                 ),
+                Input::Aff4 => {
+                    if workers.is_some() {
+                        return Err(invalid("--workers applies only to EWF verification"));
+                    }
+                    aff4::verify(
+                        image,
+                        entry.as_deref(),
+                        sha256.as_deref(),
+                        metadata_sha256.as_deref(),
+                        ctx,
+                        report,
+                    )
+                }
                 Input::Raw => {
+                    if workers.is_some() {
+                        return Err(invalid("--workers applies only to EWF verification"));
+                    }
                     if entry.is_some() {
                         return Err(invalid("raw images do not have file selectors"));
                     }
