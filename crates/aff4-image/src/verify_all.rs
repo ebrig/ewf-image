@@ -107,12 +107,33 @@ impl Container {
             .map(|s| s.id)
             .collect();
         let mut remaining = self.limits.verification_bytes;
+        let mut verified_backings = BTreeMap::<String, usize>::new();
         for id in &ids {
+            let mut backing = None;
             let value = self.size(id).and_then(|size| {
                 remaining = remaining
                     .checked_sub(size)
                     .ok_or_else(|| malformed("verification byte limit exceeded"))?;
-                self.verify(id, |done, size| progress(id, done, size))
+                let key = self.linear_backing(id)?;
+                backing = Some(key.clone());
+                if let Some(computed) = verified_backings
+                    .get(&key)
+                    .and_then(|index| report.resources[*index].verification.clone())
+                {
+                    // Direct dataStream wrappers have identical bytes, but each
+                    // resource still needs its own metadata validation, progress,
+                    // linear-reference comparisons, and coverage report.
+                    if progress(id, 0, size).is_break() {
+                        return Err(Error::Aborted);
+                    }
+                    self.read_inner(id, &mut [], 0, &mut Vec::new(), false)?;
+                    if progress(id, size, size).is_break() {
+                        return Err(Error::Aborted);
+                    }
+                    self.with_linear_references(id, computed)
+                } else {
+                    self.verify(id, |done, size| progress(id, done, size))
+                }
             });
             let (verification, coverage, error) = match value {
                 Err(Error::Aborted) => return Err(Error::Aborted),
@@ -167,6 +188,12 @@ impl Container {
                 && self.inline_data(id)?.is_none()
             {
                 report.checks.push(absent(id, "linear file digest"));
+            }
+            let index = report.resources.len();
+            if coverage.is_some()
+                && let Some(key) = backing
+            {
+                verified_backings.entry(key).or_insert(index);
             }
             report.resources.push(ResourceVerification {
                 resource: id.clone(),

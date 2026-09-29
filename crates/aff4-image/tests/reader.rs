@@ -133,6 +133,75 @@ fn verification_work_is_bounded_across_resources() {
     }));
 }
 
+#[test]
+fn direct_data_stream_alias_reuses_bytes_but_checks_its_own_reference_and_limit() {
+    use aff4_image::CheckOutcome;
+    use sha2::{Digest, Sha256};
+    let bytes = vec![42; 2 * 1024 * 1024];
+    let digest = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let metadata = format!(
+        "@prefix a: <http://aff4.org/Schema#> . \
+         <aff4://volume/data> a a:Image, a:ZipSegment; a:size {}; a:hash \"{digest}\"^^a:SHA256 . \
+         <aff4://volume/disk> a a:Image, a:DiskImage; a:size {}; \
+         a:dataStream <aff4://volume/data>; a:hash \"{}\"^^a:SHA256 .",
+        bytes.len(),
+        bytes.len(),
+        "0".repeat(64),
+    );
+    let file = fixture(&metadata, &[("data", &bytes)]);
+    let mut image = Container::open(file.path()).unwrap();
+    let mut intermediate = Vec::new();
+    let report = image
+        .verify_all(None, |id, done, total| {
+            if done > 0 && done < total {
+                intermediate.push(id.to_owned());
+            }
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+    assert_eq!(intermediate, ["aff4://volume/data"]);
+    assert_eq!(report.resources.len(), 2);
+    assert!(report.resources.iter().all(|r| r.coverage.is_some()));
+    let linear: Vec<_> = report
+        .checks
+        .iter()
+        .filter(|check| check.reference_source.ends_with("#hash"))
+        .collect();
+    assert_eq!(linear.len(), 2);
+    assert_eq!(linear[0].outcome, CheckOutcome::Match);
+    assert_eq!(linear[1].outcome, CheckOutcome::Mismatch);
+
+    let mut bounded = Container::open_with_limits(
+        file.path(),
+        Limits {
+            verification_bytes: bytes.len() as u64 * 2 - 1,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    let report = bounded
+        .verify_all(None, |_, _, _| ControlFlow::Continue(()))
+        .unwrap();
+    assert!(report.resources.iter().any(|r| {
+        r.error
+            .as_deref()
+            .is_some_and(|error| error.contains("verification byte limit"))
+    }));
+    assert!(matches!(
+        image.verify_all(None, |id, done, total| {
+            if id.ends_with("/disk") && done == total {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        }),
+        Err(Error::Aborted)
+    ));
+}
+
 fn index(length: u32) -> Vec<u8> {
     let mut data = 0u64.to_le_bytes().to_vec();
     data.extend_from_slice(&length.to_le_bytes());

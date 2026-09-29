@@ -480,7 +480,7 @@ impl Container {
             return Err(error.into());
         }
         walked?;
-        let mut result = Verification {
+        let result = Verification {
             bytes_verified: size,
             md5: hex(&md5.finalize()),
             sha1: hex(&sha1.finalize()),
@@ -490,6 +490,12 @@ impl Container {
             references_match: None,
             unsupported_hashes: Vec::new(),
         };
+        self.with_linear_references(id, result)
+    }
+
+    fn with_linear_references(&self, id: &str, mut result: Verification) -> Result<Verification> {
+        result.references_match = None;
+        result.unsupported_hashes.clear();
         for reference in self
             .properties(id)
             .filter(|p| is_property(&p.predicate, "hash"))
@@ -517,6 +523,23 @@ impl Container {
             );
         }
         Ok(result)
+    }
+
+    // A dataStream wrapper reads the same bytes as its terminal target. Map
+    // mappings are deliberately not followed: their range layout may alter bytes.
+    fn linear_backing(&self, id: &str) -> Result<String> {
+        let mut target = id.to_owned();
+        let mut visited = Vec::new();
+        loop {
+            enter(&target, &mut visited)?;
+            if self.inline_data(&target)?.is_some() {
+                return Ok(target);
+            }
+            match self.value(&target, "dataStream")? {
+                Some(next) => target = next,
+                None => return Ok(target),
+            }
+        }
     }
 
     // ZIP files must be decoded once for sequential verification. Positioned
