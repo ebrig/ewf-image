@@ -749,7 +749,18 @@ fn verify_written_ewf(
     ctx: &mut Context,
     report: &mut Value,
 ) -> Result<()> {
-    let result = crate::password::open(path, ctx.password.as_ref())?.verify_with_progress(
+    let image = crate::password::open(path, ctx.password.as_ref())?;
+    verify_opened_ewf(&image, expected, workers, ctx, report)
+}
+
+fn verify_opened_ewf(
+    image: &ewf_image::Image,
+    expected: [u8; 32],
+    workers: usize,
+    ctx: &mut Context,
+    report: &mut Value,
+) -> Result<()> {
+    let result = image.verify_with_progress(
         &VerifyOptions::default()
             .with_expected_sha256(expected)
             .with_parallelism(workers),
@@ -844,8 +855,8 @@ pub(crate) fn verify_ewf(
         report["exit_code"] = json!(if matched { 0 } else { 3 });
         return Ok(());
     }
-    verify_written_ewf(
-        path,
+    verify_opened_ewf(
+        &image,
         format::parse_hash(expected.unwrap())?,
         workers,
         ctx,
