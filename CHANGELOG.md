@@ -21,6 +21,9 @@ code written for 0.4.0. See
 - Fuse AFF4 linear and paired MD5/SHA256 block verification into one decoded
   chunk pass while retaining the existing work budgets, progress callbacks,
   mismatch reporting, and complete verification report.
+- Compare embedded EWF source hashes during physical conversion instead of
+  decoding the source in a separate preliminary verification pass. Only the
+  stored digest algorithms are added to the transfer hasher.
 
 ## 0.6.0 - 2026-09-29
 

@@ -32,6 +32,12 @@ fn data() -> Vec<u8> {
         .map(|n| ((n * 13 + n / 491) % 256) as u8)
         .collect()
 }
+fn hash(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 fn read_image(file: &Path) -> Vec<u8> {
     let mut result = Vec::new();
     match file.extension().unwrap().to_str().unwrap() {
@@ -76,6 +82,10 @@ fn every_physical_format_can_be_acquired_and_converted() {
                 "4096",
             ]);
             assert_eq!(v["destination_matches_source"], true, "{v}");
+            if matches!(from, "E01" | "Ex01") {
+                assert_eq!(v["source_verification"]["references_match"], true, "{v}");
+                assert_eq!(v["source_verification"]["sha256"], hash(&bytes), "{v}");
+            }
             assert_eq!(read_image(&output), bytes);
             if to == "aff4" {
                 let c = aff4_image::Container::open(&output).unwrap();
@@ -417,7 +427,10 @@ fn conversion_rejects_bad_source_hashes_and_preserves_ewf_error_ranges() {
         let result = run(&["convert", path(&input), path(&output)]);
         assert!(!result.status.success());
         assert!(!output.exists());
-        assert_eq!(report(&result)["published"], false);
+        let report = report(&result);
+        assert_eq!(report["published"], false);
+        assert_eq!(report["source_verification"]["references_match"], false);
+        assert_eq!(report["source_verification"]["sha256"], hash(&data()));
     }
     let input = dir.path().join("substituted.E01");
     let options = ewf_image::WriteOptions {

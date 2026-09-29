@@ -130,6 +130,11 @@ memory grows with the input size. Final segment writing and publication have no
 cancellation callback; a pending cancellation takes effect during the following
 verification step.
 
+Physical EWF conversion checks embedded source hashes as bytes pass to the
+destination, avoiding a separate source decode. The transfer automatically
+computes only the embedded digest algorithms that require comparison, in
+addition to the SHA256 used to compare the destination.
+
 The CLI has no `--memory-limit` or resource-budget options. The CLI uses internal
 streaming buffers and sets AFF4 metadata and verification limits from platform
 capacity. Library defaults and format validation are unchanged. The CLI does not

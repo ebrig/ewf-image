@@ -5,7 +5,9 @@ use crate::{
     invalid,
 };
 use ewf_image::{EwfMetadata, SequentialOptions, SequentialWriter, VerifyOptions};
+use md5::Md5;
 use serde_json::{Value, json};
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
@@ -22,11 +24,32 @@ struct Source {
     sector: u32,
     metadata: EwfMetadata,
     ewf_options: Option<ewf_image::WriteOptions>,
-    expected: Option<[u8; 32]>,
+    verification: SourceVerification,
     snapshots: Vec<(PathBuf, String)>,
     paths: Vec<PathBuf>,
     warnings: Vec<String>,
     omissions: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+enum SourceVerification {
+    None,
+    Stored {
+        md5: Option<[u8; 16]>,
+        sha1: Option<[u8; 20]>,
+        sha256: Option<[u8; 32]>,
+    },
+    PreverifiedSha256([u8; 32]),
+}
+
+impl SourceVerification {
+    fn needs_md5(self) -> bool {
+        matches!(self, Self::Stored { md5: Some(_), .. })
+    }
+
+    fn needs_sha1(self) -> bool {
+        matches!(self, Self::Stored { sha1: Some(_), .. })
+    }
 }
 
 pub(crate) fn snapshot(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String)>> {
@@ -95,7 +118,7 @@ fn read_source(
                 sector: sector(None, supplied_sector)?,
                 metadata: Default::default(),
                 ewf_options: None,
-                expected: None,
+                verification: SourceVerification::None,
                 snapshots,
                 paths,
                 warnings: vec![],
@@ -119,15 +142,15 @@ fn read_source(
             }
             let paths = image.info().segment_paths.clone();
             let snapshots = snapshot(&paths)?;
-            let v = image.verify_with_progress(
-                &VerifyOptions::default().with_parallelism(crate::verification_workers()),
-                |p| ctx.progress("source verification", p.bytes_verified, p.bytes_total),
-            )?;
-            report["source_verification"] = json!({"references_match":v.references_match(),"sha256":format::hex(&v.hashes.sha256)});
-            if v.references_match() == Some(false) {
-                report["exit_code"] = json!(3);
-                return Err(invalid("source reference hashes do not match"));
-            }
+            let verification = SourceVerification::Stored {
+                md5: image.md5_hash(),
+                sha1: image.sha1_hash(),
+                // Verification ignores malformed optional hash values, so retain
+                // that behavior when comparison is fused into the transfer.
+                sha256: image
+                    .hash_value("SHA256")
+                    .and_then(|value| format::parse_hash(value).ok()),
+            };
             let mut options = ewf_image::WriteOptions::default();
             options.copy_media_values_from_image(&image)?;
             options.copy_header_values_from_image(&image);
@@ -148,7 +171,14 @@ fn read_source(
                     .push("opaque EWF2 auxiliary sections tied to the original container".into());
             }
             let metadata = options.metadata.clone();
-            let warnings = if v.references_match().is_none() {
+            let warnings = if matches!(
+                verification,
+                SourceVerification::Stored {
+                    md5: None,
+                    sha1: None,
+                    sha256: None
+                }
+            ) {
                 vec!["Source has no supported reference hash; destination is compared with decoded source bytes.".into()]
             } else {
                 vec![]
@@ -160,7 +190,7 @@ fn read_source(
                 sector: sector(Some(options.bytes_per_sector), supplied_sector)?,
                 metadata,
                 ewf_options: Some(options),
-                expected: Some(v.hashes.sha256),
+                verification,
                 snapshots,
                 paths,
                 warnings,
@@ -269,7 +299,7 @@ fn read_source(
                 sector: sector(disk.block_size, supplied_sector)?,
                 metadata,
                 ewf_options: None,
-                expected: Some(selected_sha256),
+                verification: SourceVerification::PreverifiedSha256(selected_sha256),
                 snapshots,
                 paths,
                 warnings,
@@ -284,7 +314,42 @@ struct Reading<'a> {
     ctx: &'a mut Context,
     size: u64,
     done: u64,
-    hash: Sha256,
+    md5: Option<Md5>,
+    sha1: Option<Sha1>,
+    sha256: Sha256,
+}
+
+struct TransferHashes {
+    md5: Option<[u8; 16]>,
+    sha1: Option<[u8; 20]>,
+    sha256: [u8; 32],
+}
+
+impl<'a> Reading<'a> {
+    fn new(
+        input: &'a mut dyn Read,
+        ctx: &'a mut Context,
+        size: u64,
+        verification: SourceVerification,
+    ) -> Self {
+        Self {
+            input,
+            ctx,
+            size,
+            done: 0,
+            md5: verification.needs_md5().then(Md5::new),
+            sha1: verification.needs_sha1().then(Sha1::new),
+            sha256: Sha256::new(),
+        }
+    }
+
+    fn finish(self) -> TransferHashes {
+        TransferHashes {
+            md5: self.md5.map(|hash| hash.finalize().into()),
+            sha1: self.sha1.map(|hash| hash.finalize().into()),
+            sha256: self.sha256.finalize().into(),
+        }
+    }
 }
 
 impl Read for Reading<'_> {
@@ -303,7 +368,13 @@ impl Read for Reading<'_> {
                 "source ended before its declared size",
             ));
         }
-        self.hash.update(&bytes[..n]);
+        if let Some(hash) = &mut self.md5 {
+            hash.update(&bytes[..n]);
+        }
+        if let Some(hash) = &mut self.sha1 {
+            hash.update(&bytes[..n]);
+        }
+        self.sha256.update(&bytes[..n]);
         self.done += n as u64;
         Ok(n)
     }
@@ -313,15 +384,10 @@ fn copy(
     input: &mut dyn Read,
     output: &mut impl Write,
     size: u64,
+    verification: SourceVerification,
     ctx: &mut Context,
-) -> Result<[u8; 32]> {
-    let mut reading = Reading {
-        input,
-        ctx,
-        size,
-        done: 0,
-        hash: Sha256::new(),
-    };
+) -> Result<TransferHashes> {
+    let mut reading = Reading::new(input, ctx, size, verification);
     let mut buffer = vec![0; 256 * 1024];
     loop {
         let count = reading.read(&mut buffer)?;
@@ -330,17 +396,49 @@ fn copy(
         }
         output.write_all(&buffer[..count])?;
     }
-    Ok(reading.hash.finalize().into())
+    Ok(reading.finish())
 }
 
 fn record_timing(report: &mut Value, phase: &str, started: Instant) {
     report["timings"][phase] = json!(started.elapsed().as_secs_f64());
 }
 
-fn before_finish(source: &Source, digest: [u8; 32], ctx: &mut Context) -> Result<()> {
+fn before_finish(
+    source: &Source,
+    hashes: &TransferHashes,
+    ctx: &mut Context,
+    report: &mut Value,
+) -> Result<()> {
     source.check_unchanged()?;
-    if source.expected.is_some_and(|expected| expected != digest) {
-        return Err(invalid("source bytes changed after source verification"));
+    match source.verification {
+        SourceVerification::None => {}
+        SourceVerification::Stored { md5, sha1, sha256 } => {
+            let matches = [
+                md5.zip(hashes.md5)
+                    .map(|(expected, computed)| expected == computed),
+                sha1.zip(hashes.sha1)
+                    .map(|(expected, computed)| expected == computed),
+                sha256.map(|expected| expected == hashes.sha256),
+            ];
+            let references_match = matches
+                .iter()
+                .flatten()
+                .copied()
+                .reduce(|all, matched| all && matched);
+            report["source_verification"] = json!({
+                "references_match": references_match,
+                "sha256": format::hex(&hashes.sha256)
+            });
+            if references_match == Some(false) {
+                report["exit_code"] = json!(3);
+                return Err(invalid("source reference hashes do not match"));
+            }
+        }
+        SourceVerification::PreverifiedSha256(expected) => {
+            if expected != hashes.sha256 {
+                return Err(invalid("source bytes changed after source verification"));
+            }
+        }
     }
     ctx.check("finalization", source.size, source.size)
 }
@@ -448,7 +546,7 @@ pub(crate) fn acquire(
             ..Default::default()
         },
         ewf_options: None,
-        expected: None,
+        verification: SourceVerification::None,
         snapshots: vec![],
         paths: vec![],
         warnings: vec![],
@@ -515,7 +613,7 @@ fn transfer(
     }
     report["metadata_not_preserved"] = json!(losses);
     report["timings"] = json!({});
-    let digest;
+    let hashes;
     match target {
         Output::E01 => {
             // Conversion has a known length and writes forward only. The
@@ -542,14 +640,15 @@ fn transfer(
                 }
             }
             let stream_started = Instant::now();
-            digest = copy(
+            hashes = copy(
                 source.reader.as_mut(),
                 &mut Sink(&mut writer),
                 source.size,
+                source.verification,
                 ctx,
             )?;
             record_timing(report, "stream_seconds", stream_started);
-            before_finish(source, digest, ctx)?;
+            before_finish(source, &hashes, ctx, report)?;
             report["published"] = Value::Null;
             report["recovery_command"] =
                 json!(["ewf-cli", "recover-publication", output.to_string_lossy()]);
@@ -560,7 +659,7 @@ fn transfer(
             report["recovery_command"] = Value::Null;
             report["segments"] = json!(written.segment_paths);
             let verify_started = Instant::now();
-            verify_written_ewf(output, digest, ctx, report)?;
+            verify_written_ewf(output, hashes.sha256, ctx, report)?;
             record_timing(report, "verification_seconds", verify_started);
         }
         Output::Ex01 => {
@@ -583,14 +682,15 @@ fn transfer(
                 }
             }
             let stream_started = Instant::now();
-            digest = copy(
+            hashes = copy(
                 source.reader.as_mut(),
                 &mut Sink(&mut writer),
                 source.size,
+                source.verification,
                 ctx,
             )?;
             record_timing(report, "stream_seconds", stream_started);
-            before_finish(source, digest, ctx)?;
+            before_finish(source, &hashes, ctx, report)?;
             report["published"] = Value::Null;
             report["recovery_command"] =
                 json!(["ewf-cli", "recover-publication", output.to_string_lossy()]);
@@ -601,7 +701,7 @@ fn transfer(
             report["segments"] = json!(written.segment_paths);
             report["recovery_command"] = Value::Null;
             let verify_started = Instant::now();
-            verify_written_ewf(output, digest, ctx, report)?;
+            verify_written_ewf(output, hashes.sha256, ctx, report)?;
             record_timing(report, "verification_seconds", verify_started);
         }
         Output::Aff4 => {
@@ -616,13 +716,12 @@ fn transfer(
                 examiner: source.metadata.examiner.clone().unwrap_or_default(),
                 notes: source.metadata.notes.clone().unwrap_or_default(),
             })?;
-            let mut reader = Reading {
-                input: source.reader.as_mut(),
+            let mut reader = Reading::new(
+                source.reader.as_mut(),
                 ctx,
-                size: source.size,
-                done: 0,
-                hash: Sha256::new(),
-            };
+                source.size,
+                source.verification,
+            );
             let stream_started = Instant::now();
             writer.add_image_with_sector_size(
                 source.size,
@@ -630,9 +729,9 @@ fn transfer(
                 &mut reader,
                 |_, _| std::ops::ControlFlow::Continue(()),
             )?;
-            digest = reader.hash.finalize().into();
+            hashes = reader.finish();
             record_timing(report, "stream_seconds", stream_started);
-            before_finish(source, digest, ctx)?;
+            before_finish(source, &hashes, ctx, report)?;
             let finish_started = Instant::now();
             match writer.finish_verified(aff4_image::Limits::unrestricted(), |_, a, b| {
                 ctx.progress("destination verification", a, b)
@@ -640,7 +739,7 @@ fn transfer(
                 Ok((written, verified)) => {
                     report["published"] = json!(true);
                     if written.streams.len() != 1
-                        || written.streams[0].sha256 != format::hex(&digest)
+                        || written.streams[0].sha256 != format::hex(&hashes.sha256)
                     {
                         report["exit_code"] = json!(3);
                         return Err(invalid("destination digest differs from source"));
@@ -669,16 +768,22 @@ fn transfer(
                 .ok_or_else(|| invalid("missing output parent"))?;
             let mut file = tempfile::NamedTempFile::new_in(parent)?;
             let stream_started = Instant::now();
-            digest = copy(source.reader.as_mut(), &mut file, source.size, ctx)?;
+            hashes = copy(
+                source.reader.as_mut(),
+                &mut file,
+                source.size,
+                source.verification,
+                ctx,
+            )?;
             record_timing(report, "stream_seconds", stream_started);
-            before_finish(source, digest, ctx)?;
+            before_finish(source, &hashes, ctx, report)?;
             let sync_started = Instant::now();
             file.as_file().sync_all()?;
             record_timing(report, "sync_seconds", sync_started);
             let verify_started = Instant::now();
             let verified = hash_reader(&mut File::open(file.path())?, source.size, ctx)?;
             record_timing(report, "verification_seconds", verify_started);
-            if verified != digest {
+            if verified != hashes.sha256 {
                 report["exit_code"] = json!(3);
                 return Err(invalid("destination readback digest differs from source"));
             }
@@ -693,7 +798,7 @@ fn transfer(
         }
         Output::Lx01 => return Err(invalid("physical transfer cannot create a logical image")),
     }
-    report["sha256"] = json!(format::hex(&digest));
+    report["sha256"] = json!(format::hex(&hashes.sha256));
     report["destination_matches_source"] = json!(true);
     let substitutions = source
         .ewf_options
@@ -745,7 +850,7 @@ fn verify_opened_ewf(
 }
 
 fn hash_reader(reader: &mut dyn Read, size: u64, ctx: &mut Context) -> Result<[u8; 32]> {
-    copy(reader, &mut io::sink(), size, ctx)
+    Ok(copy(reader, &mut io::sink(), size, SourceVerification::None, ctx)?.sha256)
 }
 
 pub(crate) fn verify_raw(
