@@ -48,9 +48,12 @@ impl Session {
         options.chunks_per_segment = self.chunks_per_segment;
         options.compression = match self.compression.as_str() {
             "raw" => ewf_image::WriteCompression::None,
-            "zlib" => ewf_image::WriteCompression::Zlib,
+            "zlib" | "zlib-fast" => ewf_image::WriteCompression::Zlib,
             _ => return Err(invalid("unsupported session compression")),
         };
+        if self.compression == "zlib-fast" {
+            options.compression_level = ewf_image::WriteCompressionLevel::Fast;
+        }
         options.metadata.case_number.clone_from(&self.case_number);
         options
             .metadata

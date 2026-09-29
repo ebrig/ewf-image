@@ -17,8 +17,8 @@ mod writer;
 pub use reader::{
     BackingVolume, ByteCoverage, CheckOutcome, Container, ContainerVerification, DiskImageSet,
     IntegrityCheck, Limits, MetadataScan, MetadataVerification, PhysicalDisk, PhysicalDiskReader,
-    Property, ResourceVerification, SetDigest, SetVerification, SetVolumeVerification, StreamInfo,
-    Verification, VolumeSet, VolumeSource,
+    Property, ReaderCacheInfo, ReaderStatistics, ResourceVerification, SetDigest, SetVerification,
+    SetVolumeVerification, StreamInfo, Verification, VolumeSet, VolumeSource,
 };
 #[cfg(feature = "write")]
 pub use writer::{

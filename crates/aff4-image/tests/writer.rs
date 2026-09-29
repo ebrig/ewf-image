@@ -1,7 +1,7 @@
 //! Stream writer failure isolation and independent-consumer contracts.
 use aff4_image::{Compression, Container, Profile, WriteOptions, Writer};
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::ops::ControlFlow;
 
 fn proceed(_: u64, _: u64) -> ControlFlow<()> {
@@ -69,6 +69,14 @@ fn physical_codecs_bevies_padding_and_logical_zip_roundtrip() {
             .unwrap();
         let result = writer.finish().unwrap();
         let mut image = Container::open(&path).unwrap();
+        for offset in [0, 4096, 28672, 32768, 61440, 65536] {
+            let mut bytes = [0; 4096];
+            let count = image.read_at(&id, &mut bytes, offset).unwrap();
+            assert_eq!(
+                &bytes[..count],
+                &data[offset as usize..offset as usize + count]
+            );
+        }
         let full = image
             .verify_all(Some(&result.metadata_sha256), |_, _, _| {
                 ControlFlow::Continue(())
@@ -78,6 +86,13 @@ fn physical_codecs_bevies_padding_and_logical_zip_roundtrip() {
         let report = image.verify(&id, proceed).unwrap();
         assert_eq!(report.references_match, Some(true));
         assert_eq!(report.sha256, result.streams[0].sha256);
+        let mut sequential = Vec::new();
+        image
+            .sequential_reader(&id)
+            .unwrap()
+            .read_to_end(&mut sequential)
+            .unwrap();
+        assert_eq!(sequential, data);
         let mut bytes = vec![0; data.len()];
         image.read_at(&id, &mut bytes, 0).unwrap();
         assert_eq!(bytes, data);
@@ -111,11 +126,59 @@ fn physical_codecs_bevies_padding_and_logical_zip_roundtrip() {
             image.verify(&id, proceed).unwrap().references_match,
             Some(true)
         );
+        let mut sequential = Vec::new();
+        image
+            .sequential_reader(&id)
+            .unwrap()
+            .read_to_end(&mut sequential)
+            .unwrap();
+        assert_eq!(sequential, data);
         assert_eq!(
             image.verify(&empty, proceed).unwrap().references_match,
             Some(true)
         );
     }
+}
+
+#[test]
+fn decoded_cache_retains_multiple_chunks_and_reports_usage() {
+    let data = data();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cache.aff4");
+    let mut writer = Writer::create(
+        &path,
+        Profile::Physical,
+        WriteOptions {
+            chunk_bytes: 32768,
+            chunks_per_bevy: 4,
+            compression: Compression::Zlib,
+        },
+    )
+    .unwrap();
+    let id = writer
+        .add_image(data.len() as u64, &mut Cursor::new(&data), proceed)
+        .unwrap();
+    writer.finish().unwrap();
+
+    let mut image = Container::open(path).unwrap();
+    let opened = image.reader_statistics();
+    for offset in [0, 32768, 0] {
+        let mut bytes = [0; 4096];
+        image.read_at(&id, &mut bytes, offset).unwrap();
+        assert_eq!(
+            &bytes,
+            &data[offset as usize..offset as usize + bytes.len()]
+        );
+    }
+    let statistics = image.reader_statistics().saturating_delta(opened);
+    assert_eq!(statistics.decoded_cache_misses(), 2);
+    assert_eq!(statistics.decoded_cache_hits(), 1);
+    assert_eq!(statistics.decoded_bytes(), 2 * 32768);
+    let cache = image.reader_cache_info();
+    assert_eq!(cache.entries(), 2);
+    assert_eq!(cache.current_bytes(), 2 * 32768);
+    assert!(cache.peak_bytes() >= cache.current_bytes());
+    assert!(cache.current_bytes() <= cache.capacity_bytes());
 }
 
 #[test]

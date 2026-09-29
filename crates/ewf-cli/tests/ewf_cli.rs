@@ -1502,7 +1502,7 @@ fn cli_report_publication_failure_preserves_image_and_committed_result() {
 
 #[test]
 fn cli_acquires_reopens_and_verifies_raw_and_zlib() {
-    for compression in ["raw", "zlib"] {
+    for compression in ["raw", "zlib", "zlib-fast"] {
         let dir = tempfile::tempdir().unwrap();
         let bytes = source(dir.path());
         let report = result(
@@ -1555,6 +1555,8 @@ fn cli_repeated_pause_inspect_validate_resume_preserves_bytes() {
             "acquire",
             "source.raw",
             "case.E01",
+            "--compression",
+            "zlib-fast",
             "--sectors-per-chunk",
             "2",
             "--chunks-per-segment",

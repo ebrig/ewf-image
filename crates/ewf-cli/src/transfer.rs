@@ -11,11 +11,13 @@ use std::{
     fs::{self, File},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
+    time::Instant,
 };
 
 struct Source {
     reader: Box<dyn Read>,
+    physical: Option<Arc<Mutex<crate::ewf::source::Source>>>,
     size: u64,
     sector: u32,
     metadata: EwfMetadata,
@@ -46,6 +48,12 @@ impl Source {
             if crate::ewf::source::metadata_identity(&m)? != *identity {
                 return Err(invalid("source changed during conversion"));
             }
+        }
+        if let Some(device) = &self.physical {
+            device
+                .lock()
+                .map_err(|_| invalid("source reader lock is poisoned"))?
+                .check_unchanged()?;
         }
         Ok(())
     }
@@ -82,6 +90,7 @@ fn read_source(
             let size = file.metadata()?.len();
             Ok(Source {
                 reader: Box::new(file),
+                physical: None,
                 size,
                 sector: sector(None, supplied_sector)?,
                 metadata: Default::default(),
@@ -145,6 +154,7 @@ fn read_source(
             };
             Ok(Source {
                 reader: Box::new(image.cursor()),
+                physical: None,
                 size: image.media_size(),
                 sector: sector(Some(options.bytes_per_sector), supplied_sector)?,
                 metadata,
@@ -229,13 +239,17 @@ fn read_source(
                     "Some source AFF4 integrity references are missing or unsupported.".into(),
                 );
             }
-            let v = c.verify(&disk.resource_id, |a, b| {
-                ctx.progress("source verification", a, b)
-            })?;
-            if v.references_match == Some(false) {
+            let selected = all
+                .resources
+                .iter()
+                .find(|resource| resource.resource == disk.resource_id)
+                .and_then(|resource| resource.verification.as_ref())
+                .ok_or_else(|| invalid("selected AFF4 disk was not fully verified"))?;
+            if selected.references_match == Some(false) {
                 report["exit_code"] = json!(3);
                 return Err(invalid("source disk reference hashes do not match"));
             }
+            let selected_sha256 = format::parse_hash(&selected.sha256)?;
             report["source_verification"] = json!(all);
             let mut omissions = Vec::new();
             if disks.len() > 1 {
@@ -249,11 +263,12 @@ fn read_source(
             }
             Ok(Source {
                 reader: Box::new(c.into_disk_reader(Some(&disk.resource_id))?),
+                physical: None,
                 size: disk.logical_size,
                 sector: sector(disk.block_size, supplied_sector)?,
                 metadata,
                 ewf_options: None,
-                expected: Some(format::parse_hash(&v.sha256)?),
+                expected: Some(selected_sha256),
                 snapshots,
                 paths,
                 warnings,
@@ -306,8 +321,19 @@ fn copy(
         done: 0,
         hash: Sha256::new(),
     };
-    io::copy(&mut reading, output)?;
+    let mut buffer = vec![0; 256 * 1024];
+    loop {
+        let count = reading.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        output.write_all(&buffer[..count])?;
+    }
     Ok(reading.hash.finalize().into())
+}
+
+fn record_timing(report: &mut Value, phase: &str, started: Instant) {
+    report["timings"][phase] = json!(started.elapsed().as_secs_f64());
 }
 
 fn before_finish(source: &Source, digest: [u8; 32], ctx: &mut Context) -> Result<()> {
@@ -352,13 +378,19 @@ pub(crate) fn convert(
     report["output"] = json!(output);
     let mut source = read_source(input, resource, supplied_sector, ctx, report)?;
     let output = crate::ewf::export::destination(&source.paths, output)?;
-    transfer(&mut source, &output, target, ctx, report)
+    transfer(&mut source, &output, target, None, ctx, report)
+}
+
+pub(crate) struct AcquireOptions<'a> {
+    pub(crate) compression: Option<&'a str>,
+    pub(crate) chunk_bytes: Option<u32>,
 }
 
 pub(crate) fn acquire(
     input: &Path,
     output: &Path,
     supplied_sector: Option<u32>,
+    options: AcquireOptions<'_>,
     case: &CaseArgs,
     ctx: &mut Context,
     report: &mut Value,
@@ -369,17 +401,44 @@ pub(crate) fn acquire(
             "physical acquisition requires .E01, .Ex01, .aff4, or .raw",
         ));
     }
+    if target == Output::Raw && (options.compression.is_some() || options.chunk_bytes.is_some()) {
+        return Err(invalid(
+            "compression and chunk size apply only to container formats",
+        ));
+    }
+    let mut aff4_options = aff4_image::WriteOptions::default();
+    if target == Output::Aff4 {
+        aff4_options.compression = match options.compression.unwrap_or("zlib") {
+            "stored" | "raw" => aff4_image::Compression::Stored,
+            "zlib" => aff4_image::Compression::Zlib,
+            "snappy" => aff4_image::Compression::Snappy,
+            "lz4" => aff4_image::Compression::Lz4,
+            _ => return Err(invalid("unsupported AFF4 compression")),
+        };
+        if let Some(bytes) = options.chunk_bytes {
+            if bytes == 0 || bytes > 16 * 1024 * 1024 {
+                return Err(invalid("AFF4 chunk size must be 1 through 16 MiB"));
+            }
+            aff4_options.chunk_bytes = bytes;
+            aff4_options.chunks_per_bevy = aff4_options
+                .chunks_per_bevy
+                .min((128 * 1024 * 1024 / bytes).max(1));
+        }
+    }
     let output = crate::ewf::export::destination(&[], output)?;
     let mut device = crate::ewf::source::Source::open(input, supplied_sector, &output)?;
     device.configure_reads(Arc::clone(&ctx.stop), None)?;
     let size = device.identity.size;
     let sector = device.identity.sector_size;
+    if target == Output::Aff4 && !aff4_options.chunk_bytes.is_multiple_of(sector) {
+        return Err(invalid("AFF4 chunk size must be sector aligned"));
+    }
     report["source_identity"] = json!(device.identity);
     report["input"] = json!(input);
     report["output"] = json!(output);
     // Check the exact opened source again on its final read, before publication.
     struct Checked {
-        source: crate::ewf::source::Source,
+        source: Arc<Mutex<crate::ewf::source::Source>>,
         remaining: u64,
     }
     impl Read for Checked {
@@ -387,21 +446,27 @@ pub(crate) fn acquire(
             if self.remaining == 0 {
                 return Ok(0);
             }
-            let n = self.source.read(bytes)?;
+            let mut source = self
+                .source
+                .lock()
+                .map_err(|_| io::Error::other("source reader lock is poisoned"))?;
+            let n = source.read(bytes)?;
             self.remaining = self.remaining.saturating_sub(n as u64);
             if self.remaining == 0 {
-                self.source
+                source
                     .check_unchanged()
                     .map_err(|e| io::Error::other(e.to_string()))?;
             }
             Ok(n)
         }
     }
+    let device = Arc::new(Mutex::new(device));
     let mut source = Source {
-        reader: Box::new(Checked {
-            source: device,
+        reader: Box::new(crate::prefetch::Reader::new(Checked {
+            source: Arc::clone(&device),
             remaining: size,
-        }),
+        })?),
+        physical: Some(device),
         size,
         sector,
         metadata: EwfMetadata {
@@ -417,13 +482,21 @@ pub(crate) fn acquire(
         warnings: vec![],
         omissions: vec![],
     };
-    transfer(&mut source, &output, target, ctx, report)
+    transfer(
+        &mut source,
+        &output,
+        target,
+        Some(aff4_options),
+        ctx,
+        report,
+    )
 }
 
 fn transfer(
     source: &mut Source,
     output: &Path,
     target: Output,
+    aff4_options: Option<aff4_image::WriteOptions>,
     ctx: &mut Context,
     report: &mut Value,
 ) -> Result<()> {
@@ -469,6 +542,7 @@ fn transfer(
         }
     }
     report["metadata_not_preserved"] = json!(losses);
+    report["timings"] = json!({});
     let digest;
     match target {
         Output::E01 => {
@@ -495,21 +569,27 @@ fn transfer(
                     Ok(())
                 }
             }
+            let stream_started = Instant::now();
             digest = copy(
                 source.reader.as_mut(),
                 &mut Sink(&mut writer),
                 source.size,
                 ctx,
             )?;
+            record_timing(report, "stream_seconds", stream_started);
             before_finish(source, digest, ctx)?;
             report["published"] = Value::Null;
             report["recovery_command"] =
                 json!(["ewf-cli", "recover-publication", output.to_string_lossy()]);
+            let finish_started = Instant::now();
             let written = writer.finish()?;
+            record_timing(report, "finalization_seconds", finish_started);
             report["published"] = json!(true);
             report["recovery_command"] = Value::Null;
             report["segments"] = json!(written.segment_paths);
-            verify_written_ewf(output, digest, ctx, report)?;
+            let verify_started = Instant::now();
+            verify_written_ewf(output, digest, 1, ctx, report)?;
+            record_timing(report, "verification_seconds", verify_started);
         }
         Output::Ex01 => {
             let mut options = SequentialOptions::new(source.size);
@@ -530,28 +610,34 @@ fn transfer(
                     Ok(())
                 }
             }
+            let stream_started = Instant::now();
             digest = copy(
                 source.reader.as_mut(),
                 &mut Sink(&mut writer),
                 source.size,
                 ctx,
             )?;
+            record_timing(report, "stream_seconds", stream_started);
             before_finish(source, digest, ctx)?;
             report["published"] = Value::Null;
             report["recovery_command"] =
                 json!(["ewf-cli", "recover-publication", output.to_string_lossy()]);
+            let finish_started = Instant::now();
             let written = writer.finish()?;
+            record_timing(report, "finalization_seconds", finish_started);
             report["published"] = json!(true);
             report["segments"] = json!(written.segment_paths);
             report["recovery_command"] = Value::Null;
-            verify_written_ewf(output, digest, ctx, report)?;
+            let verify_started = Instant::now();
+            verify_written_ewf(output, digest, 1, ctx, report)?;
+            record_timing(report, "verification_seconds", verify_started);
         }
         Output::Aff4 => {
-            let mut writer = aff4_image::Writer::create(
-                output,
-                aff4_image::Profile::Physical,
-                aff4_image::WriteOptions::default(),
-            )?;
+            let options = aff4_options.unwrap_or_default();
+            report["compression"] = json!(options.compression);
+            report["chunk_bytes"] = json!(options.chunk_bytes);
+            let mut writer =
+                aff4_image::Writer::create(output, aff4_image::Profile::Physical, options)?;
             writer.add_case_metadata(&aff4_image::CaseMetadata {
                 case_number: source.metadata.case_number.clone().unwrap_or_default(),
                 evidence_number: source.metadata.evidence_number.clone().unwrap_or_default(),
@@ -565,6 +651,7 @@ fn transfer(
                 done: 0,
                 hash: Sha256::new(),
             };
+            let stream_started = Instant::now();
             writer.add_image_with_sector_size(
                 source.size,
                 source.sector,
@@ -572,7 +659,9 @@ fn transfer(
                 |_, _| std::ops::ControlFlow::Continue(()),
             )?;
             digest = reader.hash.finalize().into();
+            record_timing(report, "stream_seconds", stream_started);
             before_finish(source, digest, ctx)?;
+            let finish_started = Instant::now();
             match writer.finish_verified(aff4_image::Limits::unrestricted(), |_, a, b| {
                 ctx.progress("destination verification", a, b)
             }) {
@@ -600,25 +689,34 @@ fn transfer(
                 }
                 Err(error) => return Err(error.into()),
             }
+            record_timing(report, "finalization_verification_seconds", finish_started);
         }
         Output::Raw => {
             let parent = output
                 .parent()
                 .ok_or_else(|| invalid("missing output parent"))?;
             let mut file = tempfile::NamedTempFile::new_in(parent)?;
+            let stream_started = Instant::now();
             digest = copy(source.reader.as_mut(), &mut file, source.size, ctx)?;
+            record_timing(report, "stream_seconds", stream_started);
             before_finish(source, digest, ctx)?;
+            let sync_started = Instant::now();
             file.as_file().sync_all()?;
+            record_timing(report, "sync_seconds", sync_started);
+            let verify_started = Instant::now();
             let verified = hash_reader(&mut File::open(file.path())?, source.size, ctx)?;
+            record_timing(report, "verification_seconds", verify_started);
             if verified != digest {
                 report["exit_code"] = json!(3);
                 return Err(invalid("destination readback digest differs from source"));
             }
             ctx.check("publication", source.size, source.size)?;
+            let publish_started = Instant::now();
             file.persist_noclobber(output)?;
             report["published"] = json!(true);
             #[cfg(unix)]
             File::open(parent)?.sync_all()?;
+            record_timing(report, "publication_seconds", publish_started);
             report["verification"] = json!({"scope":"decoded media","bytes_verified":source.size,"sha256":format::hex(&verified),"references_match":true});
         }
         Output::Lx01 => return Err(invalid("physical transfer cannot create a logical image")),
@@ -647,11 +745,25 @@ fn transfer(
 fn verify_written_ewf(
     path: &Path,
     expected: [u8; 32],
+    workers: usize,
     ctx: &mut Context,
     report: &mut Value,
 ) -> Result<()> {
-    let result = crate::password::open(path, ctx.password.as_ref())?.verify_with_progress(
-        &VerifyOptions::default().with_expected_sha256(expected),
+    let image = crate::password::open(path, ctx.password.as_ref())?;
+    verify_opened_ewf(&image, expected, workers, ctx, report)
+}
+
+fn verify_opened_ewf(
+    image: &ewf_image::Image,
+    expected: [u8; 32],
+    workers: usize,
+    ctx: &mut Context,
+    report: &mut Value,
+) -> Result<()> {
+    let result = image.verify_with_progress(
+        &VerifyOptions::default()
+            .with_expected_sha256(expected)
+            .with_parallelism(workers),
         |p| ctx.progress("destination verification", p.bytes_verified, p.bytes_total),
     )?;
     report["verification"] = json!({"scope":"decoded media","bytes_verified":result.bytes_verified,"sha256":format::hex(&result.hashes.sha256),"references_match":result.references_match()});
@@ -701,6 +813,7 @@ pub(crate) fn verify_ewf(
     path: &Path,
     entry: Option<&str>,
     expected: Option<&str>,
+    workers: usize,
     ctx: &mut Context,
     report: &mut Value,
 ) -> Result<()> {
@@ -742,7 +855,13 @@ pub(crate) fn verify_ewf(
         report["exit_code"] = json!(if matched { 0 } else { 3 });
         return Ok(());
     }
-    verify_written_ewf(path, format::parse_hash(expected.unwrap())?, ctx, report)?;
+    verify_opened_ewf(
+        &image,
+        format::parse_hash(expected.unwrap())?,
+        workers,
+        ctx,
+        report,
+    )?;
     let substitutions = !image.info().acquisition_errors.is_empty();
     report["status"] = json!(if substitutions {
         "verified_with_substitutions"

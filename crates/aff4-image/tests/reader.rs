@@ -1,7 +1,7 @@
 //! AFF4 bounds, map semantics, and independent reference regressions.
 use aff4_image::{Container, Error, Limits};
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::ops::ControlFlow;
 use zip::{ZipWriter, write::SimpleFileOptions};
 
@@ -131,6 +131,169 @@ fn verification_work_is_bounded_across_resources() {
             .as_deref()
             .is_some_and(|e| e.contains("verification byte limit"))
     }));
+}
+
+#[test]
+fn direct_data_stream_alias_reuses_bytes_but_checks_its_own_reference_and_limit() {
+    use aff4_image::CheckOutcome;
+    use sha2::{Digest, Sha256};
+    let bytes = vec![42; 2 * 1024 * 1024];
+    let digest = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let metadata = format!(
+        "@prefix a: <http://aff4.org/Schema#> . \
+         <aff4://volume/data> a a:Image, a:ZipSegment; a:size {}; a:hash \"{digest}\"^^a:SHA256 . \
+         <aff4://volume/disk> a a:Image, a:DiskImage; a:size {}; \
+         a:dataStream <aff4://volume/data>; a:hash \"{}\"^^a:SHA256 .",
+        bytes.len(),
+        bytes.len(),
+        "0".repeat(64),
+    );
+    let file = fixture(&metadata, &[("data", &bytes)]);
+    let mut image = Container::open(file.path()).unwrap();
+    let mut intermediate = Vec::new();
+    let report = image
+        .verify_all(None, |id, done, total| {
+            if done > 0 && done < total {
+                intermediate.push(id.to_owned());
+            }
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+    assert_eq!(intermediate, ["aff4://volume/data"]);
+    assert_eq!(report.resources.len(), 2);
+    assert!(report.resources.iter().all(|r| r.coverage.is_some()));
+    let linear: Vec<_> = report
+        .checks
+        .iter()
+        .filter(|check| check.reference_source.ends_with("#hash"))
+        .collect();
+    assert_eq!(linear.len(), 2);
+    assert_eq!(linear[0].outcome, CheckOutcome::Match);
+    assert_eq!(linear[1].outcome, CheckOutcome::Mismatch);
+
+    let mut bounded = Container::open_with_limits(
+        file.path(),
+        Limits {
+            verification_bytes: bytes.len() as u64 * 2 - 1,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    let report = bounded
+        .verify_all(None, |_, _, _| ControlFlow::Continue(()))
+        .unwrap();
+    assert!(report.resources.iter().any(|r| {
+        r.error
+            .as_deref()
+            .is_some_and(|error| error.contains("verification byte limit"))
+    }));
+    assert!(matches!(
+        image.verify_all(None, |id, done, total| {
+            if id.ends_with("/disk") && done == total {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        }),
+        Err(Error::Aborted)
+    ));
+}
+
+#[test]
+fn only_complete_identity_maps_reuse_their_targets_digest() {
+    let size = 2 * 1024 * 1024;
+    let mut bytes = vec![0; size];
+    bytes[size / 2..].fill(1);
+    let metadata = format!(
+        "@prefix a: <http://aff4.org/Schema#> . \
+         <aff4://volume/data> a a:Image, a:ZipSegment; a:size {size} . \
+         <aff4://volume/map> a a:Map; a:size {size} . \
+         <aff4://volume/disk> a a:Image, a:DiskImage, a:ContiguousImage; \
+         a:size {size}; a:dataStream <aff4://volume/map> .",
+    );
+    let record = |start: u64, length: u64, offset: u64| {
+        [
+            start.to_le_bytes().as_slice(),
+            length.to_le_bytes().as_slice(),
+            offset.to_le_bytes().as_slice(),
+            &0u32.to_le_bytes(),
+        ]
+        .concat()
+    };
+    for reordered in [false, true] {
+        let ranges = if reordered {
+            [
+                record(0, (size / 2) as u64, (size / 2) as u64),
+                record((size / 2) as u64, (size / 2) as u64, 0),
+            ]
+            .concat()
+        } else {
+            record(0, size as u64, 0)
+        };
+        let file = fixture(
+            &metadata,
+            &[
+                ("data", &bytes),
+                ("map/map", &ranges),
+                ("map/idx", b"aff4://volume/data\n"),
+            ],
+        );
+        let mut image = Container::open(file.path()).unwrap();
+        let expected: Vec<u8> = if reordered {
+            bytes[size / 2..]
+                .iter()
+                .chain(&bytes[..size / 2])
+                .copied()
+                .collect()
+        } else {
+            bytes.clone()
+        };
+        for id in ["aff4://volume/map", "aff4://volume/disk"] {
+            let mut read = Vec::new();
+            image
+                .sequential_reader(id)
+                .unwrap()
+                .read_to_end(&mut read)
+                .unwrap();
+            assert_eq!(read, expected);
+            let mut copied = Vec::new();
+            let verified = image
+                .copy_verified(id, &mut copied, |_, _| ControlFlow::Continue(()))
+                .unwrap();
+            assert_eq!(verified.bytes_verified, size as u64);
+            assert_eq!(copied, expected);
+        }
+        let mut intermediate = Vec::new();
+        let report = image
+            .verify_all(None, |id, done, total| {
+                if done > 0 && done < total {
+                    intermediate.push(id.to_owned());
+                }
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        let digest = |id: &str| {
+            &report
+                .resources
+                .iter()
+                .find(|resource| resource.resource == id)
+                .unwrap()
+                .verification
+                .as_ref()
+                .unwrap()
+                .sha256
+        };
+        let data = digest("aff4://volume/data");
+        let map = digest("aff4://volume/map");
+        let disk = digest("aff4://volume/disk");
+        assert_eq!(map, disk);
+        assert_eq!(data == map, !reordered);
+        assert_eq!(intermediate.len(), if reordered { 2 } else { 1 });
+        assert!(intermediate.contains(&"aff4://volume/data".to_owned()));
+    }
 }
 
 fn index(length: u32) -> Vec<u8> {
@@ -321,6 +484,20 @@ fn logical_zip_inline_imports_and_metadata() {
     let mut buffer = [0; 3];
     image.read_at("aff4://inline", &mut buffer, 0).unwrap();
     assert_eq!(&buffer, b"abc");
+    let mut sequential = Vec::new();
+    image
+        .sequential_reader("aff4://file")
+        .unwrap()
+        .read_to_end(&mut sequential)
+        .unwrap();
+    assert_eq!(sequential, b"abc");
+    sequential.clear();
+    image
+        .sequential_reader("aff4://inline")
+        .unwrap()
+        .read_to_end(&mut sequential)
+        .unwrap();
+    assert_eq!(sequential, b"abc");
     assert!(
         image.metadata()["aff4://file"]
             .iter()
@@ -611,6 +788,72 @@ fn full_verification_reports_block_corruption_and_gap_coverage() {
         .unwrap();
     let c = report.resources[0].coverage.as_ref().unwrap();
     assert_eq!((c.stored, c.described, c.gap_filled), (0, 2, 3));
+}
+
+#[test]
+fn paired_block_hashes_report_each_algorithm_and_preserve_work_limit() {
+    use aff4_image::CheckOutcome;
+    use md5::{Digest, Md5};
+    use sha2::Sha256;
+    let first_md5 = Md5::digest(b"abcd");
+    let mut second_md5 = Md5::digest(b"ef").to_vec();
+    second_md5[0] ^= 1;
+    let first_sha256 = Sha256::digest(b"abcd");
+    let mut second_sha256 = Sha256::digest(b"ef").to_vec();
+    second_sha256[0] ^= 1;
+    let file = fixture(
+        &metadata(),
+        &[
+            ("data/00000000", b"abcd"),
+            ("data/00000001", b"ef\0\0"),
+            ("data/00000000.index", &index(4)),
+            ("data/00000001.index", &index(4)),
+            ("data/00000000.blockHash.md5", &first_md5),
+            ("data/00000001.blockHash.md5", &second_md5),
+            ("data/00000000.blockHash.sha256", &first_sha256),
+            ("data/00000001.blockHash.sha256", &second_sha256),
+        ],
+    );
+    let mut image = Container::open(file.path()).unwrap();
+    let report = image
+        .verify_all(None, |_, _, _| ControlFlow::Continue(()))
+        .unwrap();
+    let blocks: Vec<_> = report
+        .checks
+        .iter()
+        .filter(|check| check.reference_source.contains("blockHash"))
+        .collect();
+    assert_eq!(blocks.len(), 4);
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|check| check.algorithm.as_str())
+            .collect::<Vec<_>>(),
+        ["MD5", "MD5", "SHA256", "SHA256"]
+    );
+    assert_eq!(blocks[0].outcome, CheckOutcome::Match);
+    assert_eq!(blocks[1].outcome, CheckOutcome::Mismatch);
+    assert_eq!(blocks[2].outcome, CheckOutcome::Match);
+    assert_eq!(blocks[3].outcome, CheckOutcome::Mismatch);
+
+    let mut bounded = Container::open_with_limits(
+        file.path(),
+        Limits {
+            verification_bytes: 23,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    let report = bounded
+        .verify_all(None, |_, _, _| ControlFlow::Continue(()))
+        .unwrap();
+    assert!(report.checks.iter().any(|check| {
+        check.reference_source == "block hashes"
+            && check
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("verification byte limit"))
+    }));
 }
 
 #[test]

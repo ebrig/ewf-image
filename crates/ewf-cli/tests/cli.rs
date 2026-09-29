@@ -63,7 +63,8 @@ fn every_physical_format_can_be_acquired_and_converted() {
     fs::write(&raw, &bytes).unwrap();
     for from in ["E01", "Ex01", "aff4", "raw"] {
         let input = dir.path().join(format!("acquired.{from}"));
-        succeeds(&["acquire", path(&raw), path(&input), "--sector-size", "4096"]);
+        let acquired = succeeds(&["acquire", path(&raw), path(&input), "--sector-size", "4096"]);
+        assert!(acquired["timings"].is_object(), "{acquired}");
         assert_eq!(read_image(&input), bytes);
         for to in ["E01", "Ex01", "aff4", "raw"] {
             let output = dir.path().join(format!("{from}-converted.{to}"));
@@ -91,6 +92,89 @@ fn every_physical_format_can_be_acquired_and_converted() {
             }
         }
     }
+}
+
+#[test]
+fn physical_acquisition_exposes_supported_compression_choices() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.raw");
+    let bytes = data();
+    fs::write(&source, &bytes).unwrap();
+    for codec in ["stored", "zlib", "snappy", "lz4"] {
+        let output = dir.path().join(format!("aff4-{codec}.aff4"));
+        let value = succeeds(&[
+            "acquire",
+            path(&source),
+            path(&output),
+            "--compression",
+            codec,
+            "--chunk-bytes",
+            "65536",
+        ]);
+        assert_eq!(value["chunk_bytes"], 65536);
+        assert_eq!(read_image(&output), bytes);
+    }
+    let ewf = dir.path().join("ewf-fast.E01");
+    succeeds(&["acquire", path(&source), path(&ewf), "--compression", "raw"]);
+    assert_eq!(read_image(&ewf), bytes);
+    let fast = dir.path().join("ewf-zlib-fast.Ex01");
+    succeeds(&[
+        "acquire",
+        path(&source),
+        path(&fast),
+        "--compression",
+        "zlib-fast",
+    ]);
+    assert_eq!(read_image(&fast), bytes);
+    let raw = dir.path().join("output.raw");
+    assert!(
+        !run(&[
+            "acquire",
+            path(&source),
+            path(&raw),
+            "--compression",
+            "zlib"
+        ])
+        .status
+        .success()
+    );
+    assert!(!raw.exists());
+}
+
+#[test]
+fn ewf_verification_workers_cover_both_cli_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.raw");
+    fs::write(&source, data()).unwrap();
+    let image = dir.path().join("workers.E01");
+    let acquired = succeeds(&["acquire", path(&source), path(&image)]);
+    let expected = acquired["verification"]["sha256"].as_str().unwrap();
+    for args in [
+        vec!["verify", path(&image), "--workers", "4"],
+        vec!["ewf", "verify", path(&image), "--workers", "4"],
+        vec![
+            "verify",
+            path(&image),
+            "--sha256",
+            expected,
+            "--workers",
+            "4",
+        ],
+    ] {
+        let output = run(&args);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(report(&output)["verification"]["sha256"], expected);
+    }
+    assert!(
+        !run(&["verify", path(&source), "--workers", "4"])
+            .status
+            .success()
+    );
+    assert!(
+        !run(&["verify", path(&image), "--workers", "0"])
+            .status
+            .success()
+    );
 }
 
 #[test]

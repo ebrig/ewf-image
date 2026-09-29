@@ -16,8 +16,12 @@ pub struct ReaderStatistics {
     table_checksum_nanos: u64,
     chunk_cache_hits: u64,
     chunk_cache_misses: u64,
+    chunk_cache_coalesced: u64,
     table_page_cache_hits: u64,
     table_page_cache_misses: u64,
+    segment_read_bytes: u64,
+    segment_read_nanos: u64,
+    segment_pool_wait_nanos: u64,
     encoded_bytes_read: u64,
     decoded_bytes: u64,
     decompression_nanos: u64,
@@ -64,6 +68,11 @@ impl ReaderStatistics {
         self.chunk_cache_misses
     }
 
+    /// Returns misses that waited for an already-running decode of the same chunk.
+    pub fn chunk_cache_coalesced(&self) -> u64 {
+        self.chunk_cache_coalesced
+    }
+
     /// Returns table-entry page-cache hits.
     pub fn table_page_cache_hits(&self) -> u64 {
         self.table_page_cache_hits
@@ -72,6 +81,21 @@ impl ReaderStatistics {
     /// Returns table-entry page-cache misses.
     pub fn table_page_cache_misses(&self) -> u64 {
         self.table_page_cache_misses
+    }
+
+    /// Returns bytes read from path-backed segment files after opening.
+    pub fn segment_read_bytes(&self) -> u64 {
+        self.segment_read_bytes
+    }
+
+    /// Returns nanoseconds spent in path-backed positioned segment reads.
+    pub fn segment_read_nanos(&self) -> u64 {
+        self.segment_read_nanos
+    }
+
+    /// Returns nanoseconds spent waiting for a bounded segment handle to become idle.
+    pub fn segment_pool_wait_nanos(&self) -> u64 {
+        self.segment_pool_wait_nanos
     }
 
     /// Returns encoded chunk bytes read from segment files.
@@ -113,12 +137,24 @@ impl ReaderStatistics {
             chunk_cache_misses: self
                 .chunk_cache_misses
                 .saturating_sub(earlier.chunk_cache_misses),
+            chunk_cache_coalesced: self
+                .chunk_cache_coalesced
+                .saturating_sub(earlier.chunk_cache_coalesced),
             table_page_cache_hits: self
                 .table_page_cache_hits
                 .saturating_sub(earlier.table_page_cache_hits),
             table_page_cache_misses: self
                 .table_page_cache_misses
                 .saturating_sub(earlier.table_page_cache_misses),
+            segment_read_bytes: self
+                .segment_read_bytes
+                .saturating_sub(earlier.segment_read_bytes),
+            segment_read_nanos: self
+                .segment_read_nanos
+                .saturating_sub(earlier.segment_read_nanos),
+            segment_pool_wait_nanos: self
+                .segment_pool_wait_nanos
+                .saturating_sub(earlier.segment_pool_wait_nanos),
             encoded_bytes_read: self
                 .encoded_bytes_read
                 .saturating_sub(earlier.encoded_bytes_read),
@@ -187,8 +223,12 @@ pub(crate) struct ReaderStatisticsCollector {
     table_checksum_nanos: AtomicU64,
     chunk_cache_hits: AtomicU64,
     chunk_cache_misses: AtomicU64,
+    chunk_cache_coalesced: AtomicU64,
     table_page_cache_hits: AtomicU64,
     table_page_cache_misses: AtomicU64,
+    segment_read_bytes: AtomicU64,
+    segment_read_nanos: AtomicU64,
+    segment_pool_wait_nanos: AtomicU64,
     encoded_bytes_read: AtomicU64,
     decoded_bytes: AtomicU64,
     decompression_nanos: AtomicU64,
@@ -216,8 +256,12 @@ impl ReaderStatisticsCollector {
             table_checksum_nanos: self.table_checksum_nanos.load(Ordering::Relaxed),
             chunk_cache_hits: self.chunk_cache_hits.load(Ordering::Relaxed),
             chunk_cache_misses: self.chunk_cache_misses.load(Ordering::Relaxed),
+            chunk_cache_coalesced: self.chunk_cache_coalesced.load(Ordering::Relaxed),
             table_page_cache_hits: self.table_page_cache_hits.load(Ordering::Relaxed),
             table_page_cache_misses: self.table_page_cache_misses.load(Ordering::Relaxed),
+            segment_read_bytes: self.segment_read_bytes.load(Ordering::Relaxed),
+            segment_read_nanos: self.segment_read_nanos.load(Ordering::Relaxed),
+            segment_pool_wait_nanos: self.segment_pool_wait_nanos.load(Ordering::Relaxed),
             encoded_bytes_read: self.encoded_bytes_read.load(Ordering::Relaxed),
             decoded_bytes: self.decoded_bytes.load(Ordering::Relaxed),
             decompression_nanos: self.decompression_nanos.load(Ordering::Relaxed),
@@ -251,6 +295,19 @@ impl ReaderStatisticsCollector {
         } else {
             self.add(&self.chunk_cache_misses, 1);
         }
+    }
+
+    pub(crate) fn record_chunk_cache_coalesced(&self) {
+        self.add(&self.chunk_cache_coalesced, 1);
+    }
+
+    pub(crate) fn record_segment_read(&self, bytes: usize, elapsed: Duration) {
+        self.add(&self.segment_read_bytes, usize_to_u64(bytes));
+        self.add(&self.segment_read_nanos, duration_nanos(elapsed));
+    }
+
+    pub(crate) fn record_segment_pool_wait(&self, elapsed: Duration) {
+        self.add(&self.segment_pool_wait_nanos, duration_nanos(elapsed));
     }
 
     pub(crate) fn record_table_page_cache_access(&self, hit: bool) {

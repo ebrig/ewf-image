@@ -50,8 +50,10 @@ pub(crate) struct Source {
 
 // Safe aligned bounce storage for uncached device I/O. Do not reinterpret a
 // Vec allocation: its alignment is only guaranteed for its element type.
+pub(super) const READ_BLOCK_BYTES: usize = 256 * 1024;
+
 #[repr(align(4096))]
-struct DeviceBuffer([u8; 16384]);
+struct DeviceBuffer([u8; READ_BLOCK_BYTES]);
 
 impl Source {
     pub fn open(path: &Path, sector_size: Option<u32>, output: &Path) -> Result<Self> {
@@ -135,7 +137,7 @@ impl Source {
             file,
             identity,
             output: output.to_path_buf(),
-            device_buffer: Some(Box::new(DeviceBuffer([0; 16384]))),
+            device_buffer: Some(Box::new(DeviceBuffer([0; READ_BLOCK_BYTES]))),
             reader: None,
             position: 0,
         };
@@ -179,7 +181,7 @@ impl Read for Source {
         if self.device_buffer.is_some()
             && !buffer
                 .len()
-                .min(16384)
+                .min(READ_BLOCK_BYTES)
                 .is_multiple_of(self.identity.sector_size as usize)
         {
             return Err(io::Error::new(
@@ -338,7 +340,7 @@ mod tests {
         fs::write(&path, vec![0x71; 32768]).unwrap();
         let mut source = Source::open(&path, Some(512), &root.path().join("out.E01")).unwrap();
         source.file = open_device_file(&path).unwrap();
-        source.device_buffer = Some(Box::new(DeviceBuffer([0; 16384])));
+        source.device_buffer = Some(Box::new(DeviceBuffer([0; READ_BLOCK_BYTES])));
         assert_eq!(
             source.device_buffer.as_ref().unwrap().0.as_ptr() as usize % 4096,
             0

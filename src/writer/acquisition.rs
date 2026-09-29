@@ -3,16 +3,17 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use super::{
     ChunkDescriptor, ChunkSpool, EWF1_TABLE_GROUP_MAX_ENTRIES, Ewf1SegmentSections,
-    Ewf1SegmentWriteContext, TerminalSection, WriteCompression, WriteHashState, WriteOptions,
-    WriteResult, effective_write_hashes, encode_chunk, header_payload, header2_payload,
-    publication_segment_paths, segment_path, validate_options, write_ewf1_segment,
-    writer_chunk_geometry, xheader_payload,
+    Ewf1SegmentWriteContext, TerminalSection, WriteCompression, WriteCompressionLevel,
+    WriteCompressionValues, WriteHashState, WriteOptions, WriteResult, effective_write_hashes,
+    encode_chunk, header_payload, header2_payload, publication_segment_paths, segment_path,
+    validate_options, write_ewf1_segment, writer_chunk_geometry, xheader_payload,
 };
 use crate::publication::{OutputLock, acquisition_path, sync_dir};
 use crate::{AcquisitionError, EwfError, EwfMetadata, Result};
@@ -47,6 +48,8 @@ pub struct AcquisitionOptions {
     pub chunks_per_segment: u32,
     /// Raw or zlib compression. `BZip2` is not supported by this EWF1 API.
     pub compression: WriteCompression,
+    /// Zlib compression level; defaults to the standard level.
+    pub compression_level: WriteCompressionLevel,
     /// Acquisition metadata, fixed at creation and checked on resume.
     pub metadata: EwfMetadata,
 }
@@ -60,6 +63,7 @@ impl AcquisitionOptions {
             sectors_per_chunk: 64,
             chunks_per_segment: EWF1_TABLE_GROUP_MAX_ENTRIES as u32,
             compression: WriteCompression::Zlib,
+            compression_level: WriteCompressionLevel::Default,
             metadata: EwfMetadata::default(),
         }
     }
@@ -83,6 +87,10 @@ impl AcquisitionOptions {
             sectors_per_chunk: self.sectors_per_chunk,
             bytes_per_sector: self.bytes_per_sector,
             compression: self.compression,
+            compression_values: WriteCompressionValues {
+                level: self.compression_level,
+                ..WriteCompressionValues::default()
+            },
             media_size: Some(self.source_size),
             metadata: self.metadata.clone(),
             ..WriteOptions::default()
@@ -128,6 +136,9 @@ pub struct AcquisitionWriter {
     sealed: Vec<Seal>,
     errors: Vec<AcquisitionError>,
     substituted_sectors: u64,
+    processing_duration: Duration,
+    scratch_write_duration: Duration,
+    segment_seal_duration: Duration,
     failed: bool,
     #[cfg(test)]
     fail_seal: bool,
@@ -273,6 +284,7 @@ impl AcquisitionWriter {
         let spool = ChunkSpool {
             file: NamedTempFile::new_in(state.join("scratch"))?,
             len: 0,
+            position: 0,
         };
         Ok(Self {
             first,
@@ -289,6 +301,9 @@ impl AcquisitionWriter {
             sealed: Vec::new(),
             errors: Vec::new(),
             substituted_sectors: 0,
+            processing_duration: Duration::ZERO,
+            scratch_write_duration: Duration::ZERO,
+            segment_seal_duration: Duration::ZERO,
             failed: false,
             #[cfg(test)]
             fail_seal: false,
@@ -309,6 +324,21 @@ impl AcquisitionWriter {
     /// Number of immutable native EWF segments checkpointed so far.
     pub fn sealed_segments(&self) -> usize {
         self.sealed.len()
+    }
+
+    /// Time spent hashing and encoding new chunks in this writer instance.
+    pub fn processing_duration(&self) -> Duration {
+        self.processing_duration
+    }
+
+    /// Time spent appending encoded chunks to scratch storage in this instance.
+    pub fn scratch_write_duration(&self) -> Duration {
+        self.scratch_write_duration
+    }
+
+    /// Time spent building, synchronizing, hashing, and checkpointing segments.
+    pub fn segment_seal_duration(&self) -> Duration {
+        self.segment_seal_duration
     }
 
     /// Unreadable source sectors replaced with zeroes, including unsealed input.
@@ -465,6 +495,7 @@ impl AcquisitionWriter {
         self.pending.extend_from_slice(&bytes[..take]);
         self.offset += take as u64;
         if self.pending.len() == self.chunk_size || self.offset == self.source_size {
+            let processing_started = Instant::now();
             self.hashes.update(&self.pending);
             let data = std::mem::replace(&mut self.pending, Vec::with_capacity(self.chunk_size));
             let encoded = encode_chunk(
@@ -475,8 +506,11 @@ impl AcquisitionWriter {
                 false,
                 false,
             )?;
+            self.processing_duration += processing_started.elapsed();
+            let scratch_started = Instant::now();
             self.chunks
                 .push(self.spool.as_mut().expect("active spool").append(encoded)?);
+            self.scratch_write_duration += scratch_started.elapsed();
             if self.chunks.len() == self.chunks_per_segment || self.offset == self.source_size {
                 self.seal(self.offset == self.source_size)?;
             }
@@ -485,6 +519,7 @@ impl AcquisitionWriter {
     }
 
     fn seal(&mut self, final_segment: bool) -> Result<()> {
+        let seal_started = Instant::now();
         let index = self.sealed.len() + 1;
         let target = staged_path(&self.first, &self.state, index)?;
         let mut options = self.options.clone();
@@ -568,8 +603,8 @@ impl AcquisitionWriter {
         tests::crash_at("checkpoint-synced", index);
         self.sealed.push(seal);
         self.chunks.clear();
-        spool.file.as_file_mut().set_len(0)?;
-        spool.len = 0;
+        spool.reset()?;
+        self.segment_seal_duration += seal_started.elapsed();
         Ok(())
     }
 }
@@ -713,6 +748,17 @@ fn fingerprint(
     hash.update(acquisition.sectors_per_chunk.to_le_bytes());
     hash.update(acquisition.chunks_per_segment.to_le_bytes());
     hash.update([u8::from(acquisition.compression == WriteCompression::Zlib)]);
+    // Preserve fingerprints of checkpoints created before compression levels
+    // were exposed while binding every non-default level to its own journal.
+    if acquisition.compression_level != WriteCompressionLevel::Default {
+        hash.update(b"compression-level:");
+        hash.update([match acquisition.compression_level {
+            WriteCompressionLevel::None => 0,
+            WriteCompressionLevel::Fast => 1,
+            WriteCompressionLevel::Best => 2,
+            WriteCompressionLevel::Default => unreachable!(),
+        }]);
+    }
     let path = first.as_os_str().as_encoded_bytes();
     hash.update((path.len() as u64).to_le_bytes());
     hash.update(path);

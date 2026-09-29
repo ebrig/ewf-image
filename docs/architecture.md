@@ -28,8 +28,11 @@ Zstandard, BZip2, and pattern-fill. Decoded chunks and table pages use bounded
 caches that are shared by clones and cursors. Table checksums use a fixed 64 KiB
 streaming buffer.
 
-`OpenOptions` controls caches and open handles. The optional `ReaderStatistics`
-records cumulative I/O, cache, parsing, checksum, and decompression counters.
+`OpenOptions` controls caches and open handles. Path-backed readers lease native
+positioned file handles only for each read, so segment I/O does not hold the
+global LRU bookkeeping lock. Concurrent misses for one chunk share its decode.
+The optional `ReaderStatistics` records cumulative I/O, cache, parsing,
+checksum, handle-pool wait, coalescing, and decompression counters.
 `ReaderCacheInfo` reports retained cache usage. Statistics are disabled by
 default. `SegmentSource` supports immutable files, memory buffers, and bounded
 subranges. After opening, supplied sources serve positioned reads directly.

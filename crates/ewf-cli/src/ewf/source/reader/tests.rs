@@ -46,6 +46,28 @@ fn wait_finished(reader: &Reader) {
 }
 
 #[test]
+fn large_reads_return_aligned_blocks_across_repeated_requests() {
+    let bytes: Vec<u8> = (0..2 * READ_BLOCK_BYTES).map(|n| (n % 251) as u8).collect();
+    let mut reader = Reader::new(
+        Cursor::new(bytes.clone()),
+        Arc::new(AtomicBool::new(false)),
+        None,
+    )
+    .unwrap();
+    let mut output = vec![0; READ_BLOCK_BYTES + 4096];
+    for index in 0..2 {
+        let count = reader
+            .read_at((index * READ_BLOCK_BYTES) as u64, &mut output)
+            .unwrap();
+        assert_eq!(count, READ_BLOCK_BYTES);
+        assert_eq!(
+            &output[..count],
+            &bytes[index * READ_BLOCK_BYTES..(index + 1) * READ_BLOCK_BYTES]
+        );
+    }
+}
+
+#[test]
 fn stalled_seek_and_read_stop_without_late_data_and_resume() {
     use super::super::Source;
     use ewf_image::{

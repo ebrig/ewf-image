@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::DeviceBuffer;
+use super::{DeviceBuffer, READ_BLOCK_BYTES};
 
 const POLL: Duration = Duration::from_millis(20);
 
@@ -18,8 +18,9 @@ const POLL: Duration = Duration::from_millis(20);
 mod tests;
 
 pub(super) struct Reader {
-    requests: Option<SyncSender<(u64, usize)>>,
-    replies: Receiver<io::Result<Vec<u8>>>,
+    requests: Option<SyncSender<(u64, usize, Box<DeviceBuffer>)>>,
+    replies: Receiver<(Box<DeviceBuffer>, io::Result<usize>)>,
+    buffer: Option<Box<DeviceBuffer>>,
     thread: JoinHandle<()>,
     halt: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -33,15 +34,14 @@ impl Reader {
         stop: Arc<AtomicBool>,
         timeout: Option<Duration>,
     ) -> io::Result<Self> {
-        let (requests, pending) = mpsc::sync_channel::<(u64, usize)>(1);
+        let (requests, pending) = mpsc::sync_channel::<(u64, usize, Box<DeviceBuffer>)>(1);
         let (completed, replies) = mpsc::sync_channel(1);
         let halt = Arc::new(AtomicBool::new(false));
         let halted = Arc::clone(&halt);
         let thread = thread::Builder::new()
             .name("ewf-source-read".into())
             .spawn(move || {
-                let mut buffer = Box::new(DeviceBuffer([0; 16384]));
-                while let Ok((offset, length)) = pending.recv() {
+                while let Ok((offset, length, mut buffer)) = pending.recv() {
                     if halted.load(Ordering::Acquire) {
                         break;
                     }
@@ -68,9 +68,9 @@ impl Reader {
                                 "source returned an invalid read length",
                             ));
                         }
-                        Ok(buffer.0[..count].to_vec())
+                        Ok(count)
                     })();
-                    if halted.load(Ordering::Acquire) || completed.send(result).is_err() {
+                    if halted.load(Ordering::Acquire) || completed.send((buffer, result)).is_err() {
                         break;
                     }
                 }
@@ -78,6 +78,7 @@ impl Reader {
         Ok(Self {
             requests: Some(requests),
             replies,
+            buffer: Some(Box::new(DeviceBuffer([0; READ_BLOCK_BYTES]))),
             thread,
             halt,
             stop,
@@ -95,27 +96,35 @@ impl Reader {
         }
         let started = Instant::now();
         self.check_stop(started)?;
-        let length = buffer.len().min(16384);
-        self.requests
+        let length = buffer.len().min(READ_BLOCK_BYTES);
+        let storage = self.buffer.take().expect("healthy reader owns its buffer");
+        if self
+            .requests
             .as_ref()
             .expect("healthy reader has sender")
-            .send((offset, length))
-            .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+            .send((offset, length, storage))
+            .is_err()
+        {
+            self.failure = Some(io::ErrorKind::BrokenPipe);
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
         loop {
             self.check_stop(started)?;
             let wait = self.timeout.map_or(POLL, |limit| {
                 POLL.min(limit.saturating_sub(started.elapsed()))
             });
             match self.replies.recv_timeout(wait) {
-                Ok(result) => {
+                Ok((storage, result)) => {
                     // Stop/deadline wins over a completion observed after it.
                     self.check_stop(started)?;
-                    let bytes = result?;
-                    buffer[..bytes.len()].copy_from_slice(&bytes);
-                    return Ok(bytes.len());
+                    self.buffer = Some(storage);
+                    let count = result?;
+                    buffer[..count].copy_from_slice(&self.buffer.as_ref().unwrap().0[..count]);
+                    return Ok(count);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.failure = Some(io::ErrorKind::BrokenPipe);
                     return Err(io::ErrorKind::BrokenPipe.into());
                 }
             }

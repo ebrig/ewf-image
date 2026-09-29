@@ -172,6 +172,7 @@ fn reader_statistics_are_optional_and_shared_with_cache_information() {
     assert_eq!(statistics.cursors_created(), 1);
     assert_eq!(statistics.chunk_cache_misses(), 1);
     assert_eq!(statistics.chunk_cache_hits(), 1);
+    assert_eq!(statistics.chunk_cache_coalesced(), 0);
     assert!(statistics.table_page_cache_misses() >= 1);
     assert!(statistics.table_page_cache_hits() >= 1);
     assert!(statistics.encoded_bytes_read() > 0);

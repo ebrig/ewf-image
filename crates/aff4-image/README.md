@@ -79,12 +79,16 @@ supplies candidate paths. The library does not search directories or fetch
 network resources. Unrelated candidates are excluded, and missing companions or
 conflicting owners are errors.
 
-`into_readers()` returns independent `Read` and `Seek` cursors that share bounded
-caches. Each cursor reports its image identity, geometry, and backing paths
-through `info()`. Save that descriptor and call `reopen()` to reopen exactly
-those files and confirm their identities. Discovery accepts up to 128 containers
-and 128 disks, which share metadata budgets. Split and striped disks require a
-primary Map whose targets are ImageStreams in the resolved containers.
+`into_readers()` returns independent `Read` and `Seek` cursors that share one
+automatic, byte-bounded payload cache. Small positioned reads use 1 MiB logical
+read-ahead pages; direct ImageStream reads retain recently decoded chunks. The
+cache is allocated lazily and has a 128 MiB ceiling across the complete volume
+set. Each cursor reports its image identity, geometry, backing
+paths, cumulative reader statistics, and cache usage. Save its descriptor and
+call `reopen()` to reopen exactly those files and confirm their identities.
+Discovery accepts up to 128 containers and 128 disks, which share metadata
+budgets. Split and striped disks require a primary Map whose targets are
+ImageStreams in the resolved containers.
 
 When a caller needs only one container, `Container::disk_images()` lists that
 container's explicitly typed physical disks. `Container::into_disk_reader(None)`
@@ -156,8 +160,11 @@ file. An independently recorded expected SHA256 provides an external reference.
 Sequential verification decodes ZIP content once. A positioned read of a
 compressed ZIP member decodes from the start of the member, so random access to
 large ZIP-backed files is expensive. ImageStream reads cache one bevy and its
-index. Metadata scanning retains statement source members and repeated subjects
-without building the graph. Full verification uses the bounded graph.
+index. Positioned physical disk reads automatically retain 1 MiB logical pages;
+other ImageStream reads retain decoded chunks. Both use one byte-bounded LRU
+across companion volumes. Verification bypasses payload caches and rereads the
+backing data. Metadata scanning retains statement source members and repeated
+subjects without building the graph. Full verification uses the bounded graph.
 
 ## Multi-volume reads
 
@@ -166,7 +173,8 @@ for the selected image. `VolumeSet` resolves ImageStreams by volume identity. It
 rejects conflicting owners or geometry and missing companions, and it retains the
 volume context of each graph. Contiguous images reject implicit Map gaps.
 Metadata, triples, ZIP directory bytes, and entries share one budget across the
-set. Payload caches retain only the most recently used volume.
+set. Bevy and index scratch data retain only the most recently used volume;
+decoded pages and chunks share one volume-aware LRU across the set.
 
 ```text
 ewf-cli verify-set PRIMARY.aff4 COMPANION.aff4 --image IMAGE_ID --sha256 HASH

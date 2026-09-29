@@ -348,7 +348,7 @@ impl VolumeSet {
 
     fn validate_set_range(&mut self, target: &str, offset: u64, length: u64) -> Result<()> {
         if is_symbolic(target) {
-            return self.volumes[0].read_inner(target, &mut [], 0, &mut Vec::new());
+            return self.volumes[0].read_inner(target, &mut [], 0, &mut Vec::new(), false);
         }
         let owner = self
             .owners

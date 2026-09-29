@@ -44,6 +44,7 @@ fn automatic_discovery_returns_all_disks_with_independent_cursors() {
         readers[0].info().image.resource_id,
         readers[1].info().image.resource_id
     );
+    let opened = readers[0].reader_statistics().unwrap();
     let mut bytes = [0; 2];
     readers[0].read_exact(&mut bytes).unwrap();
     assert_eq!(&bytes, b"ab");
@@ -52,6 +53,16 @@ fn automatic_discovery_returns_all_disks_with_independent_cursors() {
     assert_eq!(&bytes, b"ef");
     readers[0].read_exact(&mut bytes).unwrap();
     assert_eq!(&bytes, b"cd");
+    let statistics = readers[0]
+        .reader_statistics()
+        .unwrap()
+        .saturating_delta(opened);
+    assert_eq!(statistics.read_ahead_cache_misses(), 2);
+    assert_eq!(statistics.read_ahead_cache_hits(), 1);
+    assert_eq!(statistics.read_ahead_prefetches(), 2);
+    let cache = readers[0].reader_cache_info().unwrap();
+    assert_eq!(cache.entries(), 2);
+    assert_eq!(cache.current_bytes(), 16);
     let descriptor = readers[0].info().clone();
     assert_eq!(descriptor.reopen().unwrap().info(), &descriptor);
 }

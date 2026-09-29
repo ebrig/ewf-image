@@ -355,6 +355,24 @@ impl PhysicalDiskReader {
         &self.info
     }
 
+    /// Returns cumulative payload-reader counters shared by this volume set.
+    pub fn reader_statistics(&self) -> Result<ReaderStatistics> {
+        Ok(self
+            .backing
+            .lock()
+            .map_err(|_| malformed("AFF4 reader lock poisoned"))?
+            .reader_statistics())
+    }
+
+    /// Returns automatic decoded payload-cache usage shared by this volume set.
+    pub fn reader_cache_info(&self) -> Result<ReaderCacheInfo> {
+        Ok(self
+            .backing
+            .lock()
+            .map_err(|_| malformed("AFF4 reader lock poisoned"))?
+            .reader_cache_info())
+    }
+
     /// Reads decoded bytes without moving the cursor.
     pub fn read_at(&mut self, buffer: &mut [u8], offset: u64) -> Result<usize> {
         self.backing

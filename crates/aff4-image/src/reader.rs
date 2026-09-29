@@ -3,8 +3,10 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::ops::ControlFlow;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use lru::LruCache;
 use md5::{Digest, Md5};
 use oxrdf::{NamedOrBlankNode, Term};
 use oxttl::TurtleParser;
@@ -43,6 +45,238 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const LOGICAL_NS: &str = "https://aff4.org/Schema/2022/#";
 const LEGACY_LOGICAL_NS: &str = "http://aff4.org/Schema/2022/#";
 const BASE64: &str = "http://www.w3.org/2001/XMLSchema#base64Binary";
+const DECODED_CACHE_CAPACITY_BYTES: usize = 128 * 1024 * 1024;
+const LOGICAL_READ_AHEAD_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+/// Cumulative performance counters for one shared AFF4 payload cache.
+///
+/// Physical readers for disks in the same discovered volume set share these
+/// counters and the cache itself.
+pub struct ReaderStatistics {
+    decoded_cache_hits: u64,
+    decoded_cache_misses: u64,
+    read_ahead_cache_hits: u64,
+    read_ahead_cache_misses: u64,
+    read_ahead_prefetches: u64,
+    decoded_cache_evictions: u64,
+    decoded_bytes: u64,
+    decode_nanos: u64,
+}
+
+impl ReaderStatistics {
+    /// Returns decoded chunk-cache hits.
+    pub fn decoded_cache_hits(&self) -> u64 {
+        self.decoded_cache_hits
+    }
+
+    /// Returns decoded chunk-cache misses.
+    pub fn decoded_cache_misses(&self) -> u64 {
+        self.decoded_cache_misses
+    }
+
+    /// Returns logical read-ahead page-cache hits.
+    pub fn read_ahead_cache_hits(&self) -> u64 {
+        self.read_ahead_cache_hits
+    }
+
+    /// Returns logical read-ahead page-cache misses.
+    pub fn read_ahead_cache_misses(&self) -> u64 {
+        self.read_ahead_cache_misses
+    }
+
+    /// Returns logical pages fetched automatically after small positioned reads.
+    pub fn read_ahead_prefetches(&self) -> u64 {
+        self.read_ahead_prefetches
+    }
+
+    /// Returns decoded pages or chunks evicted to retain the automatic memory bound.
+    pub fn decoded_cache_evictions(&self) -> u64 {
+        self.decoded_cache_evictions
+    }
+
+    /// Returns logical chunk bytes decoded after cache misses.
+    pub fn decoded_bytes(&self) -> u64 {
+        self.decoded_bytes
+    }
+
+    /// Returns nanoseconds spent decoding chunks after cache misses.
+    pub fn decode_nanos(&self) -> u64 {
+        self.decode_nanos
+    }
+
+    /// Returns a field-wise saturating delta from an earlier snapshot.
+    #[must_use]
+    pub fn saturating_delta(self, earlier: Self) -> Self {
+        Self {
+            decoded_cache_hits: self
+                .decoded_cache_hits
+                .saturating_sub(earlier.decoded_cache_hits),
+            decoded_cache_misses: self
+                .decoded_cache_misses
+                .saturating_sub(earlier.decoded_cache_misses),
+            read_ahead_cache_hits: self
+                .read_ahead_cache_hits
+                .saturating_sub(earlier.read_ahead_cache_hits),
+            read_ahead_cache_misses: self
+                .read_ahead_cache_misses
+                .saturating_sub(earlier.read_ahead_cache_misses),
+            read_ahead_prefetches: self
+                .read_ahead_prefetches
+                .saturating_sub(earlier.read_ahead_prefetches),
+            decoded_cache_evictions: self
+                .decoded_cache_evictions
+                .saturating_sub(earlier.decoded_cache_evictions),
+            decoded_bytes: self.decoded_bytes.saturating_sub(earlier.decoded_bytes),
+            decode_nanos: self.decode_nanos.saturating_sub(earlier.decode_nanos),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+/// Configured and observed payload bytes for the automatic AFF4 reader cache.
+pub struct ReaderCacheInfo {
+    capacity_bytes: u64,
+    current_bytes: u64,
+    peak_bytes: u64,
+    entries: u64,
+}
+
+impl ReaderCacheInfo {
+    /// Returns the automatic decoded payload-cache byte ceiling.
+    pub fn capacity_bytes(&self) -> u64 {
+        self.capacity_bytes
+    }
+
+    /// Returns currently retained decoded page and chunk bytes.
+    pub fn current_bytes(&self) -> u64 {
+        self.current_bytes
+    }
+
+    /// Returns peak retained decoded page and chunk bytes.
+    pub fn peak_bytes(&self) -> u64 {
+        self.peak_bytes
+    }
+
+    /// Returns the number of retained decoded pages and chunks.
+    pub fn entries(&self) -> u64 {
+        self.entries
+    }
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+enum DecodedCacheKey {
+    Chunk {
+        volume: String,
+        resource: String,
+        chunk: u64,
+    },
+    DiskPage {
+        volume: String,
+        resource: String,
+        offset: u64,
+    },
+}
+
+struct DecodedChunkCache {
+    entries: LruCache<DecodedCacheKey, Arc<Vec<u8>>>,
+    capacity_bytes: usize,
+    current_bytes: usize,
+    peak_bytes: usize,
+    statistics: ReaderStatistics,
+}
+
+impl DecodedChunkCache {
+    fn new() -> Self {
+        Self::with_capacity(DECODED_CACHE_CAPACITY_BYTES)
+    }
+
+    fn with_capacity(capacity_bytes: usize) -> Self {
+        Self {
+            entries: LruCache::unbounded(),
+            capacity_bytes,
+            current_bytes: 0,
+            peak_bytes: 0,
+            statistics: ReaderStatistics::default(),
+        }
+    }
+
+    fn get_chunk(&mut self, key: &DecodedCacheKey) -> Option<Arc<Vec<u8>>> {
+        let result = self.entries.get(key).cloned();
+        if result.is_some() {
+            self.statistics.decoded_cache_hits =
+                self.statistics.decoded_cache_hits.saturating_add(1);
+        } else {
+            self.statistics.decoded_cache_misses =
+                self.statistics.decoded_cache_misses.saturating_add(1);
+        }
+        result
+    }
+
+    fn get_page(&mut self, key: &DecodedCacheKey) -> Option<Arc<Vec<u8>>> {
+        let result = self.entries.get(key).cloned();
+        if result.is_some() {
+            self.statistics.read_ahead_cache_hits =
+                self.statistics.read_ahead_cache_hits.saturating_add(1);
+        } else {
+            self.statistics.read_ahead_cache_misses =
+                self.statistics.read_ahead_cache_misses.saturating_add(1);
+        }
+        result
+    }
+
+    fn insert(&mut self, key: DecodedCacheKey, decoded: Arc<Vec<u8>>) {
+        let bytes = decoded.len();
+        if bytes > self.capacity_bytes {
+            return;
+        }
+        if let Some(previous) = self.entries.put(key, decoded) {
+            self.current_bytes = self.current_bytes.saturating_sub(previous.len());
+        }
+        self.current_bytes = self.current_bytes.saturating_add(bytes);
+        while self.current_bytes > self.capacity_bytes {
+            let Some((_, evicted)) = self.entries.pop_lru() else {
+                break;
+            };
+            self.current_bytes = self.current_bytes.saturating_sub(evicted.len());
+            self.statistics.decoded_cache_evictions =
+                self.statistics.decoded_cache_evictions.saturating_add(1);
+        }
+        self.peak_bytes = self.peak_bytes.max(self.current_bytes);
+    }
+
+    fn record_decode(&mut self, bytes: usize, elapsed: Duration) {
+        self.statistics.decoded_bytes = self
+            .statistics
+            .decoded_bytes
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+        self.statistics.decode_nanos = self
+            .statistics
+            .decode_nanos
+            .saturating_add(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX));
+    }
+
+    fn record_read_ahead_prefetch(&mut self) {
+        self.statistics.read_ahead_prefetches =
+            self.statistics.read_ahead_prefetches.saturating_add(1);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.current_bytes = 0;
+    }
+
+    fn info(&self) -> ReaderCacheInfo {
+        ReaderCacheInfo {
+            capacity_bytes: self.capacity_bytes as u64,
+            current_bytes: self.current_bytes as u64,
+            peak_bytes: self.peak_bytes as u64,
+            entries: self.entries.len() as u64,
+        }
+    }
+}
 
 /// Limits on retained metadata, map/index members, and decoded chunks.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -155,10 +389,28 @@ pub struct Container {
     limits: Limits,
     cache: Option<(String, Vec<u8>)>,
     index_cache: Option<(String, Vec<u8>)>,
+    decoded_cache: Arc<Mutex<DecodedChunkCache>>,
     maps: BTreeMap<String, Arc<Map>>,
     version: (u32, u32),
     metadata_members: BTreeMap<String, String>,
     usage: archive::Usage,
+}
+
+struct PositionedReader<'a> {
+    container: &'a mut Container,
+    id: String,
+    position: u64,
+}
+
+impl Read for PositionedReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self
+            .container
+            .read_at(&self.id, buffer, self.position)
+            .map_err(std::io::Error::other)?;
+        self.position += count as u64;
+        Ok(count)
+    }
 }
 
 #[derive(Clone)]
@@ -288,6 +540,7 @@ impl Container {
             limits,
             cache: None,
             index_cache: None,
+            decoded_cache: Arc::new(Mutex::new(DecodedChunkCache::new())),
             maps: BTreeMap::new(),
             version,
             metadata_members,
@@ -308,6 +561,22 @@ impl Container {
     /// Declared container version; 2.1 refers to the evolving AFF4-L draft.
     pub fn version(&self) -> (u32, u32) {
         self.version
+    }
+
+    /// Returns cumulative decoded-chunk reader counters.
+    pub fn reader_statistics(&self) -> ReaderStatistics {
+        self.decoded_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .statistics
+    }
+
+    /// Returns automatic decoded-chunk cache usage.
+    pub fn reader_cache_info(&self) -> ReaderCacheInfo {
+        self.decoded_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .info()
     }
 
     /// Enumerates image resources and storage streams. Selection is never implicit.
@@ -348,12 +617,55 @@ impl Container {
     /// Reads a selected stream at a byte offset. Missing targets, cycles,
     /// corrupt chunks, and unknown/unreadable symbolic data return errors.
     pub fn read_at(&mut self, id: &str, buffer: &mut [u8], offset: u64) -> Result<usize> {
+        self.read_at_impl(id, buffer, offset, true)
+    }
+
+    /// Reads a resource sequentially. ZIP segments, including those behind
+    /// identity maps, retain one decompressor across reads; other resources
+    /// use positioned reads through their maps.
+    /// The caller must read the declared size to detect a truncated stream.
+    pub fn sequential_reader(&mut self, id: &str) -> Result<Box<dyn Read + '_>> {
+        let size = self.size(id)?;
+        self.read_inner(id, &mut [], 0, &mut Vec::new(), false)?;
+        let target = self.linear_backing(id)?;
+        if self.has_type(&target, "ZipSegment") || self.has_type(&target, "zip_segment") {
+            let path = self.path(&target)?;
+            let file = self.archive.by_name(&path)?;
+            if file.size() != size {
+                return Err(malformed("ZIP segment size mismatch"));
+            }
+            return Ok(Box::new(file));
+        }
+        Ok(Box::new(PositionedReader {
+            container: self,
+            id: id.to_owned(),
+            position: 0,
+        }))
+    }
+
+    fn read_at_uncached(&mut self, id: &str, buffer: &mut [u8], offset: u64) -> Result<usize> {
+        self.read_at_impl(id, buffer, offset, false)
+    }
+
+    fn read_at_impl(
+        &mut self,
+        id: &str,
+        buffer: &mut [u8],
+        offset: u64,
+        use_decoded_cache: bool,
+    ) -> Result<usize> {
         let size = self.size(id)?;
         if offset >= size || buffer.is_empty() {
             return Ok(0);
         }
         let length = (size - offset).min(buffer.len() as u64) as usize;
-        self.read_inner(id, &mut buffer[..length], offset, &mut Vec::new())?;
+        self.read_inner(
+            id,
+            &mut buffer[..length],
+            offset,
+            &mut Vec::new(),
+            use_decoded_cache,
+        )?;
         Ok(length)
     }
 
@@ -382,8 +694,12 @@ impl Container {
         }
         self.cache = None;
         self.index_cache = None;
+        self.decoded_cache
+            .lock()
+            .map_err(|_| malformed("AFF4 decoded cache lock poisoned"))?
+            .clear();
         self.maps.clear();
-        self.read_inner(id, &mut [], 0, &mut Vec::new())?;
+        self.read_inner(id, &mut [], 0, &mut Vec::new(), false)?;
         let mut md5 = Md5::new();
         let mut sha1 = Sha1::new();
         let mut sha256 = Sha256::new();
@@ -406,7 +722,7 @@ impl Container {
             return Err(error.into());
         }
         walked?;
-        let mut result = Verification {
+        let result = Verification {
             bytes_verified: size,
             md5: hex(&md5.finalize()),
             sha1: hex(&sha1.finalize()),
@@ -416,6 +732,12 @@ impl Container {
             references_match: None,
             unsupported_hashes: Vec::new(),
         };
+        self.with_linear_references(id, result)
+    }
+
+    fn with_linear_references(&self, id: &str, mut result: Verification) -> Result<Verification> {
+        result.references_match = None;
+        result.unsupported_hashes.clear();
         for reference in self
             .properties(id)
             .filter(|p| is_property(&p.predicate, "hash"))
@@ -445,6 +767,39 @@ impl Container {
         Ok(result)
     }
 
+    // A dataStream wrapper reads the same bytes as its target. A Map is also
+    // equivalent only when one range covers the entire equally sized target
+    // from offset zero. Sparse, partial, and reordered maps retain their own
+    // traversal in full-container verification.
+    fn linear_backing(&mut self, id: &str) -> Result<String> {
+        let mut target = id.to_owned();
+        let mut visited = Vec::new();
+        loop {
+            enter(&target, &mut visited)?;
+            if self.inline_data(&target)?.is_some() {
+                return Ok(target);
+            }
+            if let Some(next) = self.value(&target, "dataStream")? {
+                target = next;
+                continue;
+            }
+            if self.has_type(&target, "Map") {
+                self.load_map(&target)?;
+                let map = &self.maps[&target];
+                if let [range] = map.ranges.as_slice()
+                    && range.start == 0
+                    && range.offset == 0
+                    && range.end == self.size(&target)?
+                    && self.size(&range.target).ok() == Some(range.end)
+                {
+                    target = range.target.clone();
+                    continue;
+                }
+            }
+            return Ok(target);
+        }
+    }
+
     // ZIP files must be decoded once for sequential verification. Positioned
     // reads remain available, but restarting Deflate for each buffer is quadratic.
     fn walk_bytes(
@@ -456,18 +811,8 @@ impl Container {
         if consume(&[], 0).is_break() {
             return Err(Error::Aborted);
         }
-        let mut target = id.to_owned();
-        let mut visited = Vec::new();
-        loop {
-            enter(&target, &mut visited)?;
-            if self.inline_data(&target)?.is_some() {
-                break;
-            }
-            match self.value(&target, "dataStream")? {
-                Some(next) => target = next,
-                None => break,
-            }
-        }
+        self.read_inner(id, &mut [], 0, &mut Vec::new(), false)?;
+        let target = self.linear_backing(id)?;
         let mut buffer = vec![0; 1024 * 1024];
         if self.has_type(&target, "ZipSegment") || self.has_type(&target, "zip_segment") {
             let path = self.path(&target)?;
@@ -490,7 +835,7 @@ impl Container {
         } else {
             let mut offset = 0;
             while offset < size {
-                let read = self.read_at(id, &mut buffer, offset)?;
+                let read = self.read_at_uncached(id, &mut buffer, offset)?;
                 if read == 0 {
                     return Err(malformed("truncated stream"));
                 }
@@ -660,9 +1005,10 @@ impl Container {
         buffer: &mut [u8],
         offset: u64,
         visited: &mut Vec<String>,
+        use_decoded_cache: bool,
     ) -> Result<()> {
         enter(id, visited)?;
-        let result = self.read_inner_impl(id, buffer, offset, visited);
+        let result = self.read_inner_impl(id, buffer, offset, visited, use_decoded_cache);
         visited.pop();
         result
     }
@@ -672,6 +1018,7 @@ impl Container {
         buffer: &mut [u8],
         offset: u64,
         visited: &mut Vec<String>,
+        use_decoded_cache: bool,
     ) -> Result<()> {
         if id == format!("{NS}Zero") {
             buffer.fill(0);
@@ -717,7 +1064,7 @@ impl Container {
                     return Err(malformed("truncated contiguous image map"));
                 }
             }
-            return self.read_inner(&target, buffer, offset, visited);
+            return self.read_inner(&target, buffer, offset, visited, use_decoded_cache);
         }
         if self.has_type(id, "ZipSegment") || self.has_type(id, "zip_segment") {
             let path = self.path(id)?;
@@ -765,6 +1112,7 @@ impl Container {
                     &mut buffer[done..done + length],
                     target_offset,
                     visited,
+                    use_decoded_cache,
                 )?;
                 done += length;
             }
@@ -784,6 +1132,26 @@ impl Container {
         while done < buffer.len() {
             let position = offset + done as u64;
             let chunk = position / chunk_size;
+            let cache_key = DecodedCacheKey::Chunk {
+                volume: self.volume.clone(),
+                resource: id.to_owned(),
+                chunk,
+            };
+            let cached = if use_decoded_cache {
+                self.decoded_cache
+                    .lock()
+                    .map_err(|_| malformed("AFF4 decoded cache lock poisoned"))?
+                    .get_chunk(&cache_key)
+            } else {
+                None
+            };
+            if let Some(decoded) = cached {
+                let begin = (position % chunk_size) as usize;
+                let take = (decoded.len() - begin).min(buffer.len() - done);
+                buffer[done..done + take].copy_from_slice(&decoded[begin..begin + take]);
+                done += take;
+                continue;
+            }
             let name = format!("{path}/{:08}", chunk / per_bevy);
             if self
                 .index_cache
@@ -827,11 +1195,16 @@ impl Container {
                 .filter(|end| *end <= data.len() as u64)
                 .ok_or_else(|| malformed("chunk outside bevy"))?;
             let encoded = &data[start as usize..end as usize];
+            let decode_started = Instant::now();
             let decoded = if length == chunk_size {
                 encoded.to_vec()
             } else {
                 decode(encoded, compression.as_deref(), chunk_size as usize)?
             };
+            self.decoded_cache
+                .lock()
+                .map_err(|_| malformed("AFF4 decoded cache lock poisoned"))?
+                .record_decode(decoded.len(), decode_started.elapsed());
             if decoded.len() != chunk_size as usize {
                 return Err(malformed("decoded chunk length mismatch"));
             }
@@ -839,6 +1212,12 @@ impl Container {
             let take = (decoded.len() - begin).min(buffer.len() - done);
             buffer[done..done + take].copy_from_slice(&decoded[begin..begin + take]);
             done += take;
+            if use_decoded_cache {
+                self.decoded_cache
+                    .lock()
+                    .map_err(|_| malformed("AFF4 decoded cache lock poisoned"))?
+                    .insert(cache_key, Arc::new(decoded));
+            }
         }
         Ok(())
     }
@@ -975,4 +1354,41 @@ fn escape(value: &str) -> String {
         }
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chunk(chunk: u64) -> DecodedCacheKey {
+        DecodedCacheKey::Chunk {
+            volume: "aff4://volume".into(),
+            resource: "aff4://volume/data".into(),
+            chunk,
+        }
+    }
+
+    #[test]
+    fn decoded_cache_is_byte_bounded_and_lru() {
+        let mut cache = DecodedChunkCache::with_capacity(8);
+        cache.insert(chunk(0), Arc::new(vec![0; 4]));
+        cache.insert(chunk(1), Arc::new(vec![1; 4]));
+        assert!(cache.get_chunk(&chunk(0)).is_some());
+        cache.insert(chunk(2), Arc::new(vec![2; 4]));
+
+        assert!(cache.get_chunk(&chunk(0)).is_some());
+        assert!(cache.get_chunk(&chunk(1)).is_none());
+        assert!(cache.get_chunk(&chunk(2)).is_some());
+        assert_eq!(cache.current_bytes, 8);
+        assert_eq!(cache.statistics.decoded_cache_evictions, 1);
+        assert_eq!(cache.info().capacity_bytes(), 8);
+    }
+
+    #[test]
+    fn oversized_entry_is_not_retained() {
+        let mut cache = DecodedChunkCache::with_capacity(4);
+        cache.insert(chunk(0), Arc::new(vec![0; 5]));
+        assert_eq!(cache.current_bytes, 0);
+        assert_eq!(cache.entries.len(), 0);
+    }
 }

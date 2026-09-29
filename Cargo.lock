@@ -27,6 +27,7 @@ dependencies = [
  "blake2",
  "flate2",
  "libc",
+ "lru",
  "lz4_flex",
  "md-5",
  "oxrdf",

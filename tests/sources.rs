@@ -176,6 +176,39 @@ fn positioned_chunk_reads_can_overlap_and_share_the_table_cache() {
 }
 
 #[test]
+fn concurrent_reads_of_one_chunk_share_one_decode() {
+    let backing = Arc::new(ConcurrentBacking {
+        bytes: image_bytes(WriteFormat::Ewf1Physical),
+        active: AtomicUsize::new(0),
+        peak: AtomicUsize::new(0),
+        observe: AtomicBool::new(false),
+    });
+    let source = SegmentSource::from_backing(backing.clone()).unwrap();
+    let image = Image::open_sources_with_options(
+        [("coalesced.E01", source)],
+        OpenOptions::default().with_reader_statistics(true),
+    )
+    .unwrap();
+    let opened = image.reader_statistics().unwrap();
+    backing.observe.store(true, Ordering::Relaxed);
+    let barrier = std::sync::Barrier::new(3);
+    std::thread::scope(|scope| {
+        for _ in 0..3 {
+            let image = &image;
+            let barrier = &barrier;
+            scope.spawn(move || {
+                barrier.wait();
+                assert_eq!(image.read_at(&mut [0; 10], 4096).unwrap(), 10);
+            });
+        }
+    });
+    let statistics = image.reader_statistics().unwrap().saturating_delta(opened);
+    assert_eq!(statistics.chunk_cache_misses(), 3);
+    assert_eq!(statistics.chunk_cache_coalesced(), 2);
+    assert_eq!(statistics.decoded_bytes(), image.chunk_size());
+}
+
+#[test]
 fn file_source_reads_match_memory_source() {
     let bytes = image_bytes(WriteFormat::Ewf2Physical);
     let file = tempfile::NamedTempFile::new().unwrap();

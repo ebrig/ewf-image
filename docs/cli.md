@@ -30,6 +30,7 @@ ewf-cli ewf resume case.E01
 ewf-cli ewf checkpoint inspect case.E01
 ewf-cli ewf checkpoint validate case.E01
 ewf-cli ewf verify case.E01
+ewf-cli ewf verify case.Ex01 --workers 4
 ewf-cli ewf info case.E01
 ewf-cli ewf files case.L01 --limit 1000
 ewf-cli ewf verify case.L01 1
@@ -214,8 +215,12 @@ still records every emitted chunk.
 
 Regular-file sources must be nonempty and sector-aligned. The default sector size
 is 512 bytes, and `--sector-size` accepts 512, 1024, 2048, or 4096. Output is
-physical E01 with zlib compression by default, or raw with `--compression raw`.
+physical E01 with zlib compression by default, raw with `--compression raw`,
+or faster zlib with `--compression zlib-fast`.
 `--sectors-per-chunk` and `--chunks-per-segment` set the acquisition geometry.
+`--bulk-read-bytes BYTES` can group several chunks into one healthy read
+attempt. It defaults to one chunk, preserving existing error and cancellation
+granularity. The value must be sector aligned and at most 16 MiB.
 Existing images and CLI session manifests are never overwritten.
 
 The CLI can also open Windows physical disks (`\\.\PhysicalDriveN`) and Linux
@@ -379,12 +384,18 @@ chunk size within the segment namespace limit. Read policies can change on resum
 and apply only to subsequent reads.
 
 `--read-timeout-ms N` sets a positive deadline for each worker request, which is
-a seek followed by a read of at most 16 KiB. The deadline includes worker
+a seek followed by a read of at most 256 KiB. The deadline includes worker
 scheduling time and applies to both files and devices. There is no deadline by
 default. When the deadline expires, acquisition stops with exit code 1, without
 retries or zero substitution, and preserves the last valid checkpoint. The
 timeout is a per-invocation read policy, not part of the source identity, so
 supply it again when running `resume`. Cancellation exits with code 130.
+
+The JSON result reports `timings.acquisition_seconds`, chunk processing,
+scratch append, segment sealing, and source plus control time for the current
+run. Source plus control time includes seeking, worker waits, progress callbacks,
+and acquisition history; it is not a pure device-I/O measurement. Publication
+and destination verification have separate timings.
 
 A stop or deadline that is observed before a completed read is accepted takes
 precedence over that read. The report includes `read_policy.read_timeout_ms`.

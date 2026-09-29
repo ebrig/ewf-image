@@ -107,12 +107,33 @@ impl Container {
             .map(|s| s.id)
             .collect();
         let mut remaining = self.limits.verification_bytes;
+        let mut verified_backings = BTreeMap::<String, usize>::new();
         for id in &ids {
+            let mut backing = None;
             let value = self.size(id).and_then(|size| {
                 remaining = remaining
                     .checked_sub(size)
                     .ok_or_else(|| malformed("verification byte limit exceeded"))?;
-                self.verify(id, |done, size| progress(id, done, size))
+                let key = self.linear_backing(id)?;
+                backing = Some(key.clone());
+                if let Some(computed) = verified_backings
+                    .get(&key)
+                    .and_then(|index| report.resources[*index].verification.clone())
+                {
+                    // Direct dataStream wrappers have identical bytes, but each
+                    // resource still needs its own metadata validation, progress,
+                    // linear-reference comparisons, and coverage report.
+                    if progress(id, 0, size).is_break() {
+                        return Err(Error::Aborted);
+                    }
+                    self.read_inner(id, &mut [], 0, &mut Vec::new(), false)?;
+                    if progress(id, size, size).is_break() {
+                        return Err(Error::Aborted);
+                    }
+                    self.with_linear_references(id, computed)
+                } else {
+                    self.verify(id, |done, size| progress(id, done, size))
+                }
             });
             let (verification, coverage, error) = match value {
                 Err(Error::Aborted) => return Err(Error::Aborted),
@@ -167,6 +188,12 @@ impl Container {
                 && self.inline_data(id)?.is_none()
             {
                 report.checks.push(absent(id, "linear file digest"));
+            }
+            let index = report.resources.len();
+            if coverage.is_some()
+                && let Some(key) = backing
+            {
+                verified_backings.entry(key).or_insert(index);
             }
             report.resources.push(ResourceVerification {
                 resource: id.clone(),
@@ -503,6 +530,35 @@ impl Container {
         }
         let count = size.div_ceil(chunk);
         let mut buffer = chunk_buffer(chunk as usize)?;
+        // Writer-produced streams carry these two block digests. Compare both
+        // while each decoded chunk is in memory instead of decoding it twice.
+        let md5_names = self.block_names(id, "md5")?;
+        let sha256_names = self.block_names(id, "sha256")?;
+        if !md5_names.is_empty()
+            && !sha256_names.is_empty()
+            && ["sha1", "sha512", "blake2b"].iter().all(|suffix| {
+                self.block_names(id, suffix)
+                    .is_ok_and(|names| names.is_empty())
+            })
+            && count
+                .min(per)
+                .checked_mul(16 + 32)
+                .is_some_and(|bytes| bytes <= self.limits.member_bytes)
+        {
+            return self.check_md5_sha256_blocks(
+                id,
+                source,
+                remaining,
+                progress,
+                size,
+                chunk,
+                per,
+                count,
+                &mut buffer,
+                &md5_names,
+                &sha256_names,
+            );
+        }
         for (suffix, algorithm, width) in [
             ("md5", "MD5", 16),
             ("sha1", "SHA1", 20),
@@ -546,9 +602,9 @@ impl Container {
                         .checked_sub(take as u64)
                         .ok_or_else(|| malformed("verification byte limit exceeded"))?;
                     if let Some(reader) = source.as_deref_mut() {
-                        reader.read_at(id, &mut buffer[..take], offset)?;
+                        reader.read_at_uncached(id, &mut buffer[..take], offset)?;
                     } else {
-                        self.read_at(id, &mut buffer[..take], offset)?;
+                        self.read_at_uncached(id, &mut buffer[..take], offset)?;
                     }
                     let start = (n * width) as usize;
                     let expected = hex(&recorded[start..start + width as usize]);
@@ -567,5 +623,93 @@ impl Container {
             }
         }
         Ok(checks)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn check_md5_sha256_blocks(
+        &mut self,
+        id: &str,
+        mut source: Option<&mut Self>,
+        remaining: &mut u64,
+        progress: &mut impl FnMut(&str, u64, u64) -> ControlFlow<()>,
+        size: u64,
+        chunk: u64,
+        per: u64,
+        count: u64,
+        buffer: &mut [u8],
+        md5_names: &[String],
+        sha256_names: &[String],
+    ) -> Result<Vec<IntegrityCheck>> {
+        let bevies = count.div_ceil(per);
+        if md5_names.len() as u64 != bevies || sha256_names.len() as u64 != bevies {
+            return Err(malformed("incomplete block hash bevy set"));
+        }
+        let mut md5_checks = Vec::with_capacity(md5_names.len());
+        let mut sha256_checks = Vec::with_capacity(sha256_names.len());
+        for bevy in 0..bevies {
+            let first = bevy * per;
+            let blocks = (count - first).min(per);
+            let mut recorded = Vec::with_capacity(2);
+            for (names, algorithm, width) in [
+                (md5_names, "MD5", 16usize),
+                (sha256_names, "SHA256", 32usize),
+            ] {
+                let name = &names[bevy as usize];
+                let ordinal = name.rsplit('/').next().unwrap()[..8]
+                    .parse::<u64>()
+                    .map_err(|_| malformed("block bevy number"))?;
+                if ordinal != bevy {
+                    return Err(malformed("block hash bevy gap"));
+                }
+                let bytes = member(&mut self.archive, name, self.limits.member_bytes)?;
+                if bytes.len() as u64 != blocks * width as u64 {
+                    return Err(malformed("block hash count mismatch"));
+                }
+                let mut check = absent(id, name);
+                check.algorithm = algorithm.into();
+                check.outcome = CheckOutcome::Match;
+                check.detail = None;
+                check.expected = Some(format!("{blocks} block digests"));
+                check.computed = check.expected.clone();
+                recorded.push((name, algorithm, width, bytes, check));
+            }
+            for n in 0..blocks {
+                let offset = (first + n) * chunk;
+                let take = (size - offset).min(chunk) as usize;
+                // Preserve the existing work limit and cancellation points for
+                // both logical block checks even though only one read occurs.
+                for _ in 0..2 {
+                    if progress(id, offset, size).is_break() {
+                        return Err(Error::Aborted);
+                    }
+                    *remaining = remaining
+                        .checked_sub(take as u64)
+                        .ok_or_else(|| malformed("verification byte limit exceeded"))?;
+                }
+                if let Some(reader) = source.as_deref_mut() {
+                    reader.read_at_uncached(id, &mut buffer[..take], offset)?;
+                } else {
+                    self.read_at_uncached(id, &mut buffer[..take], offset)?;
+                }
+                for (name, algorithm, width, bytes, check) in &mut recorded {
+                    let start = n as usize * *width;
+                    let expected = hex(&bytes[start..start + *width]);
+                    let value = compare(id, name, algorithm, &expected, &buffer[..take]);
+                    if value.outcome != CheckOutcome::Match {
+                        check.outcome = value.outcome;
+                        if check.detail.is_none() {
+                            check.detail = Some(format!(
+                                "first mismatch at chunk {} (offset {offset})",
+                                first + n
+                            ));
+                        }
+                    }
+                }
+            }
+            md5_checks.push(recorded.remove(0).4);
+            sha256_checks.push(recorded.remove(0).4);
+        }
+        md5_checks.extend(sha256_checks);
+        Ok(md5_checks)
     }
 }

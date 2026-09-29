@@ -59,6 +59,9 @@ pub(crate) enum Command {
         image: PathBuf,
         /// Entry number from files; omit to verify the whole image.
         entry: Option<usize>,
+        /// Whole-image verification workers (default: 1).
+        #[arg(long, value_name = "COUNT", value_parser = clap::value_parser!(u32).range(1..=64))]
+        workers: Option<u32>,
     },
     /// List logical files and their entry numbers.
     Files {
@@ -178,7 +181,7 @@ pub(crate) struct Acquire {
     #[arg(long, default_value_t = 16375, value_name = "COUNT", help_heading = "Image settings", value_parser = clap::value_parser!(u32).range(1..=16375))]
     chunks_per_segment: u32,
     /// Image compression.
-    #[arg(long, default_value = "zlib", help_heading = "Image settings", value_parser = ["raw", "zlib"])]
+    #[arg(long, default_value = "zlib", help_heading = "Image settings", value_parser = ["raw", "zlib", "zlib-fast"])]
     compression: String,
     /// Case identifier.
     #[arg(long, value_name = "ID", help_heading = "Case details")]
@@ -207,6 +210,9 @@ pub(crate) struct ReadArgs {
     /// Checkpoint interval in bytes; must be a multiple of the chunk size.
     #[arg(long, value_name = "BYTES", help_heading = "Checkpoints", value_parser = clap::value_parser!(u64).range(1..))]
     checkpoint_interval: Option<u64>,
+    /// Healthy-source read size in bytes. Defaults to one image chunk.
+    #[arg(long, value_name = "BYTES", help_heading = "Read handling", value_parser = clap::value_parser!(u64).range(512..=16777216))]
+    bulk_read_bytes: Option<u64>,
     /// Pause after this many accepted bytes (rounded to a chunk).
     #[arg(long, value_name = "BYTES", help_heading = "Checkpoints", value_parser = clap::value_parser!(u64).range(1..))]
     stop_after: Option<u64>,
@@ -509,11 +515,25 @@ fn run(
             });
             Ok(())
         }
-        Command::Verify { image, entry } => match entry {
+        Command::Verify {
+            image,
+            entry,
+            workers,
+        } => match entry {
+            Some(entry) if workers.is_some() => Err(invalid(
+                "--workers applies only to whole-image EWF verification",
+            )),
             Some(entry) => {
                 logical::read(image, *entry, None, false, password, &mut progress, report)
             }
-            None => verify(image, None, password, &mut progress, report),
+            None => verify(
+                image,
+                None,
+                workers.unwrap_or(1) as usize,
+                password,
+                &mut progress,
+                report,
+            ),
         },
         Command::Report { output, write } => {
             let output = session::normalize_output(output)?;
@@ -547,10 +567,13 @@ fn acquire(
             UnreadableSectorPolicy::Stop
         },
         checkpoint_interval: args.checkpoint_interval,
+        bulk_read_bytes: args.bulk_read_bytes.map(|bytes| bytes as usize),
         ..AcquisitionReadOptions::default()
     };
     report["read_policy"] = history::read_policy(args);
+    report["timings"] = json!({});
     history.phase("acquisition")?;
+    let acquisition_started = Instant::now();
     let result = writer.acquire_with_progress(source, &options, |p| {
         report["read_attempts"] = json!(p.read_attempts);
         report["retry_attempts"] = json!(p.retry_attempts);
@@ -566,6 +589,19 @@ fn acquire(
             progress.event("acquisition", p.bytes_written, p.source_size)
         }
     });
+    let acquisition_duration = acquisition_started.elapsed();
+    let processing = writer.processing_duration();
+    let scratch = writer.scratch_write_duration();
+    let sealing = writer.segment_seal_duration();
+    report["timings"]["acquisition_seconds"] = json!(acquisition_duration.as_secs_f64());
+    report["timings"]["chunk_processing_seconds"] = json!(processing.as_secs_f64());
+    report["timings"]["scratch_write_seconds"] = json!(scratch.as_secs_f64());
+    report["timings"]["segment_seal_seconds"] = json!(sealing.as_secs_f64());
+    report["timings"]["source_and_control_seconds"] = json!(
+        acquisition_duration
+            .saturating_sub(processing + scratch + sealing)
+            .as_secs_f64()
+    );
     report["accepted_bytes"] = json!(writer.position());
     report["checkpoint_bytes"] = json!(writer.checkpoint_offset());
     report["acquisition_errors"] = error_ranges(writer.acquisition_errors());
@@ -596,6 +632,7 @@ fn acquire(
     source.check_unchanged()?;
     report["phase"] = json!("publication");
     history.phase("publication")?;
+    let publication_started = Instant::now();
     let finished = writer.finish_with_progress(|p| {
         if history
             .phase(&format!("publication/{:?}", p.phase))
@@ -605,6 +642,7 @@ fn acquire(
         }
         progress.event(&format!("{:?}", p.phase), p.bytes_processed, p.bytes_total)
     })?;
+    report["timings"]["publication_seconds"] = json!(publication_started.elapsed().as_secs_f64());
     report["published"] = json!(true);
     report["segments"] = json!(finished.segment_paths);
     history.event(
@@ -612,13 +650,16 @@ fn acquire(
         json!({"segments": report["segments"], "sha256": hex(&finished.computed_sha256)}),
     )?;
     history.phase("verification")?;
+    let verification_started = Instant::now();
     verify(
         &session.output,
         Some(finished.computed_sha256),
+        1,
         None,
         progress,
         report,
     )?;
+    report["timings"]["verification_seconds"] = json!(verification_started.elapsed().as_secs_f64());
     report["status"] = json!(if outcome.progress.substituted_sectors == 0 {
         "complete"
     } else {
@@ -630,13 +671,14 @@ fn acquire(
 fn verify(
     path: &Path,
     expected: Option<[u8; 32]>,
+    workers: usize,
     password: Option<&EwfPassword>,
     progress: &mut Progress<'_>,
     report: &mut Value,
 ) -> Result<()> {
     report["phase"] = json!("verification");
     let image = crate::password::open(path, password)?;
-    let mut options = VerifyOptions::default();
+    let mut options = VerifyOptions::default().with_parallelism(workers);
     if let Some(hash) = expected {
         options = options.with_expected_sha256(hash);
     }
