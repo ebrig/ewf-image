@@ -102,8 +102,9 @@ for zlib. The level is fixed by the checkpoint identity and must be supplied
 unchanged on resume. Compare its throughput and stored size against the default
 on representative source data before using it for a long acquisition.
 
-`retries` is the number of additional attempts for each sector, from 0 through 100. The
-initial bulk failure does not count against that number. Short successful reads
+`retries` is the number of additional attempts for each sector, from 0 through
+100. The initial bulk failure does not count against that number. Short
+successful reads
 are completed before any bytes from the attempt enter the image. Progress reports
 include read and retry counts for the current call, the current read offset and
 error kind, the total accepted and checkpointed bytes, and the cumulative count
