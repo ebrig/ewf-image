@@ -27,7 +27,7 @@ struct Entry {
 
 enum Origin {
     Ewf(Box<Image>),
-    Aff4(Box<aff4_image::Container>),
+    Aff4(Box<aff4_image::Container>, BTreeMap<String, [u8; 32]>),
 }
 
 impl Origin {
@@ -44,16 +44,10 @@ impl Origin {
                 }
                 Ok(v.hashes.sha256)
             }
-            Self::Aff4(c) => {
-                let v = c.verify(&entry.key, |a, b| {
-                    ctx.progress("source file verification", a, b)
-                })?;
-                if v.references_match == Some(false) {
-                    report["exit_code"] = json!(3);
-                    return Err(invalid("source logical file hash mismatch"));
-                }
-                format::parse_hash(&v.sha256)
-            }
+            Self::Aff4(_, verified) => verified
+                .get(&entry.key)
+                .copied()
+                .ok_or_else(|| invalid("source AFF4 file was not fully verified")),
         }
     }
     fn reader<'a>(&'a mut self, entry: &Entry) -> Result<Box<dyn Read + 'a>> {
@@ -61,7 +55,7 @@ impl Origin {
             Self::Ewf(image) => Ok(Box::new(
                 image.single_file_cursor(entry.ewf.as_ref().unwrap()),
             )),
-            Self::Aff4(c) => Ok(Box::new(Aff4Reader {
+            Self::Aff4(c, _) => Ok(Box::new(Aff4Reader {
                 container: c,
                 id: entry.key.clone(),
                 position: 0,
@@ -383,6 +377,17 @@ pub(crate) fn convert(
                 return Err(invalid("source AFF4 integrity checks failed"));
             }
             report["source_verification"] = json!(v);
+            let verified = v
+                .resources
+                .iter()
+                .filter_map(|resource| {
+                    resource
+                        .verification
+                        .as_ref()
+                        .map(|verification| (&resource.resource, &verification.sha256))
+                })
+                .map(|(id, digest)| Ok((id.clone(), format::parse_hash(digest)?)))
+                .collect::<Result<BTreeMap<_, _>>>()?;
             let entries = aff4_entries(&c)?;
             let mut metadata = ewf_image::EwfMetadata::default();
             for (key, out) in [
@@ -405,7 +410,7 @@ pub(crate) fn convert(
                 }
             }
             (
-                Origin::Aff4(Box::new(c)),
+                Origin::Aff4(Box::new(c), verified),
                 entries,
                 paths,
                 snapshots,
