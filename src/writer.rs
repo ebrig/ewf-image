@@ -4511,6 +4511,67 @@ fn encode_chunk(
     }
 }
 
+fn encode_chunks(
+    chunks: Vec<Vec<u8>>,
+    compression: WriteCompression,
+    compression_values: WriteCompressionValues,
+    chunk_size: u64,
+    allow_pattern_fill: bool,
+    allow_empty_block_compression: bool,
+) -> Result<Vec<EncodedChunk>> {
+    #[cfg(feature = "parallel")]
+    if chunks.len() > 1 {
+        use rayon::prelude::*;
+        return chunks
+            .into_par_iter()
+            .map(|chunk| {
+                encode_chunk(
+                    chunk,
+                    compression,
+                    compression_values,
+                    chunk_size,
+                    allow_pattern_fill,
+                    allow_empty_block_compression,
+                )
+            })
+            .collect();
+    }
+
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            encode_chunk(
+                chunk,
+                compression,
+                compression_values,
+                chunk_size,
+                allow_pattern_fill,
+                allow_empty_block_compression,
+            )
+        })
+        .collect()
+}
+
+fn automatic_encode_batch_chunks(chunk_size: usize) -> usize {
+    #[cfg(feature = "parallel")]
+    {
+        const MAXIMUM_BATCH_BYTES: usize = 8 * 1024 * 1024;
+        let memory_limit = MAXIMUM_BATCH_BYTES
+            .checked_div(chunk_size)
+            .unwrap_or(0)
+            .max(1);
+        rayon::current_num_threads()
+            .saturating_mul(2)
+            .min(memory_limit)
+            .max(1)
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let _ = chunk_size;
+        1
+    }
+}
+
 fn is_full_zero_chunk(chunk: &[u8], chunk_size: u64) -> bool {
     u64::try_from(chunk.len()).ok() == Some(chunk_size) && chunk.iter().all(|byte| *byte == 0)
 }

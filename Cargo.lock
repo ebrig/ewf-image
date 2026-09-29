@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "aff4-image"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "blake2",
@@ -32,6 +32,7 @@ dependencies = [
  "md-5",
  "oxrdf",
  "oxttl",
+ "rayon",
  "serde",
  "serde_json",
  "sha1",
@@ -390,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "ewf-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aff4-image",
  "base64",
@@ -410,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "ewf-image"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aes",
  "bzip2",

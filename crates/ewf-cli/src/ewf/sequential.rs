@@ -8,21 +8,22 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::{Progress, Result, export, hex, invalid, sidecar, source, verify};
 use clap::Args;
 use ewf_image::{
-    EwfError, EwfWriter, Image, LogicalEntryMetadata, LogicalWriter, SequentialOptions,
-    SequentialWriter, SingleFileEntryType, WriteCompression, WriteCompressionLevel, WriteFormat,
-    WriteResult,
+    EwfError, EwfWriter, LogicalEntryMetadata, LogicalWriter, SequentialOptions, SequentialWriter,
+    SingleFileEntryType, WriteCompression, WriteFormat, WriteResult,
 };
 use serde_json::{Value, json};
+
+const DEFAULT_CHUNKS_PER_SEGMENT: u32 = 16_375;
 
 #[derive(Args)]
 pub(super) struct OutputArgs {
     /// New image path (.Ex01 for acquisition, .Lx01 for collection).
     pub output: PathBuf,
     /// Chunks per segment; chunks use standard 32 KiB geometry.
-    #[arg(long, default_value_t = 1024, value_name = "COUNT", help_heading = "Image settings", value_parser = clap::value_parser!(u32).range(1..=16384))]
+    #[arg(long, default_value_t = DEFAULT_CHUNKS_PER_SEGMENT, value_name = "COUNT", help_heading = "Image settings", value_parser = clap::value_parser!(u32).range(1..=16384))]
     chunks_per_segment: u32,
     /// Image compression.
-    #[arg(long, default_value = "zlib", help_heading = "Image settings", value_parser = ["raw", "zlib", "zlib-fast"])]
+    #[arg(long, default_value = "zlib", help_heading = "Image settings", value_parser = ["raw", "zlib"])]
     compression: String,
     /// Case identifier.
     #[arg(long, value_name = "ID", help_heading = "Case details")]
@@ -73,9 +74,6 @@ fn settings(args: &OutputArgs, size: u64, format: WriteFormat) -> SequentialOpti
     } else {
         WriteCompression::Zlib
     };
-    if args.compression == "zlib-fast" {
-        settings.write.compression_values.level = WriteCompressionLevel::Fast;
-    }
     settings
         .write
         .metadata
@@ -184,7 +182,6 @@ pub(super) fn acquire(
     verify(
         &output,
         Some(written.computed_sha256),
-        1,
         None,
         progress,
         report,
@@ -397,12 +394,11 @@ pub(super) fn collect(
     verify(
         &output,
         Some(written.computed_sha256),
-        1,
         None,
         progress,
         report,
     )?;
-    let image = Image::open(&output)?;
+    let image = crate::password::open(&output, None)?;
     let mut pending = vec![
         image
             .root_file_entry()
@@ -458,6 +454,14 @@ pub(super) fn recover(output: &Path, report: &mut Value) -> Result<()> {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn cli_default_uses_native_segment_capacity() {
+        assert_eq!(
+            DEFAULT_CHUNKS_PER_SEGMENT,
+            SequentialOptions::new(0).chunks_per_segment
+        );
+    }
 
     #[test]
     fn inventory_change_is_rejected_before_opening_payload() {

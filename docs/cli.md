@@ -30,7 +30,7 @@ ewf-cli ewf resume case.E01
 ewf-cli ewf checkpoint inspect case.E01
 ewf-cli ewf checkpoint validate case.E01
 ewf-cli ewf verify case.E01
-ewf-cli ewf verify case.Ex01 --workers 4
+ewf-cli ewf verify case.Ex01
 ewf-cli ewf info case.E01
 ewf-cli ewf files case.L01 --limit 1000
 ewf-cli ewf verify case.L01 1
@@ -215,12 +215,12 @@ still records every emitted chunk.
 
 Regular-file sources must be nonempty and sector-aligned. The default sector size
 is 512 bytes, and `--sector-size` accepts 512, 1024, 2048, or 4096. Output is
-physical E01 with zlib compression by default, raw with `--compression raw`,
-or faster zlib with `--compression zlib-fast`.
+physical E01 with zlib compression by default or raw with `--compression raw`.
 `--sectors-per-chunk` and `--chunks-per-segment` set the acquisition geometry.
-`--bulk-read-bytes BYTES` can group several chunks into one healthy read
-attempt. It defaults to one chunk, preserving existing error and cancellation
-granularity. The value must be sector aligned and at most 16 MiB.
+Healthy regular-file reads automatically group complete image chunks into
+requests of up to 256 KiB. A failed grouped request is discarded and retried a
+sector at a time, preserving read-error localization and accepted-byte
+boundaries. Cancellation is checked after each accepted image chunk.
 Existing images and CLI session manifests are never overwritten.
 
 The CLI can also open Windows physical disks (`\\.\PhysicalDriveN`) and Linux
@@ -277,7 +277,7 @@ recovered.
 ## One-shot EWF2 acquisition and collection
 
 ```text
-ewf-cli ewf acquire-sequential source.raw case.Ex01 --compression zlib --chunks-per-segment 1024
+ewf-cli ewf acquire-sequential source.raw case.Ex01 --compression zlib
 ewf-cli ewf collect snapshot-directory case.Lx01 --case-number CASE-001
 ewf-cli ewf recover-publication case.Ex01
 ```
@@ -288,8 +288,10 @@ scratch space. As with E01 acquisition, sources must be nonempty and
 sector-aligned, and the sector size of a regular file defaults to 512 bytes.
 Source reads support cancellation and an optional `--read-timeout-ms`. Failed
 reads are not retried or replaced with zeros. Chunks are fixed at 32 KiB. The
-default of 1024 chunks per segment represents 32 MiB of raw capacity, not a limit
-on encoded segment size. The `raw` and `zlib` compression options are available.
+default of 16,375 chunks per segment represents just under 512 MiB of raw
+capacity, not a limit on encoded segment size. The `raw` and `zlib` compression
+options are available. CLI reads automatically retain at most 32 EWF segment
+handles, so unusually split images do not exhaust the process descriptor limit.
 The CLI requires the `.Ex01` extension for physical output and `.Lx01` for
 logical output.
 

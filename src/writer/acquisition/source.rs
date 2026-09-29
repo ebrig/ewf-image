@@ -1,8 +1,10 @@
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::ControlFlow;
 
-use super::super::segment_path;
+use super::super::{encode_chunks, segment_path};
 use super::{AcquisitionError, AcquisitionWriter, EwfError, Result};
+
+const AUTOMATIC_BULK_READ_BYTES: usize = 256 * 1024;
 
 /// Treatment of a sector that remains unreadable after its retries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -33,11 +35,6 @@ pub struct AcquisitionReadOptions {
     /// Optional logical-byte interval for early checkpoints. Must be a positive
     /// multiple of the chunk size. Segment boundaries also checkpoint normally.
     pub checkpoint_interval: Option<u64>,
-    /// Optional healthy-read size. Defaults to one image chunk so a stalled
-    /// read cannot consume later chunks before the preceding checkpoint.
-    /// Larger values favor throughput on healthy media at the cost of coarser
-    /// read-error localization and cancellation granularity.
-    pub bulk_read_bytes: Option<usize>,
 }
 
 impl Default for AcquisitionReadOptions {
@@ -47,7 +44,6 @@ impl Default for AcquisitionReadOptions {
             unreadable_sector_policy: UnreadableSectorPolicy::Stop,
             maximum_error_ranges: 65_536,
             checkpoint_interval: None,
-            bulk_read_bytes: None,
         }
     }
 }
@@ -114,9 +110,9 @@ impl AcquisitionWriter {
     /// retries, and writes. An in-flight OS operation or segment seal cannot be
     /// interrupted. A callback must return promptly and must not panic.
     ///
-    /// Reads normally use one image chunk, or an optional larger bounded buffer.
-    /// A failed bulk attempt is discarded
-    /// and retried sector by sector. Partial failed reads never enter the image.
+    /// Healthy reads automatically group complete image chunks into a bounded
+    /// buffer. A failed bulk attempt is discarded and retried sector by sector.
+    /// Partial failed reads never enter the image.
     /// Source failures checkpoint accepted full chunks and leave the writer usable;
     /// destination failures poison it and require dropping and resuming.
     pub fn acquire_with_progress<R: Read + Seek>(
@@ -130,11 +126,6 @@ impl AcquisitionWriter {
         if !self.offset.is_multiple_of(sector_size as u64)
             || options.retries > 100
             || options.maximum_error_ranges == 0
-            || options.bulk_read_bytes.is_some_and(|bytes| {
-                bytes < sector_size
-                    || bytes > 16 * 1024 * 1024
-                    || !bytes.is_multiple_of(sector_size)
-            })
             || self.errors.len() > options.maximum_error_ranges
             || options.checkpoint_interval.is_some_and(|interval| {
                 interval == 0 || !interval.is_multiple_of(self.chunk_size as u64)
@@ -208,7 +199,7 @@ impl AcquisitionWriter {
         callback: &mut impl FnMut(AcquisitionProgress) -> ControlFlow<()>,
     ) -> Result<()> {
         notify(*progress, callback)?;
-        let mut buffer = vec![0; options.bulk_read_bytes.unwrap_or(self.chunk_size)];
+        let mut buffer = vec![0; automatic_bulk_read_bytes(self.chunk_size)];
         let sector_size = self.options.bytes_per_sector as usize;
         while self.offset < self.source_size {
             let size = (if self.pending.is_empty() {
@@ -228,10 +219,7 @@ impl AcquisitionWriter {
                 false
             };
             if read {
-                for chunk in buffer[..size].chunks(self.chunk_size) {
-                    self.write_all(chunk)?;
-                    self.after_source_write(options, progress, callback)?;
-                }
+                self.append_healthy_batch(&buffer[..size], options, progress, callback)?;
                 continue;
             }
             // Re-read the entire failed bulk range by sector; even a successful
@@ -263,6 +251,76 @@ impl AcquisitionWriter {
                 self.write_all(sector)?;
                 self.after_source_write(options, progress, callback)?;
             }
+        }
+        Ok(())
+    }
+
+    fn append_healthy_batch(
+        &mut self,
+        bytes: &[u8],
+        options: &AcquisitionReadOptions,
+        progress: &mut AcquisitionProgress,
+        callback: &mut impl FnMut(AcquisitionProgress) -> ControlFlow<()>,
+    ) -> Result<()> {
+        self.ensure_healthy()?;
+        if !self.pending.is_empty()
+            || bytes.is_empty()
+            || bytes.len() as u64 > self.source_size - self.offset
+        {
+            return Err(EwfError::Malformed(
+                "invalid healthy acquisition batch".into(),
+            ));
+        }
+
+        let processing_started = std::time::Instant::now();
+        let mut hash_states = Vec::with_capacity(bytes.len().div_ceil(self.chunk_size));
+        let mut hashes = self.hashes.clone();
+        let mut lengths = Vec::with_capacity(hash_states.capacity());
+        let chunks = bytes
+            .chunks(self.chunk_size)
+            .map(|chunk| {
+                hashes.update(chunk);
+                hash_states.push(hashes.clone());
+                lengths.push(chunk.len());
+                chunk.to_vec()
+            })
+            .collect();
+        let encoded = match encode_chunks(
+            chunks,
+            self.options.compression,
+            self.options.compression_values,
+            self.chunk_size as u64,
+            false,
+            false,
+        ) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                self.failed = true;
+                return Err(error);
+            }
+        };
+        self.processing_duration += processing_started.elapsed();
+
+        for ((chunk, length), hashes) in encoded.into_iter().zip(lengths).zip(hash_states) {
+            self.offset += length as u64;
+            self.hashes = hashes;
+            let scratch_started = std::time::Instant::now();
+            let descriptor = match self.spool.as_mut().expect("active spool").append(chunk) {
+                Ok(descriptor) => descriptor,
+                Err(error) => {
+                    self.failed = true;
+                    return Err(error);
+                }
+            };
+            self.chunks.push(descriptor);
+            self.scratch_write_duration += scratch_started.elapsed();
+            if (self.chunks.len() == self.chunks_per_segment || self.offset == self.source_size)
+                && let Err(error) = self.seal(self.offset == self.source_size)
+            {
+                self.failed = true;
+                return Err(error);
+            }
+            self.after_source_write(options, progress, callback)?;
         }
         Ok(())
     }
@@ -311,6 +369,10 @@ impl AcquisitionWriter {
         self.substituted_sectors += 1;
         Ok(())
     }
+}
+
+fn automatic_bulk_read_bytes(chunk_size: usize) -> usize {
+    (AUTOMATIC_BULK_READ_BYTES / chunk_size).max(1) * chunk_size
 }
 
 enum AttemptError {

@@ -6,18 +6,67 @@ code written for 0.4.0. See
 
 ## Unreleased
 
-### Reader performance
+## 0.6.0 - 2026-09-29
+
+### Command-line reliability and performance
+
+- Use the native maximum EWF2 segment capacity by default, reducing segment
+  creation and discovery overhead. Bound CLI readers to 32 simultaneous EWF
+  segment handles so highly split images leave descriptors available for
+  conversion and publication resources.
+- Compare embedded EWF source hashes during physical conversion instead of
+  decoding the source in a separate preliminary verification pass. Only the
+  stored digest algorithms are added to the transfer hasher. Feed the source
+  through bounded two-buffer read-ahead to overlap decoding with destination
+  hashing and encoding.
+
+### Reader and verification performance
 
 - Let path-backed EWF readers perform native positioned I/O outside the global
   segment-handle pool lock while preserving the configured descriptor ceiling.
   Concurrent misses for the same logical chunk now share one decode.
 - Add EWF counters for positioned segment I/O, handle-pool wait time, and
   coalesced chunk-cache misses.
+- Let the unpublished `ewf-cli` choose bounded whole-image verification
+  parallelism from the host automatically instead of adding a worker-count flag.
+
+### Acquisition and conversion performance
+
+- Encode automatically bounded batches of EWF chunks in parallel during
+  healthy acquisition and sequential E01/Ex01 writing while preserving output
+  order, progress, cancellation, and resumable segment boundaries.
+- Automatically coalesce healthy resumable-acquisition reads across complete
+  image chunks, up to 256 KiB, while retaining sector-by-sector fallback after a
+  read error and progress or cancellation between accepted chunks.
+- Reuse an opened EWF image for destination verification and overlap bounded
+  source read-ahead with image encoding. Add phase timings to CLI reports.
+
+## aff4-image 0.2.0 - 2026-09-29
+
+### Reader and verification performance
+
 - Replace AFF4's single decoded-chunk slot with an automatic 128 MiB shared LRU.
   Physical disk readers also coalesce small positioned requests into automatic
   1 MiB read-ahead pages within the same bound, without new reader settings.
 - Expose AFF4 cache, decoding, eviction, and read-ahead statistics from
   containers, volume sets, and discovered physical disk readers.
+- Read encoded chunks directly from stored ZIP bevies instead of loading each
+  complete bevy, while retaining the compatible fallback for ZIP-compressed
+  members. Expose counters for the direct range reads.
+- Hash paired AFF4 block references in one chunk pass and reuse complete
+  verification digests when converting or verifying selected physical disks.
+- Fuse AFF4 linear and paired MD5/SHA256 block verification into one decoded
+  chunk pass while retaining the existing work budgets, progress callbacks,
+  mismatch reporting, and complete verification report.
+- Stream identity-mapped ZIP resources and logical conversion input instead of
+  retaining complete payloads in memory.
+- Record the actual `aff4-image` package version in newly written containers.
+
+### Acquisition and conversion performance
+
+- Encode and block-hash automatically bounded AFF4 chunk batches in parallel,
+  retaining deterministic bevy order and cooperative cancellation without a
+  writer-tuning option.
 
 ## 0.5.0 - 2026-09-28
 

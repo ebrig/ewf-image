@@ -88,19 +88,14 @@ if outcome.status == AcquisitionStatus::Complete {
 }
 ```
 
-Normal reads are chunk-sized. When a bulk read fails, its data is discarded and
-the range is reread one sector at a time to isolate damaged sectors.
-`AcquisitionReadOptions::bulk_read_bytes` optionally groups chunks into a
-sector-aligned healthy read of at most 16 MiB. Its default leaves reads
-chunk-sized. Larger failed attempts are still re-read sector by sector and can
-delay progress on slow media. The option does not change on-disk geometry.
+Healthy reads automatically group complete image chunks into a bounded buffer of
+up to 256 KiB. When a bulk read fails, its data is discarded and the range is
+reread one sector at a time to isolate damaged sectors. Progress and cancellation
+remain observable between accepted chunks, and read coalescing does not change
+on-disk geometry.
 `AcquisitionWriter` also exposes current-instance durations for chunk processing,
 scratch writes, and segment sealing. A resumed writer starts new timing counters;
 these are diagnostic measurements, not evidence metadata.
-`AcquisitionOptions::compression_level` can select `WriteCompressionLevel::Fast`
-for zlib. The level is fixed by the checkpoint identity and must be supplied
-unchanged on resume. Compare its throughput and stored size against the default
-on representative source data before using it for a long acquisition.
 
 `retries` is the number of additional attempts for each sector, from 0 through
 100. The initial bulk failure does not count against that number. Short

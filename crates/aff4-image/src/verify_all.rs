@@ -108,6 +108,7 @@ impl Container {
             .collect();
         let mut remaining = self.limits.verification_bytes;
         let mut verified_backings = BTreeMap::<String, usize>::new();
+        let mut verified_blocks = BTreeMap::<String, PairedBlockDigests>::new();
         for id in &ids {
             let mut backing = None;
             let value = self.size(id).and_then(|size| {
@@ -132,7 +133,16 @@ impl Container {
                     }
                     self.with_linear_references(id, computed)
                 } else {
-                    self.verify(id, |done, size| progress(id, done, size))
+                    if let Some(block_size) = self.paired_block_size(&key) {
+                        let (verification, blocks) =
+                            self.verify_with_paired_blocks(id, block_size, |done, size| {
+                                progress(id, done, size)
+                            })?;
+                        verified_blocks.insert(key, blocks);
+                        Ok(verification)
+                    } else {
+                        self.verify(id, |done, size| progress(id, done, size))
+                    }
                 }
             });
             let (verification, coverage, error) = match value {
@@ -255,7 +265,12 @@ impl Container {
                 }
             }
             if self.has_type(&id, "ImageStream") {
-                match self.check_blocks(&id, &mut remaining, &mut progress) {
+                match self.check_blocks(
+                    &id,
+                    &mut remaining,
+                    &mut progress,
+                    verified_blocks.get(&id),
+                ) {
                     Ok(checks) => {
                         if checks.is_empty()
                             && !self
@@ -509,8 +524,9 @@ impl Container {
         id: &str,
         remaining: &mut u64,
         progress: &mut impl FnMut(&str, u64, u64) -> ControlFlow<()>,
+        verified: Option<&PairedBlockDigests>,
     ) -> Result<Vec<IntegrityCheck>> {
-        self.check_blocks_from(id, None, remaining, progress)
+        self.check_blocks_from(id, None, remaining, progress, verified)
     }
 
     pub(super) fn check_blocks_from(
@@ -519,6 +535,7 @@ impl Container {
         mut source: Option<&mut Self>,
         remaining: &mut u64,
         progress: &mut impl FnMut(&str, u64, u64) -> ControlFlow<()>,
+        verified: Option<&PairedBlockDigests>,
     ) -> Result<Vec<IntegrityCheck>> {
         let mut checks = Vec::new();
         let geometry = source.as_deref().unwrap_or(self);
@@ -557,6 +574,7 @@ impl Container {
                 &mut buffer,
                 &md5_names,
                 &sha256_names,
+                verified,
             );
         }
         for (suffix, algorithm, width) in [
@@ -625,6 +643,34 @@ impl Container {
         Ok(checks)
     }
 
+    fn paired_block_size(&mut self, id: &str) -> Option<usize> {
+        if !self.has_type(id, "ImageStream") {
+            return None;
+        }
+        let size = self.number(id, "size").ok()?;
+        let chunk = self.number(id, "chunkSize").ok()?;
+        let per = self.number(id, "chunksInSegment").ok()?;
+        if chunk == 0 || chunk > self.limits.chunk_bytes || per == 0 {
+            return None;
+        }
+        if self.block_names(id, "md5").ok()?.is_empty()
+            || self.block_names(id, "sha256").ok()?.is_empty()
+            || ["sha1", "sha512", "blake2b"].iter().any(|suffix| {
+                !self
+                    .block_names(id, suffix)
+                    .is_ok_and(|names| names.is_empty())
+            })
+            || size
+                .div_ceil(chunk)
+                .min(per)
+                .checked_mul(16 + 32)
+                .is_none_or(|bytes| bytes > self.limits.member_bytes)
+        {
+            return None;
+        }
+        usize::try_from(chunk).ok()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn check_md5_sha256_blocks(
         &mut self,
@@ -639,10 +685,16 @@ impl Container {
         buffer: &mut [u8],
         md5_names: &[String],
         sha256_names: &[String],
+        verified: Option<&PairedBlockDigests>,
     ) -> Result<Vec<IntegrityCheck>> {
         let bevies = count.div_ceil(per);
         if md5_names.len() as u64 != bevies || sha256_names.len() as u64 != bevies {
             return Err(malformed("incomplete block hash bevy set"));
+        }
+        if verified.is_some_and(|verified| {
+            verified.md5.len() as u64 != count || verified.sha256.len() as u64 != count
+        }) {
+            return Err(malformed("verified block digest count mismatch"));
         }
         let mut md5_checks = Vec::with_capacity(md5_names.len());
         let mut sha256_checks = Vec::with_capacity(sha256_names.len());
@@ -686,17 +738,34 @@ impl Container {
                         .checked_sub(take as u64)
                         .ok_or_else(|| malformed("verification byte limit exceeded"))?;
                 }
-                if let Some(reader) = source.as_deref_mut() {
-                    reader.read_at_uncached(id, &mut buffer[..take], offset)?;
-                } else {
-                    self.read_at_uncached(id, &mut buffer[..take], offset)?;
+                if verified.is_none() {
+                    if let Some(reader) = source.as_deref_mut() {
+                        reader.read_at_uncached(id, &mut buffer[..take], offset)?;
+                    } else {
+                        self.read_at_uncached(id, &mut buffer[..take], offset)?;
+                    }
                 }
                 for (name, algorithm, width, bytes, check) in &mut recorded {
                     let start = n as usize * *width;
-                    let expected = hex(&bytes[start..start + *width]);
-                    let value = compare(id, name, algorithm, &expected, &buffer[..take]);
-                    if value.outcome != CheckOutcome::Match {
-                        check.outcome = value.outcome;
+                    let outcome = if let Some(verified) = verified {
+                        let index = usize::try_from(first + n)
+                            .map_err(|_| malformed("block index does not fit memory"))?;
+                        let computed: &[u8] = if *algorithm == "MD5" {
+                            &verified.md5[index]
+                        } else {
+                            &verified.sha256[index]
+                        };
+                        if bytes[start..start + *width] == *computed {
+                            CheckOutcome::Match
+                        } else {
+                            CheckOutcome::Mismatch
+                        }
+                    } else {
+                        let expected = hex(&bytes[start..start + *width]);
+                        compare(id, name, algorithm, &expected, &buffer[..take]).outcome
+                    };
+                    if outcome != CheckOutcome::Match {
+                        check.outcome = outcome;
                         if check.detail.is_none() {
                             check.detail = Some(format!(
                                 "first mismatch at chunk {} (offset {offset})",

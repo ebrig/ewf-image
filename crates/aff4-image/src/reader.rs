@@ -12,7 +12,7 @@ use oxrdf::{NamedOrBlankNode, Term};
 use oxttl::TurtleParser;
 use sha1::Sha1;
 use sha2::Sha256;
-use zip::ZipArchive;
+use zip::{CompressionMethod, ZipArchive};
 
 use crate::{Error, Result, malformed};
 use base64::Engine;
@@ -63,6 +63,8 @@ pub struct ReaderStatistics {
     decoded_cache_evictions: u64,
     decoded_bytes: u64,
     decode_nanos: u64,
+    stored_member_range_reads: u64,
+    stored_member_range_bytes: u64,
 }
 
 impl ReaderStatistics {
@@ -106,6 +108,16 @@ impl ReaderStatistics {
         self.decode_nanos
     }
 
+    /// Returns direct range reads from uncompressed ZIP members.
+    pub fn stored_member_range_reads(&self) -> u64 {
+        self.stored_member_range_reads
+    }
+
+    /// Returns bytes read directly from uncompressed ZIP members.
+    pub fn stored_member_range_bytes(&self) -> u64 {
+        self.stored_member_range_bytes
+    }
+
     /// Returns a field-wise saturating delta from an earlier snapshot.
     #[must_use]
     pub fn saturating_delta(self, earlier: Self) -> Self {
@@ -130,6 +142,12 @@ impl ReaderStatistics {
                 .saturating_sub(earlier.decoded_cache_evictions),
             decoded_bytes: self.decoded_bytes.saturating_sub(earlier.decoded_bytes),
             decode_nanos: self.decode_nanos.saturating_sub(earlier.decode_nanos),
+            stored_member_range_reads: self
+                .stored_member_range_reads
+                .saturating_sub(earlier.stored_member_range_reads),
+            stored_member_range_bytes: self
+                .stored_member_range_bytes
+                .saturating_sub(earlier.stored_member_range_bytes),
         }
     }
 }
@@ -263,6 +281,15 @@ impl DecodedChunkCache {
             self.statistics.read_ahead_prefetches.saturating_add(1);
     }
 
+    fn record_stored_member_range_read(&mut self, bytes: usize) {
+        self.statistics.stored_member_range_reads =
+            self.statistics.stored_member_range_reads.saturating_add(1);
+        self.statistics.stored_member_range_bytes = self
+            .statistics
+            .stored_member_range_bytes
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+    }
+
     fn clear(&mut self) {
         self.entries.clear();
         self.current_bytes = 0;
@@ -384,16 +411,24 @@ pub struct Verification {
 /// Open does not certify contents. Backing files must remain unchanged.
 pub struct Container {
     archive: ZipArchive<File>,
+    stored_source: File,
     volume: String,
     graph: BTreeMap<String, Vec<Property>>,
     limits: Limits,
     cache: Option<(String, Vec<u8>)>,
     index_cache: Option<(String, Vec<u8>)>,
+    stored_member: Option<StoredMember>,
     decoded_cache: Arc<Mutex<DecodedChunkCache>>,
     maps: BTreeMap<String, Arc<Map>>,
     version: (u32, u32),
     metadata_members: BTreeMap<String, String>,
     usage: archive::Usage,
+}
+
+struct StoredMember {
+    name: String,
+    size: u64,
+    data_start: Option<u64>,
 }
 
 struct PositionedReader<'a> {
@@ -436,6 +471,7 @@ impl Container {
     /// External RDF references are never fetched over the network.
     pub fn open_with_limits(path: impl AsRef<Path>, limits: Limits) -> Result<Self> {
         let (mut archive, mut usage) = archive::open(path.as_ref(), &limits)?;
+        let stored_source = File::open(path.as_ref())?;
         let mut names = BTreeSet::new();
         for name in archive.file_names() {
             if !names.insert(name.to_owned()) {
@@ -535,11 +571,13 @@ impl Container {
         usage.triples = count;
         Ok(Self {
             archive,
+            stored_source,
             volume,
             graph,
             limits,
             cache: None,
             index_cache: None,
+            stored_member: None,
             decoded_cache: Arc::new(Mutex::new(DecodedChunkCache::new())),
             maps: BTreeMap::new(),
             version,
@@ -686,8 +724,33 @@ impl Container {
         &mut self,
         id: &str,
         output: &mut impl Write,
-        mut progress: impl FnMut(u64, u64) -> ControlFlow<()>,
+        progress: impl FnMut(u64, u64) -> ControlFlow<()>,
     ) -> Result<Verification> {
+        self.copy_verified_impl(id, output, None, progress)
+            .map(|(verification, _)| verification)
+    }
+
+    fn verify_with_paired_blocks(
+        &mut self,
+        id: &str,
+        block_size: usize,
+        progress: impl FnMut(u64, u64) -> ControlFlow<()>,
+    ) -> Result<(Verification, PairedBlockDigests)> {
+        let (verification, blocks) =
+            self.copy_verified_impl(id, &mut std::io::sink(), Some(block_size), progress)?;
+        Ok((
+            verification,
+            blocks.expect("paired block hashing requested"),
+        ))
+    }
+
+    fn copy_verified_impl(
+        &mut self,
+        id: &str,
+        output: &mut impl Write,
+        block_size: Option<usize>,
+        mut progress: impl FnMut(u64, u64) -> ControlFlow<()>,
+    ) -> Result<(Verification, Option<PairedBlockDigests>)> {
         let size = self.size(id)?;
         if size > self.limits.verification_bytes {
             return Err(malformed("verification byte limit exceeded"));
@@ -705,6 +768,7 @@ impl Container {
         let mut sha256 = Sha256::new();
         let mut sha512 = sha2::Sha512::new();
         let mut blake2b = <blake2::Blake2b512 as blake2::Digest>::new();
+        let mut blocks = block_size.map(PairedBlockHasher::new);
         let mut write_error = None;
         let walked = self.walk_bytes(id, |bytes, done| {
             if let Err(error) = output.write_all(bytes) {
@@ -716,6 +780,9 @@ impl Container {
             sha256.update(bytes);
             sha512.update(bytes);
             blake2::Digest::update(&mut blake2b, bytes);
+            if let Some(blocks) = &mut blocks {
+                blocks.update(bytes);
+            }
             progress(done, size)
         });
         if let Some(error) = write_error {
@@ -732,7 +799,8 @@ impl Container {
             references_match: None,
             unsupported_hashes: Vec::new(),
         };
-        self.with_linear_references(id, result)
+        let result = self.with_linear_references(id, result)?;
+        Ok((result, blocks.map(PairedBlockHasher::finish)))
     }
 
     fn with_linear_references(&self, id: &str, mut result: Verification) -> Result<Verification> {
@@ -999,6 +1067,62 @@ impl Container {
         );
         Ok(())
     }
+
+    fn read_stored_member_range(
+        &mut self,
+        name: &str,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> Result<bool> {
+        if self
+            .stored_member
+            .as_ref()
+            .is_none_or(|member| member.name != name)
+        {
+            let directory_start = self.archive.central_directory_start();
+            let file = self.archive.by_name(name)?;
+            if file.size() > self.limits.member_bytes {
+                return Err(malformed(format!("member exceeds resource limit: {name}")));
+            }
+            let size = file.size();
+            let data_start = (file.compression() == CompressionMethod::Stored
+                && !file.encrypted()
+                && file.compressed_size() == size)
+                .then(|| file.data_start())
+                .flatten();
+            if data_start
+                .and_then(|start| start.checked_add(size))
+                .is_some_and(|end| end > directory_start)
+            {
+                return Err(malformed("stored ZIP member exceeds archive data"));
+            }
+            self.stored_member = Some(StoredMember {
+                name: name.to_owned(),
+                size,
+                data_start,
+            });
+        }
+        let member = self.stored_member.as_ref().unwrap();
+        if offset
+            .checked_add(buffer.len() as u64)
+            .is_none_or(|end| end > member.size)
+        {
+            return Err(malformed("member range exceeds stored ZIP entry"));
+        }
+        let Some(data_start) = member.data_start else {
+            return Ok(false);
+        };
+        let absolute = data_start
+            .checked_add(offset)
+            .ok_or_else(|| malformed("stored ZIP member offset overflow"))?;
+        read_file_exact_at(&self.stored_source, absolute, buffer)?;
+        self.decoded_cache
+            .lock()
+            .map_err(|_| malformed("AFF4 decoded cache lock poisoned"))?
+            .record_stored_member_range_read(buffer.len());
+        Ok(true)
+    }
+
     fn read_inner(
         &mut self,
         id: &str,
@@ -1183,21 +1307,36 @@ impl Container {
                 .ok_or_else(|| malformed("missing chunk index"))?;
             let start = u64::from_le_bytes(record[..8].try_into().unwrap());
             let length = u32::from_le_bytes(record[8..].try_into().unwrap()) as u64;
-            if self.cache.as_ref().is_none_or(|(key, _)| key != &name) {
+            let end = start
+                .checked_add(length)
+                .filter(|end| *end <= self.limits.member_bytes)
+                .ok_or_else(|| malformed("chunk outside bevy"))?;
+            let mut direct = chunk_buffer(length as usize)?;
+            let direct_read = self.read_stored_member_range(&name, start, &mut direct)?;
+            if direct_read {
+                self.cache = None;
+            } else if self.cache.as_ref().is_none_or(|(key, _)| key != &name) {
                 self.cache = Some((
                     name.clone(),
                     member(&mut self.archive, &name, self.limits.member_bytes)?,
                 ));
             }
-            let data = &self.cache.as_ref().unwrap().1;
-            let end = start
-                .checked_add(length)
-                .filter(|end| *end <= data.len() as u64)
-                .ok_or_else(|| malformed("chunk outside bevy"))?;
-            let encoded = &data[start as usize..end as usize];
+            let encoded = if direct_read {
+                direct.as_slice()
+            } else {
+                let data = &self.cache.as_ref().unwrap().1;
+                if end > data.len() as u64 {
+                    return Err(malformed("chunk outside bevy"));
+                }
+                &data[start as usize..end as usize]
+            };
             let decode_started = Instant::now();
             let decoded = if length == chunk_size {
-                encoded.to_vec()
+                if direct_read {
+                    direct
+                } else {
+                    encoded.to_vec()
+                }
             } else {
                 decode(encoded, compression.as_deref(), chunk_size as usize)?
             };
@@ -1221,6 +1360,101 @@ impl Container {
         }
         Ok(())
     }
+}
+
+#[derive(Clone)]
+pub(super) struct PairedBlockDigests {
+    md5: Vec<[u8; 16]>,
+    sha256: Vec<[u8; 32]>,
+}
+
+struct PairedBlockHasher {
+    block_size: usize,
+    used: usize,
+    md5: Md5,
+    sha256: Sha256,
+    result: PairedBlockDigests,
+}
+
+impl PairedBlockHasher {
+    fn new(block_size: usize) -> Self {
+        debug_assert!(block_size > 0);
+        Self {
+            block_size,
+            used: 0,
+            md5: Md5::new(),
+            sha256: Sha256::new(),
+            result: PairedBlockDigests {
+                md5: Vec::new(),
+                sha256: Vec::new(),
+            },
+        }
+    }
+
+    fn update(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            let take = bytes.len().min(self.block_size - self.used);
+            self.md5.update(&bytes[..take]);
+            self.sha256.update(&bytes[..take]);
+            self.used += take;
+            bytes = &bytes[take..];
+            if self.used == self.block_size {
+                self.finish_block();
+            }
+        }
+    }
+
+    fn finish(mut self) -> PairedBlockDigests {
+        if self.used != 0 {
+            self.finish_block();
+        }
+        self.result
+    }
+
+    fn finish_block(&mut self) {
+        self.result.md5.push(
+            std::mem::replace(&mut self.md5, Md5::new())
+                .finalize()
+                .into(),
+        );
+        self.result.sha256.push(
+            std::mem::replace(&mut self.sha256, Sha256::new())
+                .finalize()
+                .into(),
+        );
+        self.used = 0;
+    }
+}
+
+#[cfg(unix)]
+fn read_file_exact_at(file: &File, offset: u64, buffer: &mut [u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.read_exact_at(buffer, offset)
+}
+
+#[cfg(windows)]
+fn read_file_exact_at(file: &File, offset: u64, mut buffer: &mut [u8]) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    let mut position = offset;
+    while !buffer.is_empty() {
+        let read = file.seek_read(buffer, position)?;
+        if read == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        }
+        position = position
+            .checked_add(read as u64)
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        buffer = &mut buffer[read..];
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_file_exact_at(file: &File, offset: u64, buffer: &mut [u8]) -> std::io::Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = file.try_clone()?;
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(buffer)
 }
 
 fn enter(id: &str, visited: &mut Vec<String>) -> Result<()> {

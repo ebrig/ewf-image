@@ -5,7 +5,7 @@ evidence containers. The crate is versioned separately from `ewf-image` and adds
 no AFF4 dependencies or APIs to it. The supported profiles are listed below;
 public APIs and JSON output may change in future `0.x` releases.
 
-The workspace source version is 0.1.0.
+The workspace source version is 0.2.0.
 
 ## Build and use
 
@@ -61,11 +61,11 @@ The default `write` feature adds writers. Disable default features for a
 reader-only dependency. The command-line program is the separate `ewf-cli`
 workspace package.
 
-For a published 0.1.x release, a reader-only application can use:
+For a published 0.2.x release, a reader-only application can use:
 
 ```toml
 [dependencies]
-aff4-image = { version = "0.1", default-features = false }
+aff4-image = { version = "0.2", default-features = false }
 ```
 
 The crate exposes a library API; installing this dependency does not add a

@@ -3,10 +3,11 @@
 use super::{
     ChunkDescriptor, ChunkSpool, EWF2_DONE_SECTION, EWF2_NEXT_SECTION, Ewf1SegmentSections,
     Ewf1SegmentWriteContext, Ewf2SegmentWriteContext, WriteFormat, WriteHashState, WriteOptions,
-    WriteResult, effective_write_hashes, encode_chunk, estimated_ewf1_segment_size,
-    ewf2_segment_path, is_ewf2_format, normalize_maximum_segment_size, normalize_media_size,
-    publication_segment_paths, segment_path, validate_options, validate_secondary_segment_filename,
-    validate_session_ranges, write_ewf1_segment, write_ewf2_segment, writer_chunk_geometry,
+    WriteResult, automatic_encode_batch_chunks, effective_write_hashes, encode_chunks,
+    estimated_ewf1_segment_size, ewf2_segment_path, is_ewf2_format, normalize_maximum_segment_size,
+    normalize_media_size, publication_segment_paths, segment_path, validate_options,
+    validate_secondary_segment_filename, validate_session_ranges, write_ewf1_segment,
+    write_ewf2_segment, writer_chunk_geometry,
 };
 use crate::publication::Publication;
 use crate::{EwfError, Result};
@@ -46,7 +47,8 @@ impl SequentialOptions {
 /// Streams EWF1 physical or EWF2 payload into staged native segments without
 /// a full raw spool.
 ///
-/// Payload scratch holds one encoded segment, plus one chunk in memory.
+/// Payload scratch holds one encoded segment, plus an automatically bounded
+/// in-memory chunk-encoding batch when the `parallel` feature is enabled.
 /// Logical catalogs are written in the final segment.
 /// Catalogs and output path lists still grow with entry and segment counts.
 /// Input must match the declared size exactly. Final sector padding is zeroed
@@ -191,14 +193,22 @@ impl SequentialWriter {
                 "sequential input exceeds declared source size".into(),
             ));
         }
+        let batch_size = automatic_encode_batch_chunks(self.capacity);
         while !bytes.is_empty() {
-            let take = bytes.len().min(self.capacity - self.pending.len());
-            self.pending.extend_from_slice(&bytes[..take]);
-            self.position += take as u64;
-            bytes = &bytes[take..];
-            if self.pending.len() == self.capacity {
-                self.encode_pending()?;
+            let mut chunks = Vec::with_capacity(batch_size);
+            while !bytes.is_empty() && chunks.len() < batch_size {
+                let take = bytes.len().min(self.capacity - self.pending.len());
+                self.pending.extend_from_slice(&bytes[..take]);
+                self.position += take as u64;
+                bytes = &bytes[take..];
+                if self.pending.len() == self.capacity {
+                    chunks.push(std::mem::replace(
+                        &mut self.pending,
+                        Vec::with_capacity(self.capacity),
+                    ));
+                }
             }
+            self.encode_batch(chunks)?;
         }
         self.poisoned = false;
         Ok(())
@@ -211,30 +221,31 @@ impl SequentialWriter {
         Ok(())
     }
 
-    fn encode_pending(&mut self) -> Result<()> {
-        let chunk = std::mem::replace(&mut self.pending, Vec::with_capacity(self.capacity));
-        self.hashes.update(&chunk);
-        let encoded = encode_chunk(
-            chunk,
+    fn encode_batch(&mut self, chunks: Vec<Vec<u8>>) -> Result<()> {
+        for chunk in &chunks {
+            self.hashes.update(chunk);
+        }
+        let encoded = encode_chunks(
+            chunks,
             self.options.compression,
             self.options.compression_values,
             self.chunk_size,
             is_ewf2_format(self.options.format),
             !is_ewf2_format(self.options.format) && self.options.compression_values.empty_block,
         )?;
-        self.current
-            .chunks
-            .push(self.current.spool.append(encoded)?);
-        self.encoded_chunks += 1;
-        if self.current.chunks.len() == self.per_segment
-            && self.encoded_chunks < u64::from(self.total_chunks)
-        {
-            let staged = self.publication.stage(0, &self.path)?;
-            let next = Group::new(staged.parent().expect("staged parent"))?;
-            let mut complete = std::mem::replace(&mut self.current, next);
-            let number = self.paths.len() + 1;
-            self.stage_group(&mut complete, number, false)?;
-            self.paths.push(self.segment_path(&self.path, number)?);
+        for chunk in encoded {
+            self.current.chunks.push(self.current.spool.append(chunk)?);
+            self.encoded_chunks += 1;
+            if self.current.chunks.len() == self.per_segment
+                && self.encoded_chunks < u64::from(self.total_chunks)
+            {
+                let staged = self.publication.stage(0, &self.path)?;
+                let next = Group::new(staged.parent().expect("staged parent"))?;
+                let mut complete = std::mem::replace(&mut self.current, next);
+                let number = self.paths.len() + 1;
+                self.stage_group(&mut complete, number, false)?;
+                self.paths.push(self.segment_path(&self.path, number)?);
+            }
         }
         Ok(())
     }
@@ -321,7 +332,8 @@ impl SequentialWriter {
         let padding = (self.logical_size - self.source_size) as usize;
         self.pending.resize(self.pending.len() + padding, 0);
         if !self.pending.is_empty() {
-            self.encode_pending()?;
+            let chunk = std::mem::replace(&mut self.pending, Vec::with_capacity(self.capacity));
+            self.encode_batch(vec![chunk])?;
         }
         let (md5, sha1, sha256) = self.hashes.clone().finalize();
         self.options.hashes = effective_write_hashes(&self.options.hashes, md5, sha1, sha256)?;

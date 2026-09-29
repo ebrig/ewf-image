@@ -1,11 +1,39 @@
 //! Stream writer failure isolation and independent-consumer contracts.
 use aff4_image::{Compression, Container, Profile, WriteOptions, Writer};
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Write};
 use std::ops::ControlFlow;
+use std::path::Path;
+use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 fn proceed(_: u64, _: u64) -> ControlFlow<()> {
     ControlFlow::Continue(())
+}
+
+#[test]
+fn writer_records_the_package_version() {
+    for (profile, minor) in [(Profile::Physical, 0), (Profile::Logical, 1)] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("version.aff4");
+        Writer::create(&path, profile, WriteOptions::default())
+            .unwrap()
+            .finish()
+            .unwrap();
+        let mut archive = zip::ZipArchive::new(fs::File::open(path).unwrap()).unwrap();
+        let mut version = String::new();
+        archive
+            .by_name("version.txt")
+            .unwrap()
+            .read_to_string(&mut version)
+            .unwrap();
+        assert_eq!(
+            version,
+            format!(
+                "major=1\nminor={minor}\ntool=aff4-image {}\n",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+    }
 }
 
 #[test]
@@ -77,12 +105,18 @@ fn physical_codecs_bevies_padding_and_logical_zip_roundtrip() {
                 &data[offset as usize..offset as usize + count]
             );
         }
+        let before_full_verification = image.reader_statistics();
         let full = image
             .verify_all(Some(&result.metadata_sha256), |_, _, _| {
                 ControlFlow::Continue(())
             })
             .unwrap();
         assert!(full.all_match(), "{full:#?}");
+        let verification_reads = image
+            .reader_statistics()
+            .saturating_delta(before_full_verification)
+            .stored_member_range_reads();
+        assert_eq!(verification_reads, data.len().div_ceil(32768) as u64);
         let report = image.verify(&id, proceed).unwrap();
         assert_eq!(report.references_match, Some(true));
         assert_eq!(report.sha256, result.streams[0].sha256);
@@ -174,11 +208,75 @@ fn decoded_cache_retains_multiple_chunks_and_reports_usage() {
     assert_eq!(statistics.decoded_cache_misses(), 2);
     assert_eq!(statistics.decoded_cache_hits(), 1);
     assert_eq!(statistics.decoded_bytes(), 2 * 32768);
+    assert_eq!(statistics.stored_member_range_reads(), 2);
+    assert!(statistics.stored_member_range_bytes() > 0);
+    assert!(statistics.stored_member_range_bytes() <= 2 * 32768);
     let cache = image.reader_cache_info();
     assert_eq!(cache.entries(), 2);
     assert_eq!(cache.current_bytes(), 2 * 32768);
     assert!(cache.peak_bytes() >= cache.current_bytes());
     assert!(cache.current_bytes() <= cache.capacity_bytes());
+}
+
+fn rewrite_first_bevy_deflated(source: &Path, destination: &Path) {
+    let mut input = ZipArchive::new(fs::File::open(source).unwrap()).unwrap();
+    let mut output = ZipWriter::new(fs::File::create(destination).unwrap());
+    let mut rewrote_bevy = false;
+    for index in 0..input.len() {
+        let mut member = input.by_index(index).unwrap();
+        let name = member.name().to_owned();
+        let mut bytes = Vec::new();
+        member.read_to_end(&mut bytes).unwrap();
+        let is_bevy = name.ends_with("/00000000");
+        if is_bevy {
+            rewrote_bevy = true;
+        }
+        let method = if is_bevy {
+            CompressionMethod::Deflated
+        } else {
+            CompressionMethod::Stored
+        };
+        output
+            .start_file(
+                name,
+                SimpleFileOptions::default().compression_method(method),
+            )
+            .unwrap();
+        output.write_all(&bytes).unwrap();
+    }
+    output.finish().unwrap();
+    assert!(rewrote_bevy);
+}
+
+#[test]
+fn zip_compressed_bevy_uses_the_compatible_full_member_fallback() {
+    let data = data();
+    let dir = tempfile::tempdir().unwrap();
+    let stored = dir.path().join("stored.aff4");
+    let deflated = dir.path().join("deflated.aff4");
+    let mut writer = Writer::create(
+        &stored,
+        Profile::Physical,
+        WriteOptions {
+            chunk_bytes: 32768,
+            chunks_per_bevy: 8,
+            compression: Compression::Zlib,
+        },
+    )
+    .unwrap();
+    let id = writer
+        .add_image(data.len() as u64, &mut Cursor::new(&data), proceed)
+        .unwrap();
+    writer.finish().unwrap();
+    rewrite_first_bevy_deflated(&stored, &deflated);
+
+    let mut image = Container::open(deflated).unwrap();
+    let opened = image.reader_statistics();
+    let mut bytes = vec![0; 65536];
+    image.read_at(&id, &mut bytes, 16384).unwrap();
+    assert_eq!(&bytes, &data[16384..16384 + bytes.len()]);
+    let statistics = image.reader_statistics().saturating_delta(opened);
+    assert_eq!(statistics.stored_member_range_reads(), 0);
 }
 
 #[test]
