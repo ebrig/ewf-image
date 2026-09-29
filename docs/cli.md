@@ -277,7 +277,7 @@ recovered.
 ## One-shot EWF2 acquisition and collection
 
 ```text
-ewf-cli ewf acquire-sequential source.raw case.Ex01 --compression zlib --chunks-per-segment 1024
+ewf-cli ewf acquire-sequential source.raw case.Ex01 --compression zlib
 ewf-cli ewf collect snapshot-directory case.Lx01 --case-number CASE-001
 ewf-cli ewf recover-publication case.Ex01
 ```
@@ -288,8 +288,10 @@ scratch space. As with E01 acquisition, sources must be nonempty and
 sector-aligned, and the sector size of a regular file defaults to 512 bytes.
 Source reads support cancellation and an optional `--read-timeout-ms`. Failed
 reads are not retried or replaced with zeros. Chunks are fixed at 32 KiB. The
-default of 1024 chunks per segment represents 32 MiB of raw capacity, not a limit
-on encoded segment size. The `raw` and `zlib` compression options are available.
+default of 16,375 chunks per segment represents just under 512 MiB of raw
+capacity, not a limit on encoded segment size. The `raw` and `zlib` compression
+options are available. CLI reads automatically retain at most 32 EWF segment
+handles, so unusually split images do not exhaust the process descriptor limit.
 The CLI requires the `.Ex01` extension for physical output and `.Lx01` for
 logical output.
 

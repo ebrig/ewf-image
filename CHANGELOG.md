@@ -6,6 +6,13 @@ code written for 0.4.0. See
 
 ## Unreleased
 
+### Command-line reliability and performance
+
+- Use the native maximum EWF2 segment capacity by default, reducing segment
+  creation and discovery overhead. Bound CLI readers to 32 simultaneous EWF
+  segment handles so highly split images leave descriptors available for
+  conversion and publication resources.
+
 ## 0.6.0 - 2026-09-29
 
 ### Reader and verification performance

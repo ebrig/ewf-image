@@ -508,7 +508,7 @@ pub(crate) fn convert(
         report["published"] = json!(true);
         report["segments"] = json!(written.segment_paths);
         report["recovery_command"] = Value::Null;
-        let image = Image::open(&output)?;
+        let image = crate::password::open(&output, None)?;
         let v = image.verify_with_progress(&Default::default(), |p| {
             ctx.progress("destination verification", p.bytes_verified, p.bytes_total)
         })?;
