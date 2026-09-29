@@ -123,6 +123,7 @@ struct PathSegmentReader {
 
 struct PositionedSegmentLease<'a> {
     file: Option<Arc<File>>,
+    segments: &'a Mutex<SegmentFilePool>,
     available: &'a Condvar,
 }
 
@@ -211,6 +212,12 @@ impl Drop for PositionedSegmentLease<'_> {
         // can observe this handle as busy and go back to sleep after the only
         // notification associated with the release.
         self.file.take();
+        // Synchronize the predicate change with the mutex used by waiters. A
+        // waiter cannot slip between checking the pool and going to sleep.
+        let _segments = self
+            .segments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.available.notify_one();
     }
 }
@@ -2106,6 +2113,7 @@ impl Image {
                 .record_segment_pool_wait(wait_started.elapsed());
             let lease = PositionedSegmentLease {
                 file: Some(file),
+                segments: &self.inner.segments,
                 available: &self.inner.segment_handle_available,
             };
             let size = bounded_size(length)?;
