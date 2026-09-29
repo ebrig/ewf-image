@@ -6,7 +6,7 @@ code written for 0.4.0. See
 
 ## Unreleased
 
-## 0.5.0
+## 0.5.0 - 2026-09-28
 
 ### Command-line usability
 
@@ -119,7 +119,36 @@ These commands are available as `ewf-cli ewf <command>`.
   published media and files. Unresolved publication has an explicit JSON state.
   The commands have no checkpoint resume or mirror option.
 
-### Experimental AFF4 sibling crate
+### Validation and documentation
+
+- Add Rust CI on Windows, Linux, and macOS, Linux MSRV checks, interoperability
+  tests with pinned libewf 20260924, canonical AFF4 references, and producer and
+  consumer tests with pinned independent aff4tools. Explicitly requested corpus
+  runs fail when inputs are missing or empty.
+- Add an opt-in logical corpus test that reads every catalog entry, compares
+  stored file MD5 and SHA1 values, and compares complete media SHA256 and size
+  with independently computed sidecar files. Add an independent JSON Lines
+  manifest comparison for the complete entry tree, names, and file bytes.
+- Add process-exit and I/O-failure coverage for acquisition, publication,
+  history, export, and recovery. Add Linux loop and device-mapper suites and
+  Windows VHDX suites on owned devices, with independent exports, ENOSPC and
+  retry, cancellation, and source-preservation checks.
+- Extend Windows Ex01/Lx01 NTFS and exFAT acceptance with pinned independent
+  oracles. The harness detaches each completed destination before mounting the
+  next one.
+- Add isolated bounded EWF and AFF4 fuzz targets, reproducible payload, catalog,
+  and resume benchmarks, and consumer fixture preparation anchored to source
+  hashes. Independent logical EWF coverage includes default 32 KiB split output.
+  Split output at 8 KiB and the default 32 KiB passed the pinned libewf
+  exporter. An older libewf version still needs separate investigation.
+- Reject truncated EWF1 volume flags and non-ASCII logical attribute hex without
+  panicking when fuzzing malformed input.
+- Add a local acceptance runner with isolated native builds, revision and tool
+  provenance, hashed logs and artifacts, and explicit failed, blocked, and
+  skipped statuses.
+- Consolidate the user guides, writer selection, and migration guidance.
+
+## aff4-image 0.1.0 - 2026-09-28
 
 - Add the separate, experimental `aff4-image` crate. It is versioned and
   packaged independently from `ewf-image`. It reads AFF4 1.0 ImageStreams,
@@ -151,33 +180,6 @@ These commands are available as `ewf-cli ewf <command>`.
   separately.
 - Release finalized writer metadata and serialize reports without a duplicate
   JSON tree, which reduces measured memory use for large catalogs.
-
-### Validation and documentation
-
-- Add Rust CI on Windows, Linux, and macOS, Linux MSRV checks, interoperability
-  tests with pinned libewf 20260924, canonical AFF4 references, and producer and
-  consumer tests with pinned independent aff4tools. Explicitly requested corpus
-  runs fail when inputs are missing or empty.
-- Add an opt-in logical corpus test that reads every catalog entry, compares
-  stored file MD5 and SHA1 values, and compares complete media SHA256 and size
-  with independently computed sidecar files. Add an independent JSON Lines
-  manifest comparison for the complete entry tree, names, and file bytes.
-- Add process-exit and I/O-failure coverage for acquisition, publication,
-  history, export, and recovery. Add Linux loop and device-mapper suites and
-  Windows VHDX suites on owned devices, with independent exports, ENOSPC and
-  retry, cancellation, and source-preservation checks.
-- Extend Windows Ex01/Lx01 NTFS and exFAT acceptance with pinned independent
-  oracles. The harness detaches each completed destination before mounting the
-  next one.
-- Add isolated bounded EWF and AFF4 fuzz targets, reproducible payload, catalog,
-  and resume benchmarks, and consumer fixture preparation anchored to source
-  hashes. Independent logical EWF coverage includes default 32 KiB split output.
-  Split output at 8 KiB and the default 32 KiB passed the pinned libewf
-  exporter. An older libewf version still needs separate investigation.
-- Add a local acceptance runner with isolated native builds, revision and tool
-  provenance, hashed logs and artifacts, and explicit failed, blocked, and
-  skipped statuses.
-- Consolidate the user guides, writer selection, and migration guidance.
 
 ## 0.4.0 - 2026-09-12
 
