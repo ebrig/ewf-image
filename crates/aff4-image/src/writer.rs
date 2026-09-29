@@ -14,6 +14,7 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use md5::{Digest, Md5};
+use rayon::prelude::*;
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
 use tempfile::NamedTempFile;
@@ -278,64 +279,78 @@ impl Writer {
         let mut hashes = Hashes::new();
         let mut done = 0;
         let mut chunk = 0u64;
-        let mut buffer = vec![0; self.options.chunk_bytes as usize];
         let mut index = Vec::new();
         let mut md5_blocks = Vec::new();
         let mut sha256_blocks = Vec::new();
         let mut md5_tree = Sha512::new();
         let mut sha256_tree = Sha512::new();
         let mut index_tree = Sha512::new();
-        let mut bevy_bytes = 0u64;
         let zip = self.zip.as_mut().unwrap();
-        loop {
-            if progress(done, size).is_break() {
-                return Err(Error::Aborted);
-            }
-            if done == size {
-                break;
-            }
+        while done < size {
             let bevy = chunk / u64::from(self.options.chunks_per_bevy);
-            if chunk.is_multiple_of(u64::from(self.options.chunks_per_bevy)) {
-                zip.start_file(format!("{storage}/{bevy:08}"), stored())?;
-                bevy_bytes = 0;
-                index.clear();
-                md5_blocks.clear();
-                sha256_blocks.clear();
+            zip.start_file(format!("{storage}/{bevy:08}"), stored())?;
+            let mut bevy_bytes = 0u64;
+            index.clear();
+            md5_blocks.clear();
+            sha256_blocks.clear();
+
+            let bevy_end = chunk + u64::from(self.options.chunks_per_bevy);
+            while done < size && chunk < bevy_end {
+                let batch_chunks = automatic_encode_batch_chunks(self.options.chunk_bytes as usize)
+                    .min(usize::try_from(bevy_end - chunk).unwrap_or(usize::MAX));
+                let mut buffers = Vec::with_capacity(batch_chunks);
+                let mut lengths = Vec::with_capacity(batch_chunks);
+                while done < size && chunk + (buffers.len() as u64) < bevy_end {
+                    if buffers.len() == batch_chunks {
+                        break;
+                    }
+                    if progress(done, size).is_break() {
+                        return Err(Error::Aborted);
+                    }
+                    let length = (size - done).min(u64::from(self.options.chunk_bytes)) as usize;
+                    let mut buffer = vec![0; self.options.chunk_bytes as usize];
+                    input.read_exact(&mut buffer[..length])?;
+                    hashes.update(&buffer[..length]);
+                    done += length as u64;
+                    buffers.push(buffer);
+                    lengths.push(length);
+                }
+
+                let prepared = prepare_chunks(&buffers, &lengths, self.options.compression)?;
+                for (buffer, prepared) in buffers.iter().zip(prepared) {
+                    md5_blocks.extend_from_slice(&prepared.md5);
+                    sha256_blocks.extend_from_slice(&prepared.sha256);
+                    let encoded = if self.options.compression != Compression::Stored
+                        && prepared.encoded.len() < buffer.len().saturating_sub(16)
+                    {
+                        &prepared.encoded
+                    } else {
+                        buffer
+                    };
+                    zip.write_all(encoded)?;
+                    index.extend_from_slice(&bevy_bytes.to_le_bytes());
+                    index.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+                    bevy_bytes += encoded.len() as u64;
+                    chunk += 1;
+                }
             }
-            let length = (size - done).min(buffer.len() as u64) as usize;
-            buffer.fill(0);
-            input.read_exact(&mut buffer[..length])?;
-            hashes.update(&buffer[..length]);
-            md5_blocks.extend_from_slice(&Md5::digest(&buffer[..length]));
-            sha256_blocks.extend_from_slice(&Sha256::digest(&buffer[..length]));
-            let encoded = encode(&buffer, self.options.compression)?;
-            let encoded = if encoded.len() < buffer.len().saturating_sub(16) {
-                &encoded
-            } else {
-                &buffer
-            };
-            zip.write_all(encoded)?;
-            index.extend_from_slice(&bevy_bytes.to_le_bytes());
-            index.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
-            bevy_bytes += encoded.len() as u64;
-            done += length as u64;
-            chunk += 1;
-            if chunk.is_multiple_of(u64::from(self.options.chunks_per_bevy)) || done == size {
-                write_member(zip, &format!("{storage}/{bevy:08}.index"), &index)?;
-                write_member(
-                    zip,
-                    &format!("{storage}/{bevy:08}.blockHash.md5"),
-                    &md5_blocks,
-                )?;
-                write_member(
-                    zip,
-                    &format!("{storage}/{bevy:08}.blockHash.sha256"),
-                    &sha256_blocks,
-                )?;
-                md5_tree.update(&md5_blocks);
-                sha256_tree.update(&sha256_blocks);
-                index_tree.update(&index);
-            }
+            write_member(zip, &format!("{storage}/{bevy:08}.index"), &index)?;
+            write_member(
+                zip,
+                &format!("{storage}/{bevy:08}.blockHash.md5"),
+                &md5_blocks,
+            )?;
+            write_member(
+                zip,
+                &format!("{storage}/{bevy:08}.blockHash.sha256"),
+                &sha256_blocks,
+            )?;
+            md5_tree.update(&md5_blocks);
+            sha256_tree.update(&sha256_blocks);
+            index_tree.update(&index);
+        }
+        if progress(done, size).is_break() {
+            return Err(Error::Aborted);
         }
         let result = hashes.finish(id.clone(), size);
         let map_storage = format!("aff4%3A%2F%2F{}", map.strip_prefix("aff4://").unwrap());
@@ -625,6 +640,48 @@ fn hash_triples(result: &AcquiredStream) -> String {
         result.md5, result.sha1, result.sha256
     )
 }
+
+struct PreparedChunk {
+    encoded: Vec<u8>,
+    md5: [u8; 16],
+    sha256: [u8; 32],
+}
+
+fn prepare_chunks(
+    buffers: &[Vec<u8>],
+    lengths: &[usize],
+    codec: Compression,
+) -> Result<Vec<PreparedChunk>> {
+    let prepare = |(buffer, length): (&Vec<u8>, &usize)| {
+        Ok(PreparedChunk {
+            encoded: if codec == Compression::Stored {
+                Vec::new()
+            } else {
+                encode(buffer, codec)?
+            },
+            md5: Md5::digest(&buffer[..*length]).into(),
+            sha256: Sha256::digest(&buffer[..*length]).into(),
+        })
+    };
+    if buffers.len() > 1 {
+        buffers.par_iter().zip(lengths).map(prepare).collect()
+    } else {
+        buffers.iter().zip(lengths).map(prepare).collect()
+    }
+}
+
+fn automatic_encode_batch_chunks(chunk_size: usize) -> usize {
+    const MAXIMUM_BATCH_BYTES: usize = 8 * 1024 * 1024;
+    let memory_limit = MAXIMUM_BATCH_BYTES
+        .checked_div(chunk_size)
+        .unwrap_or(0)
+        .max(1);
+    rayon::current_num_threads()
+        .saturating_mul(2)
+        .min(memory_limit)
+        .max(1)
+}
+
 fn encode(data: &[u8], codec: Compression) -> Result<Vec<u8>> {
     match codec {
         Compression::Stored => Ok(data.to_vec()),

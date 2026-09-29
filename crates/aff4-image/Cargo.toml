@@ -14,7 +14,7 @@ categories = ["parser-implementations", "filesystem"]
 
 [features]
 default = ["write"]
-write = ["dep:tempfile", "dep:uuid", "dep:time", "dep:libc"]
+write = ["dep:tempfile", "dep:uuid", "dep:time", "dep:libc", "dep:rayon"]
 
 [[example]]
 name = "acquire"
@@ -31,6 +31,7 @@ flate2 = "1"
 snap = "1"
 lz4_flex = "0.14"
 lru = "0.18"
+rayon = { version = "1", optional = true }
 md-5 = "0.11"
 sha1 = "0.11"
 sha2 = "0.11"

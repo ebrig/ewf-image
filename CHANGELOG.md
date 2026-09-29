@@ -15,6 +15,9 @@ code written for 0.4.0. See
 - Encode automatically bounded batches of EWF chunks in parallel during
   healthy acquisition and sequential E01/Ex01 writing while preserving output
   order, progress, cancellation, and resumable segment boundaries.
+- Encode and block-hash automatically bounded AFF4 chunk batches in parallel,
+  retaining deterministic bevy order and cooperative cancellation without a
+  writer-tuning option.
 
 ## 0.6.0 - 2026-09-29
 
