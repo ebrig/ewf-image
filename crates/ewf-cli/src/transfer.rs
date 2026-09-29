@@ -119,9 +119,10 @@ fn read_source(
             }
             let paths = image.info().segment_paths.clone();
             let snapshots = snapshot(&paths)?;
-            let v = image.verify_with_progress(&VerifyOptions::default(), |p| {
-                ctx.progress("source verification", p.bytes_verified, p.bytes_total)
-            })?;
+            let v = image.verify_with_progress(
+                &VerifyOptions::default().with_parallelism(crate::verification_workers()),
+                |p| ctx.progress("source verification", p.bytes_verified, p.bytes_total),
+            )?;
             report["source_verification"] = json!({"references_match":v.references_match(),"sha256":format::hex(&v.hashes.sha256)});
             if v.references_match() == Some(false) {
                 report["exit_code"] = json!(3);
@@ -381,16 +382,10 @@ pub(crate) fn convert(
     transfer(&mut source, &output, target, None, ctx, report)
 }
 
-pub(crate) struct AcquireOptions<'a> {
-    pub(crate) compression: Option<&'a str>,
-    pub(crate) chunk_bytes: Option<u32>,
-}
-
 pub(crate) fn acquire(
     input: &Path,
     output: &Path,
     supplied_sector: Option<u32>,
-    options: AcquireOptions<'_>,
     case: &CaseArgs,
     ctx: &mut Context,
     report: &mut Value,
@@ -401,30 +396,7 @@ pub(crate) fn acquire(
             "physical acquisition requires .E01, .Ex01, .aff4, or .raw",
         ));
     }
-    if target == Output::Raw && (options.compression.is_some() || options.chunk_bytes.is_some()) {
-        return Err(invalid(
-            "compression and chunk size apply only to container formats",
-        ));
-    }
-    let mut aff4_options = aff4_image::WriteOptions::default();
-    if target == Output::Aff4 {
-        aff4_options.compression = match options.compression.unwrap_or("zlib") {
-            "stored" | "raw" => aff4_image::Compression::Stored,
-            "zlib" => aff4_image::Compression::Zlib,
-            "snappy" => aff4_image::Compression::Snappy,
-            "lz4" => aff4_image::Compression::Lz4,
-            _ => return Err(invalid("unsupported AFF4 compression")),
-        };
-        if let Some(bytes) = options.chunk_bytes {
-            if bytes == 0 || bytes > 16 * 1024 * 1024 {
-                return Err(invalid("AFF4 chunk size must be 1 through 16 MiB"));
-            }
-            aff4_options.chunk_bytes = bytes;
-            aff4_options.chunks_per_bevy = aff4_options
-                .chunks_per_bevy
-                .min((128 * 1024 * 1024 / bytes).max(1));
-        }
-    }
+    let aff4_options = aff4_image::WriteOptions::default();
     let output = crate::ewf::export::destination(&[], output)?;
     let mut device = crate::ewf::source::Source::open(input, supplied_sector, &output)?;
     device.configure_reads(Arc::clone(&ctx.stop), None)?;
@@ -588,7 +560,7 @@ fn transfer(
             report["recovery_command"] = Value::Null;
             report["segments"] = json!(written.segment_paths);
             let verify_started = Instant::now();
-            verify_written_ewf(output, digest, 1, ctx, report)?;
+            verify_written_ewf(output, digest, ctx, report)?;
             record_timing(report, "verification_seconds", verify_started);
         }
         Output::Ex01 => {
@@ -629,7 +601,7 @@ fn transfer(
             report["segments"] = json!(written.segment_paths);
             report["recovery_command"] = Value::Null;
             let verify_started = Instant::now();
-            verify_written_ewf(output, digest, 1, ctx, report)?;
+            verify_written_ewf(output, digest, ctx, report)?;
             record_timing(report, "verification_seconds", verify_started);
         }
         Output::Aff4 => {
@@ -745,25 +717,23 @@ fn transfer(
 fn verify_written_ewf(
     path: &Path,
     expected: [u8; 32],
-    workers: usize,
     ctx: &mut Context,
     report: &mut Value,
 ) -> Result<()> {
     let image = crate::password::open(path, ctx.password.as_ref())?;
-    verify_opened_ewf(&image, expected, workers, ctx, report)
+    verify_opened_ewf(&image, expected, ctx, report)
 }
 
 fn verify_opened_ewf(
     image: &ewf_image::Image,
     expected: [u8; 32],
-    workers: usize,
     ctx: &mut Context,
     report: &mut Value,
 ) -> Result<()> {
     let result = image.verify_with_progress(
         &VerifyOptions::default()
             .with_expected_sha256(expected)
-            .with_parallelism(workers),
+            .with_parallelism(crate::verification_workers()),
         |p| ctx.progress("destination verification", p.bytes_verified, p.bytes_total),
     )?;
     report["verification"] = json!({"scope":"decoded media","bytes_verified":result.bytes_verified,"sha256":format::hex(&result.hashes.sha256),"references_match":result.references_match()});
@@ -813,7 +783,6 @@ pub(crate) fn verify_ewf(
     path: &Path,
     entry: Option<&str>,
     expected: Option<&str>,
-    workers: usize,
     ctx: &mut Context,
     report: &mut Value,
 ) -> Result<()> {
@@ -855,13 +824,7 @@ pub(crate) fn verify_ewf(
         report["exit_code"] = json!(if matched { 0 } else { 3 });
         return Ok(());
     }
-    verify_opened_ewf(
-        &image,
-        format::parse_hash(expected.unwrap())?,
-        workers,
-        ctx,
-        report,
-    )?;
+    verify_opened_ewf(&image, format::parse_hash(expected.unwrap())?, ctx, report)?;
     let substitutions = !image.info().acquisition_errors.is_empty();
     report["status"] = json!(if substitutions {
         "verified_with_substitutions"

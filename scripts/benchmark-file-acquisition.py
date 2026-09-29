@@ -20,16 +20,11 @@ import time
 MIB = 1024 * 1024
 CASES = {
     "raw": ("image.raw", []),
-    "e01_zlib": ("image.E01", []),
-    "e01_zlib_fast": ("image.E01", ["--compression", "zlib-fast"]),
-    "e01_raw": ("image.E01", ["--compression", "raw"]),
-    "aff4_zlib": ("image.aff4", []),
-    "aff4_lz4_256k": (
-        "image.aff4",
-        ["--compression", "lz4", "--chunk-bytes", "262144"],
-    ),
+    "e01": ("image.E01", []),
+    "ex01": ("image.Ex01", []),
+    "aff4": ("image.aff4", []),
 }
-BASELINE_CASES = {"raw", "e01_zlib", "aff4_zlib"}
+BASELINE_CASES = set(CASES)
 
 
 def sha256_file(path: Path) -> str:

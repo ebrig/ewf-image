@@ -54,22 +54,17 @@ Linux example:
 sudo ewf-cli acquire /dev/sdb case.E01
 ```
 
-For a healthy disk where throughput matters more than fine read-error
-localization, `ewf-cli ewf acquire` accepts `--bulk-read-bytes 262144`. The
-resumable E01 default remains one 32 KiB image chunk per bulk attempt. A failed
-larger attempt is discarded and re-read sector by sector; cancellation cannot
-accept a partially completed attempt. Use `--compression raw` to store E01
-chunks without zlib when the source data compresses poorly.
-`--compression zlib-fast` uses the faster zlib level for E01 and Ex01. It can
-reduce encoder time while producing larger images; the selected mode is retained
-for E01 resume. Compare both elapsed time and stored size on representative data.
+Healthy EWF acquisition reads automatically group complete image chunks into
+requests of up to 256 KiB. A failed grouped request is discarded and re-read
+sector by sector; cancellation cannot accept a partially completed request. The
+advanced `ewf acquire` command retains its established `--compression raw`
+choice for intentionally uncompressed E01 output; otherwise E01 and Ex01 use
+zlib automatically.
 
-AFF4 acquisition accepts `--compression stored|zlib|snappy|lz4` and
-`--chunk-bytes BYTES`; its defaults remain zlib and 32 KiB. Physical chunk size
-must be sector aligned and at most 16 MiB. The CLI adjusts chunks per bevy so
-the uncompressed bevy stays within 128 MiB. Raw output has no compression or
-chunk settings. These choices change container encoding, not source bytes, and
-the CLI still verifies the destination before reporting success.
+Unified AFF4 acquisition automatically uses zlib and 32 KiB chunks. The writer
+adjusts chunks per bevy so the uncompressed bevy stays within 128 MiB. Raw
+output has no encoding choices. The CLI verifies every destination before
+reporting success.
 JSON results include `timings` for streaming and finalization or verification
 phases. These wall times help compare settings on the same host, but device and
 filesystem caches still affect them.
@@ -150,14 +145,14 @@ in an AFF4 container. Select an AFF4 resource explicitly when the container hold
 more than one. The report states the scope of a selected-resource check
 separately from whole-container verification.
 
-For whole-image EWF verification, `--workers 1..64` enables bounded parallel
-chunk decoding; the default is one worker. Compressed EWF2 images may benefit,
-but storage and codec determine throughput. Selected-file, AFF4, and raw checks
-do not accept this option.
+Whole-image EWF verification automatically uses the host's available
+parallelism, capped at 64 workers, with bounded batches. Compressed EWF2 images
+may benefit, but storage and codec determine throughput. Selected-file, AFF4,
+and raw checks remain single-stream operations.
 
 ```text
 ewf-cli verify case.E01 --sha256 HASH
-ewf-cli verify case.Ex01 --workers 4
+ewf-cli verify case.Ex01
 ewf-cli verify case.aff4 --metadata-sha256 HASH
 ewf-cli verify-set primary.aff4 companion.aff4 --image RESOURCE-ID --full
 ewf-cli metadata case.aff4

@@ -158,14 +158,15 @@ impl Writer {
         let volume = identifier();
         zip.set_comment(volume.as_str())?;
         write_member(&mut zip, "container.description", volume.as_bytes())?;
-        write_member(
-            &mut zip,
-            "version.txt",
+        let version = format!(
+            "major=1\nminor={}\ntool=aff4-image {}\n",
             match profile {
-                Profile::Physical => b"major=1\nminor=0\ntool=aff4-image 0.1.0\n",
-                Profile::Logical => b"major=1\nminor=1\ntool=aff4-image 0.1.0\n",
+                Profile::Physical => 0,
+                Profile::Logical => 1,
             },
-        )?;
+            env!("CARGO_PKG_VERSION")
+        );
+        write_member(&mut zip, "version.txt", version.as_bytes())?;
         let metadata = format!(
             "@prefix a: <http://aff4.org/Schema#> .\n@prefix l: <https://aff4.org/Schema/2022/#> .\n<{volume}> a a:ZipVolume .\n"
         );

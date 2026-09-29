@@ -95,54 +95,36 @@ fn every_physical_format_can_be_acquired_and_converted() {
 }
 
 #[test]
-fn physical_acquisition_exposes_supported_compression_choices() {
+fn physical_acquisition_uses_automatic_format_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source.raw");
     let bytes = data();
     fs::write(&source, &bytes).unwrap();
-    for codec in ["stored", "zlib", "snappy", "lz4"] {
-        let output = dir.path().join(format!("aff4-{codec}.aff4"));
-        let value = succeeds(&[
-            "acquire",
-            path(&source),
-            path(&output),
-            "--compression",
-            codec,
-            "--chunk-bytes",
-            "65536",
-        ]);
-        assert_eq!(value["chunk_bytes"], 65536);
+    for extension in ["aff4", "E01", "Ex01", "raw"] {
+        let output = dir.path().join(format!("automatic.{extension}"));
+        let value = succeeds(&["acquire", path(&source), path(&output)]);
         assert_eq!(read_image(&output), bytes);
+        if extension == "aff4" {
+            assert_eq!(value["chunk_bytes"], 32768);
+        }
     }
-    let ewf = dir.path().join("ewf-fast.E01");
-    succeeds(&["acquire", path(&source), path(&ewf), "--compression", "raw"]);
-    assert_eq!(read_image(&ewf), bytes);
-    let fast = dir.path().join("ewf-zlib-fast.Ex01");
-    succeeds(&[
-        "acquire",
-        path(&source),
-        path(&fast),
-        "--compression",
-        "zlib-fast",
-    ]);
-    assert_eq!(read_image(&fast), bytes);
-    let raw = dir.path().join("output.raw");
+    let rejected = dir.path().join("configured.aff4");
     assert!(
         !run(&[
             "acquire",
             path(&source),
-            path(&raw),
-            "--compression",
-            "zlib"
+            path(&rejected),
+            "--chunk-bytes",
+            "65536",
         ])
         .status
         .success()
     );
-    assert!(!raw.exists());
+    assert!(!rejected.exists());
 }
 
 #[test]
-fn ewf_verification_workers_cover_both_cli_routes() {
+fn ewf_verification_automatically_covers_both_cli_routes() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source.raw");
     fs::write(&source, data()).unwrap();
@@ -150,28 +132,16 @@ fn ewf_verification_workers_cover_both_cli_routes() {
     let acquired = succeeds(&["acquire", path(&source), path(&image)]);
     let expected = acquired["verification"]["sha256"].as_str().unwrap();
     for args in [
-        vec!["verify", path(&image), "--workers", "4"],
-        vec!["ewf", "verify", path(&image), "--workers", "4"],
-        vec![
-            "verify",
-            path(&image),
-            "--sha256",
-            expected,
-            "--workers",
-            "4",
-        ],
+        vec!["verify", path(&image)],
+        vec!["ewf", "verify", path(&image)],
+        vec!["verify", path(&image), "--sha256", expected],
     ] {
         let output = run(&args);
         assert!(output.status.success(), "{output:?}");
         assert_eq!(report(&output)["verification"]["sha256"], expected);
     }
     assert!(
-        !run(&["verify", path(&source), "--workers", "4"])
-            .status
-            .success()
-    );
-    assert!(
-        !run(&["verify", path(&image), "--workers", "0"])
+        !run(&["verify", path(&image), "--workers", "4"])
             .status
             .success()
     );

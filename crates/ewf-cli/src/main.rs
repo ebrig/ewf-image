@@ -79,9 +79,6 @@ enum Command {
         /// Independently recorded AFF4 metadata SHA256 (whole-container checks).
         #[arg(long, value_name = "HASH", conflicts_with_all = ["entry", "sha256"])]
         metadata_sha256: Option<String>,
-        /// EWF whole-image verification workers (default: 1).
-        #[arg(long, value_name = "COUNT", value_parser = clap::value_parser!(u32).range(1..=64))]
-        workers: Option<u32>,
     },
     /// Acquire a file or physical disk to one image.
     Acquire {
@@ -92,12 +89,6 @@ enum Command {
         /// Sector size for raw files; devices supply their own geometry.
         #[arg(long, value_name = "BYTES")]
         sector_size: Option<u32>,
-        /// Compression for the selected image format. EWF: raw/zlib/zlib-fast; AFF4: stored/zlib/snappy/lz4.
-        #[arg(long, value_name = "CODEC", value_parser = ["raw", "stored", "zlib", "zlib-fast", "snappy", "lz4"])]
-        compression: Option<String>,
-        /// AFF4 physical chunk size in bytes (default: 32 KiB).
-        #[arg(long, value_name = "BYTES")]
-        chunk_bytes: Option<u32>,
         #[command(flatten)]
         case: CaseArgs,
     },
@@ -241,6 +232,12 @@ fn invalid(message: impl Into<String>) -> Box<dyn std::error::Error> {
     io::Error::new(io::ErrorKind::InvalidInput, message.into()).into()
 }
 
+fn verification_workers() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .clamp(1, 64)
+}
+
 fn case_arguments(case: &CaseArgs, args: &mut Vec<OsString>) {
     for (name, value) in [
         ("--case-number", &case.case_number),
@@ -299,21 +296,10 @@ fn run(cli: &Cli, ctx: &mut Context, report: &mut Value) -> Result<()> {
             source,
             output,
             sector_size,
-            compression,
-            chunk_bytes,
             case,
         } => {
             let format = Output::from_path(output)?;
             if matches!(format, Output::E01 | Output::Ex01) {
-                if chunk_bytes.is_some() {
-                    return Err(invalid("--chunk-bytes applies only to AFF4 acquisition"));
-                }
-                if compression
-                    .as_deref()
-                    .is_some_and(|value| !matches!(value, "raw" | "zlib" | "zlib-fast"))
-                {
-                    return Err(invalid("EWF compression must be raw, zlib, or zlib-fast"));
-                }
                 let mut args = vec![
                     if format == Output::E01 {
                         "acquire".into()
@@ -326,24 +312,10 @@ fn run(cli: &Cli, ctx: &mut Context, report: &mut Value) -> Result<()> {
                 if let Some(size) = sector_size {
                     args.extend(["--sector-size".into(), size.to_string().into()]);
                 }
-                if let Some(codec) = compression {
-                    args.extend(["--compression".into(), codec.into()]);
-                }
                 case_arguments(case, &mut args);
                 ctx.ewf(args, report)
             } else {
-                transfer::acquire(
-                    source,
-                    output,
-                    *sector_size,
-                    transfer::AcquireOptions {
-                        compression: compression.as_deref(),
-                        chunk_bytes: *chunk_bytes,
-                    },
-                    case,
-                    ctx,
-                    report,
-                )
+                transfer::acquire(source, output, *sector_size, case, ctx, report)
             }
         }
         Command::Convert {
@@ -404,7 +376,6 @@ fn run(cli: &Cli, ctx: &mut Context, report: &mut Value) -> Result<()> {
             entry,
             sha256,
             metadata_sha256,
-            workers,
         } => {
             if let Some(hash) = sha256 {
                 format::parse_hash(hash)?;
@@ -415,47 +386,26 @@ fn run(cli: &Cli, ctx: &mut Context, report: &mut Value) -> Result<()> {
                     return Err(invalid("--metadata-sha256 requires an AFF4 container"));
                 }
             }
-            if workers.is_some() && entry.is_some() {
-                return Err(invalid(
-                    "--workers applies only to whole-image EWF verification",
-                ));
-            }
             match format::detect(image)? {
                 Input::Ewf if sha256.is_none() => {
                     let mut args = vec!["verify".into(), image.as_os_str().into()];
                     if let Some(entry) = entry {
                         args.push(entry.into());
                     }
-                    if let Some(count) = workers {
-                        args.extend(["--workers".into(), count.to_string().into()]);
-                    }
                     ctx.ewf(args, report)
                 }
-                Input::Ewf => transfer::verify_ewf(
+                Input::Ewf => {
+                    transfer::verify_ewf(image, entry.as_deref(), sha256.as_deref(), ctx, report)
+                }
+                Input::Aff4 => aff4::verify(
                     image,
                     entry.as_deref(),
                     sha256.as_deref(),
-                    workers.unwrap_or(1) as usize,
+                    metadata_sha256.as_deref(),
                     ctx,
                     report,
                 ),
-                Input::Aff4 => {
-                    if workers.is_some() {
-                        return Err(invalid("--workers applies only to EWF verification"));
-                    }
-                    aff4::verify(
-                        image,
-                        entry.as_deref(),
-                        sha256.as_deref(),
-                        metadata_sha256.as_deref(),
-                        ctx,
-                        report,
-                    )
-                }
                 Input::Raw => {
-                    if workers.is_some() {
-                        return Err(invalid("--workers applies only to EWF verification"));
-                    }
                     if entry.is_some() {
                         return Err(invalid("raw images do not have file selectors"));
                     }

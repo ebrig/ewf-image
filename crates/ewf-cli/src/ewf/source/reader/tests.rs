@@ -21,7 +21,8 @@ impl Read for Stalled {
         if !self.seek && self.data.position() >= 1024 {
             self.wait();
         }
-        self.data.read(buffer)
+        let length = buffer.len().min(512);
+        self.data.read(&mut buffer[..length])
     }
 }
 
@@ -133,8 +134,8 @@ fn stalled_seek_and_read_stop_without_late_data_and_resume() {
                     "seek={seek}: {result:?}"
                 );
             }
-            assert_eq!(writer.position(), 1024);
-            assert_eq!(writer.checkpoint_offset(), 1024);
+            assert_eq!(writer.position(), 0);
+            assert_eq!(writer.checkpoint_offset(), 0);
             assert!(writer.acquisition_errors().is_empty());
             let mut untouched = [0xCC; 512];
             assert!(source.read(&mut untouched).is_err());
@@ -152,7 +153,7 @@ fn stalled_seek_and_read_stop_without_late_data_and_resume() {
                     ControlFlow::Continue(())
                 })
                 .unwrap();
-            assert_eq!(checkpoint.checkpoint_bytes, 1024);
+            assert_eq!(checkpoint.checkpoint_bytes, 0);
             let mut writer = AcquisitionWriter::resume(&output, &options, identity).unwrap();
             let mut source = Source::open(&raw, Some(512), &output).unwrap();
             source

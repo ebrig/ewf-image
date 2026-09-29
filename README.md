@@ -21,9 +21,10 @@ forbids unsafe code and runs without libewf or any other external tool.
   streaming writers.
 - **Analyze** damaged images and recover readable data with a provenance map.
 
-The examples below target version 0.5.0. See the
-[changelog](CHANGELOG.md#050) for its changes and the
-[migration guide](docs/migrating-to-0.5.md) for upgrades from 0.4.
+The examples below target version 0.6.0. See the
+[changelog](CHANGELOG.md#060) for its changes. The
+[0.5 migration guide](docs/migrating-to-0.5.md) remains available for upgrades
+from 0.4.
 
 This workspace also includes the experimental
 [`aff4-image`](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image)
@@ -34,7 +35,7 @@ crate for reading, verifying, and writing supported AFF4 containers, plus
 
 ```toml
 [dependencies]
-ewf-image = "0.5"
+ewf-image = "0.6"
 ```
 
 The crate requires Rust 1.96 or later. Its runtime features are:

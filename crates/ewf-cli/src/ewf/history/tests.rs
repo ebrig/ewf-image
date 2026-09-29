@@ -15,7 +15,6 @@ fn read_args() -> ReadArgs {
         retries: 1,
         zero_fill: true,
         checkpoint_interval: None,
-        bulk_read_bytes: None,
         stop_after: None,
     }
 }
@@ -105,6 +104,7 @@ fn process_exit_during_record_and_report_publication_preserves_prior_records() {
             report(&session, true).unwrap();
             let repaired: Value = serde_json::from_slice(&fs::read(&saved).unwrap()).unwrap();
             assert_eq!(repaired, summary);
+            lock.unlock().unwrap();
             drop(lock);
             let mut resumed = History::open(
                 &session,
@@ -146,7 +146,6 @@ fn fixture() -> (tempfile::TempDir, Session, ReadArgs) {
         retries: 1,
         zero_fill: true,
         checkpoint_interval: None,
-        bulk_read_bytes: None,
         stop_after: None,
     };
     (dir, session, args)
@@ -204,8 +203,11 @@ fn read_attempts_and_substitution_ranges_are_recorded_once() {
     struct Faulty(Cursor<Vec<u8>>);
     impl Read for Faulty {
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-            if self.0.position() == 512 {
+            let offset = self.0.position();
+            if offset == 512 {
                 Err(io::Error::other("bad sector"))
+            } else if offset < 512 && offset + buffer.len() as u64 > 512 {
+                self.0.read(&mut buffer[..(512 - offset) as usize])
             } else {
                 self.0.read(buffer)
             }
@@ -251,7 +253,7 @@ fn read_attempts_and_substitution_ranges_are_recorded_once() {
         .collect();
     assert_eq!(
         records.iter().filter(|r| r.event == "read_error").count(),
-        2
+        3
     );
     let substitutions: Vec<_> = records
         .iter()
@@ -262,7 +264,7 @@ fn read_attempts_and_substitution_ranges_are_recorded_once() {
     assert_eq!(substitutions[0].data["sector_count"], 1);
     let report = report(&session, false).unwrap();
     assert_eq!(report["retry_attempts"], 1);
-    assert_eq!(report["read_attempts"], 4);
+    assert_eq!(report["read_attempts"], 5);
     assert_eq!(report["counters_complete"], false);
 }
 

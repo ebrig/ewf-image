@@ -9,6 +9,32 @@ fn proceed(_: u64, _: u64) -> ControlFlow<()> {
 }
 
 #[test]
+fn writer_records_the_package_version() {
+    for (profile, minor) in [(Profile::Physical, 0), (Profile::Logical, 1)] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("version.aff4");
+        Writer::create(&path, profile, WriteOptions::default())
+            .unwrap()
+            .finish()
+            .unwrap();
+        let mut archive = zip::ZipArchive::new(fs::File::open(path).unwrap()).unwrap();
+        let mut version = String::new();
+        archive
+            .by_name("version.txt")
+            .unwrap()
+            .read_to_string(&mut version)
+            .unwrap();
+        assert_eq!(
+            version,
+            format!(
+                "major=1\nminor={minor}\ntool=aff4-image {}\n",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+    }
+}
+
+#[test]
 fn physical_sector_geometry_is_validated_before_consuming_input() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("geometry.aff4");

@@ -5,8 +5,8 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use ewf_image::{
-    AcquisitionOptions, AcquisitionWriter, EwfWriter, Image, WriteCompression,
-    WriteCompressionLevel, WriteOptions,
+    AcquisitionOptions, AcquisitionReadOptions, AcquisitionWriter, EwfWriter, Image,
+    WriteCompression, WriteOptions,
 };
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
@@ -14,49 +14,16 @@ use tempfile::tempdir;
 const IDENTITY: [u8; 32] = [0x51; 32];
 
 #[test]
-fn fast_zlib_acquisition_resumes_only_with_the_recorded_level() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("fast.E01");
-    let bytes: Vec<u8> = (0..8192).map(|i| (i % 251) as u8).collect();
-    let options = AcquisitionOptions {
-        sectors_per_chunk: 2,
-        chunks_per_segment: 2,
-        compression_level: WriteCompressionLevel::Fast,
-        ..AcquisitionOptions::new(bytes.len() as u64)
-    };
-    let mut writer = AcquisitionWriter::create(&path, &options, IDENTITY).unwrap();
-    writer.write_all(&bytes[..2048]).unwrap();
-    assert_eq!(writer.checkpoint_offset(), 2048);
-    drop(writer);
-
-    let mut changed = options.clone();
-    changed.compression_level = WriteCompressionLevel::Default;
-    assert!(AcquisitionWriter::resume(&path, &changed, IDENTITY).is_err());
-    let mut writer = AcquisitionWriter::resume(&path, &options, IDENTITY).unwrap();
-    writer.write_all(&bytes[2048..]).unwrap();
-    writer.finish().unwrap();
-    check_image(&path, &bytes);
-}
-
-#[test]
-fn optional_bulk_reads_span_chunks_without_changing_media_bytes() {
+fn automatic_bulk_reads_span_chunks_without_changing_media_bytes() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("bulk.E01");
     let bytes: Vec<u8> = (0..128 * 1024).map(|n| (n % 251) as u8).collect();
     let options = AcquisitionOptions::new(bytes.len() as u64);
     let mut writer = AcquisitionWriter::create(&path, &options, IDENTITY).unwrap();
     let mut source = std::io::Cursor::new(bytes.clone());
-    let invalid = ewf_image::AcquisitionReadOptions {
-        bulk_read_bytes: Some(513),
-        ..Default::default()
-    };
-    assert!(writer.acquire_from(&mut source, &invalid).is_err());
-    assert_eq!(source.position(), 0);
-    let bulk = ewf_image::AcquisitionReadOptions {
-        bulk_read_bytes: Some(256 * 1024),
-        ..Default::default()
-    };
-    let result = writer.acquire_from(&mut source, &bulk).unwrap();
+    let result = writer
+        .acquire_from(&mut source, &AcquisitionReadOptions::default())
+        .unwrap();
     assert_eq!(result.progress.read_attempts, 1);
     writer.finish().unwrap();
     check_image(&path, &bytes);
@@ -429,19 +396,23 @@ fn source_retries_zero_fill_and_error_provenance_survive_resume() {
             .unwrap();
         assert_eq!(result.status, AcquisitionStatus::Cancelled);
         assert_eq!(result.progress.checkpoint_bytes, 3072);
-        assert_eq!(result.progress.substituted_sectors, 2);
+        assert_eq!(result.progress.substituted_sectors, 3);
         assert!(result.progress.retry_attempts >= 3);
         drop(writer);
         let mut writer = AcquisitionWriter::resume(&path, &opts, IDENTITY).unwrap();
-        assert_eq!(writer.acquisition_errors().len(), 2);
+        assert_eq!(writer.acquisition_errors().len(), 3);
         let result = writer.acquire_from(&mut source, &read_options).unwrap();
         assert_eq!(result.status, AcquisitionStatus::Complete);
-        assert_eq!(result.progress.substituted_sectors, 4);
+        assert_eq!(result.progress.substituted_sectors, 5);
         assert_eq!(
             writer.acquisition_errors(),
             &[
                 AcquisitionError {
                     first_sector: 1,
+                    sector_count: 1
+                },
+                AcquisitionError {
+                    first_sector: 3,
                     sector_count: 1
                 },
                 AcquisitionError {
@@ -456,7 +427,7 @@ fn source_retries_zero_fill_and_error_provenance_survive_resume() {
         );
         writer.finish().unwrap();
         let mut expected = bytes.clone();
-        for sector in [1, 5, 6, 9] {
+        for sector in [1, 3, 5, 6, 9] {
             expected[sector * 512..(sector + 1) * 512].fill(0);
         }
         check_image(&path, &expected);
@@ -468,7 +439,7 @@ fn source_retries_zero_fill_and_error_provenance_survive_resume() {
                 .iter()
                 .map(|range| range.sector_count)
                 .sum::<u64>(),
-            4
+            5
         );
         assert!(
             image

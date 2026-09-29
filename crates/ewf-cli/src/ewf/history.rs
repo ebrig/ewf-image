@@ -51,7 +51,6 @@ pub(super) struct History {
 pub(super) fn read_policy(args: &ReadArgs) -> Value {
     json!({"retries": args.retries, "zero_fill": args.zero_fill,
         "checkpoint_interval": args.checkpoint_interval,
-        "bulk_read_bytes": args.bulk_read_bytes,
         "read_timeout_ms": args.read_timeout_ms, "stop_after": args.stop_after})
 }
 
