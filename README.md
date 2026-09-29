@@ -25,6 +25,11 @@ The examples below target version 0.5.0. See the
 [changelog](CHANGELOG.md#050) for its changes and the
 [migration guide](docs/migrating-to-0.5.md) for upgrades from 0.4.
 
+This workspace also includes the experimental
+[`aff4-image`](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image)
+crate for reading, verifying, and writing supported AFF4 containers, plus
+`ewf-cli` for EWF, AFF4, and raw images.
+
 ## Installation
 
 ```toml
@@ -191,9 +196,9 @@ images, encrypted output, and delta (overlay) images are not supported.
 [Compatibility](docs/compatibility.md) describes tested producers and consumers,
 and [limitations](docs/limitations.md) lists unsupported workflows.
 
-AFF4 containers are handled by the separate, experimental
-[`aff4-image`](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image)
-crate. `ewf-image` has no AFF4 dependencies.
+For supported AFF4 profiles and limitations, see
+[`aff4-image`](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image).
+`ewf-image` has no AFF4 dependencies.
 
 ## Command-line tool
 
