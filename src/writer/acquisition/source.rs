@@ -33,6 +33,11 @@ pub struct AcquisitionReadOptions {
     /// Optional logical-byte interval for early checkpoints. Must be a positive
     /// multiple of the chunk size. Segment boundaries also checkpoint normally.
     pub checkpoint_interval: Option<u64>,
+    /// Optional healthy-read size. Defaults to one image chunk so a stalled
+    /// read cannot consume later chunks before the preceding checkpoint.
+    /// Larger values favor throughput on healthy media at the cost of coarser
+    /// read-error localization and cancellation granularity.
+    pub bulk_read_bytes: Option<usize>,
 }
 
 impl Default for AcquisitionReadOptions {
@@ -42,6 +47,7 @@ impl Default for AcquisitionReadOptions {
             unreadable_sector_policy: UnreadableSectorPolicy::Stop,
             maximum_error_ranges: 65_536,
             checkpoint_interval: None,
+            bulk_read_bytes: None,
         }
     }
 }
@@ -108,7 +114,8 @@ impl AcquisitionWriter {
     /// retries, and writes. An in-flight OS operation or segment seal cannot be
     /// interrupted. A callback must return promptly and must not panic.
     ///
-    /// Reads normally use chunk-sized buffers. A failed bulk attempt is discarded
+    /// Reads normally use one image chunk, or an optional larger bounded buffer.
+    /// A failed bulk attempt is discarded
     /// and retried sector by sector. Partial failed reads never enter the image.
     /// Source failures checkpoint accepted full chunks and leave the writer usable;
     /// destination failures poison it and require dropping and resuming.
@@ -123,6 +130,11 @@ impl AcquisitionWriter {
         if !self.offset.is_multiple_of(sector_size as u64)
             || options.retries > 100
             || options.maximum_error_ranges == 0
+            || options.bulk_read_bytes.is_some_and(|bytes| {
+                bytes < sector_size
+                    || bytes > 16 * 1024 * 1024
+                    || !bytes.is_multiple_of(sector_size)
+            })
             || self.errors.len() > options.maximum_error_ranges
             || options.checkpoint_interval.is_some_and(|interval| {
                 interval == 0 || !interval.is_multiple_of(self.chunk_size as u64)
@@ -196,11 +208,16 @@ impl AcquisitionWriter {
         callback: &mut impl FnMut(AcquisitionProgress) -> ControlFlow<()>,
     ) -> Result<()> {
         notify(*progress, callback)?;
-        let mut buffer = vec![0; self.chunk_size];
+        let mut buffer = vec![0; options.bulk_read_bytes.unwrap_or(self.chunk_size)];
         let sector_size = self.options.bytes_per_sector as usize;
         while self.offset < self.source_size {
-            let size = (self.chunk_size - self.pending.len())
-                .min((self.source_size - self.offset).min(usize::MAX as u64) as usize);
+            let size = (if self.pending.is_empty() {
+                buffer.len()
+            } else {
+                self.chunk_size - self.pending.len()
+            })
+            .min(buffer.len())
+            .min((self.source_size - self.offset).min(usize::MAX as u64) as usize);
             let read = if size > sector_size {
                 match read_attempt(source, &mut buffer[..size], self.offset, progress, callback) {
                     Ok(()) => true,
@@ -211,8 +228,10 @@ impl AcquisitionWriter {
                 false
             };
             if read {
-                self.write_all(&buffer[..size])?;
-                self.after_source_write(options, progress, callback)?;
+                for chunk in buffer[..size].chunks(self.chunk_size) {
+                    self.write_all(chunk)?;
+                    self.after_source_write(options, progress, callback)?;
+                }
                 continue;
             }
             // Re-read the entire failed bulk range by sector; even a successful

@@ -5,6 +5,7 @@ mod format;
 mod logical;
 mod output;
 mod password;
+mod prefetch;
 mod timestamps;
 mod transfer;
 
@@ -88,6 +89,12 @@ enum Command {
         /// Sector size for raw files; devices supply their own geometry.
         #[arg(long, value_name = "BYTES")]
         sector_size: Option<u32>,
+        /// Compression for the selected image format. EWF: raw/zlib; AFF4: stored/zlib/snappy/lz4.
+        #[arg(long, value_name = "CODEC", value_parser = ["raw", "stored", "zlib", "snappy", "lz4"])]
+        compression: Option<String>,
+        /// AFF4 physical chunk size in bytes (default: 32 KiB).
+        #[arg(long, value_name = "BYTES")]
+        chunk_bytes: Option<u32>,
         #[command(flatten)]
         case: CaseArgs,
     },
@@ -289,10 +296,21 @@ fn run(cli: &Cli, ctx: &mut Context, report: &mut Value) -> Result<()> {
             source,
             output,
             sector_size,
+            compression,
+            chunk_bytes,
             case,
         } => {
             let format = Output::from_path(output)?;
             if matches!(format, Output::E01 | Output::Ex01) {
+                if chunk_bytes.is_some() {
+                    return Err(invalid("--chunk-bytes applies only to AFF4 acquisition"));
+                }
+                if compression
+                    .as_deref()
+                    .is_some_and(|value| !matches!(value, "raw" | "zlib"))
+                {
+                    return Err(invalid("EWF compression must be raw or zlib"));
+                }
                 let mut args = vec![
                     if format == Output::E01 {
                         "acquire".into()
@@ -305,10 +323,24 @@ fn run(cli: &Cli, ctx: &mut Context, report: &mut Value) -> Result<()> {
                 if let Some(size) = sector_size {
                     args.extend(["--sector-size".into(), size.to_string().into()]);
                 }
+                if let Some(codec) = compression {
+                    args.extend(["--compression".into(), codec.into()]);
+                }
                 case_arguments(case, &mut args);
                 ctx.ewf(args, report)
             } else {
-                transfer::acquire(source, output, *sector_size, case, ctx, report)
+                transfer::acquire(
+                    source,
+                    output,
+                    *sector_size,
+                    transfer::AcquireOptions {
+                        compression: compression.as_deref(),
+                        chunk_bytes: *chunk_bytes,
+                    },
+                    case,
+                    ctx,
+                    report,
+                )
             }
         }
         Command::Convert {

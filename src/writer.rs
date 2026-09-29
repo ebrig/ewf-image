@@ -4340,6 +4340,7 @@ impl RawSpool {
 struct ChunkSpool {
     file: NamedTempFile,
     len: u64,
+    position: u64,
 }
 
 impl ChunkSpool {
@@ -4347,6 +4348,7 @@ impl ChunkSpool {
         Ok(Self {
             file: NamedTempFile::new()?,
             len: 0,
+            position: 0,
         })
     }
 
@@ -4361,14 +4363,18 @@ impl ChunkSpool {
         let data_size = u64::try_from(bytes.len()).map_err(|_| {
             EwfError::Malformed("writer encoded chunk size does not fit u64".into())
         })?;
-        if data_size > 0 {
-            let file = self.file.as_file_mut();
-            file.seek(SeekFrom::Start(data_offset))?;
-            file.write_all(&bytes)?;
-        }
-        self.len = self.len.checked_add(data_size).ok_or_else(|| {
+        let new_len = self.len.checked_add(data_size).ok_or_else(|| {
             EwfError::Malformed("writer encoded chunk spool size overflow".into())
         })?;
+        if data_size > 0 {
+            let file = self.file.as_file_mut();
+            if self.position != data_offset {
+                file.seek(SeekFrom::Start(data_offset))?;
+            }
+            file.write_all(&bytes)?;
+            self.position = new_len;
+        }
+        self.len = new_len;
 
         Ok(ChunkDescriptor {
             data_offset,
@@ -4389,17 +4395,29 @@ impl ChunkSpool {
         }
 
         let mut remaining = descriptor.data_size;
-        let mut buffer = [0; 8192];
+        let mut buffer = vec![0; 64 * 1024];
         let file = self.file.as_file_mut();
-        file.seek(SeekFrom::Start(descriptor.data_offset))?;
+        if self.position != descriptor.data_offset {
+            file.seek(SeekFrom::Start(descriptor.data_offset))?;
+            self.position = descriptor.data_offset;
+        }
         while remaining > 0 {
             let take = usize::try_from(remaining.min(buffer.len() as u64))
                 .expect("copy chunk is bounded by buffer length");
             file.read_exact(&mut buffer[..take])?;
             writer.write_all(&buffer[..take])?;
             remaining -= u64::try_from(take).expect("usize fits u64");
+            self.position += u64::try_from(take).expect("usize fits u64");
         }
 
+        Ok(())
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        self.file.as_file_mut().set_len(0)?;
+        self.file.as_file_mut().seek(SeekFrom::Start(0))?;
+        self.len = 0;
+        self.position = 0;
         Ok(())
     }
 }

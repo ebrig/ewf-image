@@ -54,6 +54,23 @@ Linux example:
 sudo ewf-cli acquire /dev/sdb case.E01
 ```
 
+For a healthy disk where throughput matters more than fine read-error
+localization, `ewf-cli ewf acquire` accepts `--bulk-read-bytes 262144`. The
+resumable E01 default remains one 32 KiB image chunk per bulk attempt. A failed
+larger attempt is discarded and re-read sector by sector; cancellation cannot
+accept a partially completed attempt. Use `--compression raw` to store E01
+chunks without zlib when the source data compresses poorly.
+
+AFF4 acquisition accepts `--compression stored|zlib|snappy|lz4` and
+`--chunk-bytes BYTES`; its defaults remain zlib and 32 KiB. Physical chunk size
+must be sector aligned and at most 16 MiB. The CLI adjusts chunks per bevy so
+the uncompressed bevy stays within 128 MiB. Raw output has no compression or
+chunk settings. These choices change container encoding, not source bytes, and
+the CLI still verifies the destination before reporting success.
+JSON results include `timings` for streaming and finalization or verification
+phases. These wall times help compare settings on the same host, but device and
+filesystem caches still affect them.
+
 Device acquisition uses a read-only Windows and Linux device adapter with
 geometry, identity, and destination-overlap checks.
 Administrator or root access may be required. Other platforms support

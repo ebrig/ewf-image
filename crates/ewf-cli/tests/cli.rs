@@ -63,7 +63,8 @@ fn every_physical_format_can_be_acquired_and_converted() {
     fs::write(&raw, &bytes).unwrap();
     for from in ["E01", "Ex01", "aff4", "raw"] {
         let input = dir.path().join(format!("acquired.{from}"));
-        succeeds(&["acquire", path(&raw), path(&input), "--sector-size", "4096"]);
+        let acquired = succeeds(&["acquire", path(&raw), path(&input), "--sector-size", "4096"]);
+        assert!(acquired["timings"].is_object(), "{acquired}");
         assert_eq!(read_image(&input), bytes);
         for to in ["E01", "Ex01", "aff4", "raw"] {
             let output = dir.path().join(format!("{from}-converted.{to}"));
@@ -91,6 +92,44 @@ fn every_physical_format_can_be_acquired_and_converted() {
             }
         }
     }
+}
+
+#[test]
+fn physical_acquisition_exposes_supported_compression_choices() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.raw");
+    let bytes = data();
+    fs::write(&source, &bytes).unwrap();
+    for codec in ["stored", "zlib", "snappy", "lz4"] {
+        let output = dir.path().join(format!("aff4-{codec}.aff4"));
+        let value = succeeds(&[
+            "acquire",
+            path(&source),
+            path(&output),
+            "--compression",
+            codec,
+            "--chunk-bytes",
+            "65536",
+        ]);
+        assert_eq!(value["chunk_bytes"], 65536);
+        assert_eq!(read_image(&output), bytes);
+    }
+    let ewf = dir.path().join("ewf-fast.E01");
+    succeeds(&["acquire", path(&source), path(&ewf), "--compression", "raw"]);
+    assert_eq!(read_image(&ewf), bytes);
+    let raw = dir.path().join("output.raw");
+    assert!(
+        !run(&[
+            "acquire",
+            path(&source),
+            path(&raw),
+            "--compression",
+            "zlib"
+        ])
+        .status
+        .success()
+    );
+    assert!(!raw.exists());
 }
 
 #[test]

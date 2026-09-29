@@ -15,6 +15,7 @@ fn read_args() -> ReadArgs {
         retries: 1,
         zero_fill: true,
         checkpoint_interval: None,
+        bulk_read_bytes: None,
         stop_after: None,
     }
 }
@@ -145,6 +146,7 @@ fn fixture() -> (tempfile::TempDir, Session, ReadArgs) {
         retries: 1,
         zero_fill: true,
         checkpoint_interval: None,
+        bulk_read_bytes: None,
         stop_after: None,
     };
     (dir, session, args)

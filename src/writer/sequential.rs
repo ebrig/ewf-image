@@ -85,6 +85,7 @@ impl Group {
             spool: ChunkSpool {
                 file: NamedTempFile::new_in(directory)?,
                 len: 0,
+                position: 0,
             },
             chunks: Vec::new(),
         })

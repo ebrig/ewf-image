@@ -3,7 +3,7 @@ use std::fs::{self, File, Metadata};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{Progress, Result, export, hex, invalid, sidecar, source, verify};
 use clap::Args;
@@ -151,6 +151,8 @@ pub(super) fn acquire(
     check_stop(progress, "acquisition", 0, size)?;
     let mut writer = SequentialWriter::create(&output, settings)?;
     report["phase"] = json!("acquisition");
+    report["timings"] = json!({});
+    let stream_started = Instant::now();
     let mut buffer = vec![0; 1024 * 1024];
     while writer.position() < size {
         check_stop(progress, "acquisition", writer.position(), size)?;
@@ -167,10 +169,14 @@ pub(super) fn acquire(
         writer.write_all(&buffer[..count])?;
         report["accepted_bytes"] = json!(writer.position());
     }
+    report["timings"]["stream_seconds"] = json!(stream_started.elapsed().as_secs_f64());
     input.check_unchanged()?;
     check_stop(progress, "publication", size, size)?;
     report["phase"] = json!("publication");
+    let publication_started = Instant::now();
     let written = published(&output, writer.finish(), report)?;
+    report["timings"]["publication_seconds"] = json!(publication_started.elapsed().as_secs_f64());
+    let verification_started = Instant::now();
     verify(
         &output,
         Some(written.computed_sha256),
@@ -178,6 +184,7 @@ pub(super) fn acquire(
         progress,
         report,
     )?;
+    report["timings"]["verification_seconds"] = json!(verification_started.elapsed().as_secs_f64());
     report["status"] = json!("complete");
     Ok(())
 }
