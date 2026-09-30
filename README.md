@@ -1,6 +1,8 @@
 # ewf-image
 
-Read, verify, and write Expert Witness Format (EWF) forensic images in pure Rust.
+Read, verify, acquire, and convert forensic evidence images in pure Rust:
+EnCase-style `.E01`, `.L01`, `.S01`, `.Ex01`, and `.Lx01` images, AFF4
+containers, and raw disk images.
 
 [![Crates.io](https://img.shields.io/crates/v/ewf-image.svg)](https://crates.io/crates/ewf-image)
 [![Documentation](https://docs.rs/ewf-image/badge.svg)](https://docs.rs/ewf-image)
@@ -9,29 +11,120 @@ Read, verify, and write Expert Witness Format (EWF) forensic images in pure Rust
 
 ![ewf-image project banner](https://raw.githubusercontent.com/ebrig/ewf-image/main/docs/assets/ewf-image-banner.png)
 
-`ewf-image` opens EnCase-style `.E01`, `.L01`, `.S01`, `.Ex01`, and `.Lx01`
-images and exposes their decoded media as ordinary Rust readers. The library
-forbids unsafe code and runs without libewf or any other external tool.
+There are two ways to use this project:
 
-- **Read** physical, logical, and SMART images, including split segment sets.
-- **Verify** decoded media against stored and independently recorded MD5, SHA1,
-  and SHA256 digests.
-- **Browse** logical file catalogs, then verify and extract individual files.
-- **Write** EWF1 and EWF2 images, with resumable E01 acquisition and bounded
-  streaming writers.
-- **Analyze** damaged images and recover readable data with a provenance map.
+- **`ewf-cli`** is a single command-line tool for inspecting, verifying,
+  acquiring, converting, collecting, and extracting evidence in any supported
+  format.
+- **Rust libraries** let you embed the same functionality in your own tools:
+  [`ewf-image`](https://crates.io/crates/ewf-image) for EWF and the experimental
+  [`aff4-image`](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image)
+  for AFF4.
 
-The examples below target version 0.6.0. See the
-[changelog](CHANGELOG.md#060) for its changes. The
+## Highlights
+
+- **No external tools.** Pure Rust, with no libewf or AFF4 tooling required.
+  Both libraries forbid unsafe code.
+- **Verification you can check.** Decoded media is hashed and compared with the
+  MD5, SHA1, and SHA256 digests stored in the image, or with a digest you
+  recorded independently.
+- **Acquisition from disks and files.** Read-only device acquisition on Windows
+  and Linux, with resumable E01 acquisition and checkpoints.
+- **Conversion between formats.** Move decoded evidence between E01, Ex01, AFF4,
+  and raw, or between Lx01 and AFF4 logical collections. Each conversion is
+  verified, and metadata that cannot be carried over is reported.
+- **Logical evidence.** Browse L01, Lx01, and AFF4 file catalogs, verify
+  individual files, and extract them.
+- **Damaged images.** Scan for damage and recover readable data with a
+  provenance map.
+- **Safe by default.** Commands never overwrite existing files, and every result
+  is available as JSON for scripts.
+
+## Supported formats
+
+| Format | Extension | Read | Write |
+| --- | --- | --- | --- |
+| EWF1 physical | `.E01` | Raw and zlib; X-Ways Zstandard; X-Ways AES-128/AES-256 encryption | Raw and zlib |
+| EWF1 logical | `.L01` | Media and file catalog | Media and file catalog |
+| EWF1 SMART | `.S01` | Media | Media (library only) |
+| EWF2 physical | `.Ex01` | Raw, zlib, BZip2, and pattern-fill | Raw, zlib, BZip2, and pattern-fill |
+| EWF2 logical | `.Lx01` | Media and file catalog | Media and file catalog |
+| AFF4 physical (experimental) | `.aff4` | AFF4 1.0 single volumes and multi-volume sets | AFF4 1.0 single volumes |
+| AFF4 logical (experimental) | `.aff4` | AFF4-L 1.1 | AFF4-L 1.1 |
+| Raw | `.raw`, `.dd`, `.img`, `.bin` | Yes (CLI) | Yes (CLI) |
+
+Split EWF segment sets are found automatically. Encrypted X-Ways EWF1 images open
+with a password. Encrypted EWF2 images, encrypted output, EWF delta (overlay)
+images, and AFF4 encryption are not supported.
+[Compatibility](docs/compatibility.md) describes tested producers and consumers,
+[limitations](docs/limitations.md) lists unsupported workflows, and the
+[`aff4-image` guide](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image#supported-profiles)
+lists the supported AFF4 profiles in detail.
+
+## Command-line tool
+
+`ewf-cli` is not yet published as a package or prebuilt binary. Build it from
+this repository with Rust 1.96 or later:
+
+```sh
+git clone https://github.com/ebrig/ewf-image
+cd ewf-image
+cargo install --path crates/ewf-cli --locked
+```
+
+### Common tasks
+
+```text
+# Inspect and verify
+ewf-cli info case.E01
+ewf-cli verify case.E01
+ewf-cli verify case.E01 --sha256 HASH
+
+# Acquire a disk (the output extension selects the format)
+sudo ewf-cli acquire /dev/sdb case.E01
+ewf-cli acquire \\.\PhysicalDrive2 case.aff4 --case-number CASE-123
+
+# Convert between formats
+ewf-cli convert case.E01 case.aff4
+ewf-cli convert case.aff4 exported.raw
+
+# Collect a folder into a logical image, then list and extract files
+ewf-cli collect evidence-folder files.Lx01
+ewf-cli files files.Lx01
+ewf-cli extract files.Lx01 2 recovered.bin --restore-times
+```
+
+The output extension selects the format: `.E01`, `.Ex01`, `.aff4`, or a raw
+extension for disk images, and `.Lx01` or `.aff4` for logical collections. Input
+containers are detected by signature. Add `--json` for machine-readable results
+and `--quiet` to hide progress. Run `ewf-cli <command> --help` for options.
+
+Device acquisition may require administrator or root access. It does not freeze
+a live disk, so use a stable source or a snapshot. Directory collection does not
+create a filesystem snapshot either.
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | Completed with its stated verification scope |
+| 1 | Operational failure |
+| 2 | Invalid command syntax |
+| 3 | Verification mismatch or analysis errors |
+| 4 | Incomplete references, metadata omissions, or other findings |
+| 130 | Cancelled |
+
+The [CLI guide](docs/ewf-cli.md) covers device acquisition, supported
+conversions, verification scope, and JSON output. The [EWF command
+guide](docs/cli.md) covers damage analysis, recovery, resume, and advanced
+acquisition options.
+
+## Rust library
+
+The examples below target `ewf-image` 0.6.0. See the
+[changelog](CHANGELOG.md#060---2026-09-29) for its changes. The
 [0.5 migration guide](docs/migrating-to-0.5.md) remains available for upgrades
-from 0.4.
-
-This workspace also includes the experimental
-[`aff4-image`](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image)
-crate for reading, verifying, and writing supported AFF4 containers, plus
-`ewf-cli` for EWF, AFF4, and raw images.
-
-## Installation
+from 0.4. For AFF4,
+see the [`aff4-image` crate](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image).
+`ewf-image` has no AFF4 dependencies.
 
 ```toml
 [dependencies]
@@ -49,7 +142,7 @@ The crate requires Rust 1.96 or later. Its runtime features are:
 Stored-hash parsing, section integrity checks, and writer hashing remain available
 with `default-features = false`.
 
-## Read an image
+### Read an image
 
 Open the first segment. The remaining segments are found automatically.
 
@@ -74,9 +167,11 @@ fn main() -> ewf_image::Result<()> {
 
 `Image` is a cheap, shareable handle. Clones and cursors share bounded caches,
 so one image can serve many readers. `OpenOptions` adjusts cache sizes, handle
-limits, and strictness. Segment files must remain unchanged while an image is open.
+limits, and strictness. Encrypted X-Ways images open with
+`Image::open_with_password`. Segment files must remain unchanged while an image
+is open.
 
-## Verify an image
+### Verify an image
 
 `verify` decodes the complete media and compares it with the digests stored in
 the image. Verification bypasses caches, so corrupt data cannot pass as valid.
@@ -105,7 +200,7 @@ shows that the decoded media equals what was hashed at acquisition. It cannot
 show whether unreadable source sectors were replaced with zeros at that time. See
 [verification, analysis, and recovery](docs/reader-analysis.md).
 
-## Work with logical files
+### Work with logical files
 
 Logical images (`.L01` and `.Lx01`) contain a catalog of files and folders.
 
@@ -144,7 +239,7 @@ remain available on each catalog entry but are not applied to extracted files.
 The `ewf-cli extract --restore-times` option applies recorded file access and
 modification times to a selected new output file.
 
-## Write an image
+### Write an image
 
 `EwfWriter` creates EWF1 or EWF2 images from any readable source.
 
@@ -182,58 +277,15 @@ Writers return computed MD5, SHA1, and SHA256 digests but do not reread their
 output. [Acquisition and writing](docs/acquisition.md) explains resume,
 publication, and recovery for each writer.
 
-## Supported formats
-
-| Format | Read | Write |
-| --- | --- | --- |
-| EWF1 physical `.E01` | Raw and zlib; X-Ways Zstandard; X-Ways AES-128/AES-256 encryption | Raw and zlib |
-| EWF1 logical `.L01` | Media and file catalog | Media and file catalog |
-| EWF1 SMART `.S01` | Media | Media |
-| EWF2 physical `.Ex01` | Raw, zlib, BZip2, and pattern-fill | Raw, zlib, BZip2, and pattern-fill |
-| EWF2 logical `.Lx01` | Media and file catalog | Media and file catalog |
-
-Encrypted X-Ways images open with `Image::open_with_password`. Encrypted EWF2
-images, encrypted output, and delta (overlay) images are not supported.
-[Compatibility](docs/compatibility.md) describes tested producers and consumers,
-and [limitations](docs/limitations.md) lists unsupported workflows.
-
-For supported AFF4 profiles and limitations, see
-[`aff4-image`](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image).
-`ewf-image` has no AFF4 dependencies.
-
-## Command-line tool
-
-The workspace includes `ewf-cli`, an unpublished command-line tool for EWF, AFF4,
-and raw images. Build it from this repository:
-
-```sh
-cargo build -p ewf-cli --release --locked
-```
-
-```text
-ewf-cli info case.E01
-ewf-cli verify case.E01
-ewf-cli acquire /dev/sdb case.E01
-ewf-cli convert case.E01 case.aff4
-ewf-cli collect evidence-folder files.Lx01
-ewf-cli extract files.Lx01 2 recovered.bin
-```
-
-The output file extension selects the format. Commands never overwrite existing
-files. Acquisition requires a stable source, and directory collection does not
-create a filesystem snapshot. See the [CLI guide](docs/ewf-cli.md) for device
-acquisition, conversion, JSON output, and exit codes, and the [EWF command
-guide](docs/cli.md) for advanced acquisition and recovery options.
-
 ## Documentation
 
-- [API reference](https://docs.rs/ewf-image) and [runnable examples](examples)
+- Command line: [CLI guide](docs/ewf-cli.md) and [EWF command guide](docs/cli.md)
+- Library: [API reference](https://docs.rs/ewf-image) and [runnable examples](examples)
+- AFF4: [`aff4-image` guide](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image)
 - [Verification, analysis, and recovery](docs/reader-analysis.md)
 - [Acquisition and writing](docs/acquisition.md)
-- [CLI guide](docs/ewf-cli.md) and [EWF command guide](docs/cli.md)
 - [Compatibility](docs/compatibility.md) and [limitations](docs/limitations.md)
-- [Architecture](docs/architecture.md)
-- [Testing](docs/testing.md)
+- [Architecture](docs/architecture.md) and [testing](docs/testing.md)
 - [Release process](RELEASING.md)
 - Upgrading: [0.5 guide](docs/migrating-to-0.5.md),
   [0.4 release notes](CHANGELOG.md#040---2026-09-12),
