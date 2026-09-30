@@ -9,7 +9,7 @@ readme = "README.md"
 repository = "https://github.com/ebrig/ewf-image"
 homepage = "https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image"
 documentation = "https://docs.rs/aff4-image"
-keywords = ["aff4", "forensics", "evidence", "disk-image"]
+keywords = ["aff4", "aff4-l", "forensics", "evidence", "image"]
 categories = ["parser-implementations", "filesystem"]
 
 [features]
