@@ -14,7 +14,7 @@ readme = "README.md"
 repository = "https://github.com/ebrig/ewf-image"
 homepage = "https://github.com/ebrig/ewf-image"
 documentation = "https://docs.rs/ewf-image"
-keywords = ["ewf", "e01", "disk", "image"]
+keywords = ["ewf", "e01", "forensics", "image", "evidence"]
 categories = ["parser-implementations", "filesystem"]
 include = [
     "/Cargo.toml",
