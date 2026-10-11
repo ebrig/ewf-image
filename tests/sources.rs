@@ -52,7 +52,7 @@ fn embedded_sources_support_both_families_without_reading_adjacent_bytes() {
         assert_eq!(image.media_size(), 100_003);
         assert_eq!(image.read_at(&mut edge, 99_999).unwrap(), 4);
         assert_eq!(&edge[..4], &[0x42; 4]);
-        assert!(!image.sections().is_empty());
+        assert_ne!(image.sections(), []);
         for section in image.sections() {
             assert!(section.data_offset + section.data_size <= length);
             match &section.kind {

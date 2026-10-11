@@ -3289,8 +3289,14 @@ fn closeout_feature_coverage_does_not_require_future_bzip2_oracles() {
         ..ExternalFeatureCoverage::default()
     };
 
-    assert!(missing_closeout_feature_families(&coverage).is_empty());
-    assert!(missing_closeout_feature_families_for_current_toolchain(&coverage).is_empty());
+    assert_eq!(
+        missing_closeout_feature_families(&coverage),
+        [] as [&str; 0]
+    );
+    assert_eq!(
+        missing_closeout_feature_families_for_current_toolchain(&coverage),
+        [] as [&str; 0]
+    );
 }
 
 #[test]
