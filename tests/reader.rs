@@ -611,7 +611,7 @@ fn synthetic_e01_separate_table_sector_ranges_with_types(
     chunks: &[&[u8]],
     table_types: &[&[u8]],
 ) -> NamedTempFile {
-    assert!(!chunks.is_empty());
+    assert_ne!(chunks, [] as [&[u8]; 0]);
     assert_eq!(chunks.len(), table_types.len());
     let compressed_chunks: Vec<Vec<u8>> = chunks
         .iter()
@@ -6438,7 +6438,7 @@ fn image_read_zeroes_ewf2_raw_chunk_bad_checksum_when_requested() {
     .unwrap();
     let mut buf = [0x55; 16];
 
-    assert!(image.checksum_errors().unwrap().is_empty());
+    assert_eq!(image.checksum_errors().unwrap(), []);
 
     let read = image.read_at(&mut buf, 0).unwrap();
     let _ = image.read_data_chunk(0).unwrap();
@@ -7756,10 +7756,9 @@ fn image_resolves_ewf2_single_file_entry_metadata_references() {
             .access_control_entry_for_entry(child, 1)
             .is_none()
     );
-    assert!(
-        single_files
-            .access_control_entries_for_entry(&single_files.root)
-            .is_empty()
+    assert_eq!(
+        single_files.access_control_entries_for_entry(&single_files.root),
+        []
     );
 }
 
@@ -8111,7 +8110,7 @@ fn image_open_parses_synthetic_ewf2_session_table() {
             },
         ]
     );
-    assert!(image.info().tracks.is_empty());
+    assert_eq!(image.info().tracks, []);
 }
 
 #[test]
@@ -8158,7 +8157,7 @@ fn image_open_matches_reference_for_ewf1_single_audio_session_entry() {
             sector_count: 64,
         }]
     );
-    assert!(image.info().tracks.is_empty());
+    assert_eq!(image.info().tracks, []);
 }
 
 #[test]
@@ -8206,7 +8205,7 @@ fn image_open_matches_reference_for_ewf2_single_audio_session_entry() {
             sector_count: 64,
         }]
     );
-    assert!(image.info().tracks.is_empty());
+    assert_eq!(image.info().tracks, []);
 }
 
 #[test]
