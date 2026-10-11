@@ -501,7 +501,7 @@ fn default_source_failure_stops_without_poisoning_or_substitution() {
             .is_err()
     );
     assert_eq!(writer.position(), 512);
-    assert!(writer.acquisition_errors().is_empty());
+    assert_eq!(writer.acquisition_errors(), []);
     source.failures.clear();
     writer
         .acquire_from(&mut source, &ewf_image::AcquisitionReadOptions::default())
@@ -536,7 +536,7 @@ fn unsealed_substitution_is_not_restored_by_resume() {
     assert_eq!(outcome.progress.substituted_sectors, 1);
     drop(writer);
     let mut writer = AcquisitionWriter::resume(&path, &opts, IDENTITY).unwrap();
-    assert!(writer.acquisition_errors().is_empty());
+    assert_eq!(writer.acquisition_errors(), []);
     source.failures.clear();
     writer.acquire_from(&mut source, &read_options).unwrap();
     writer.finish().unwrap();
@@ -809,7 +809,7 @@ fn fatal_source_errors_and_invalid_controls_never_substitute_data() {
         assert!(writer.acquire_from(&mut source, &opts).is_err());
         assert_eq!(source.reads, usize::from(!seek_error));
         assert_eq!(writer.position(), 0);
-        assert!(writer.acquisition_errors().is_empty());
+        assert_eq!(writer.acquisition_errors(), []);
         for bad_opts in [
             ewf_image::AcquisitionReadOptions {
                 retries: 101,
