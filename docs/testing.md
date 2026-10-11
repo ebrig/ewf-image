@@ -204,6 +204,25 @@ Rust CI runs on Windows, Linux, and macOS, with an additional Linux MSRV job. To
 make GitHub block merges or releases without successful checks, repository
 administrators must mark the CI jobs as required in branch or release protection.
 
+Dependabot checks both the main Cargo workspace and the isolated `fuzz`
+workspace weekly. Its `rust-dependencies` group creates one pull request per
+dependency across both workspaces so shared dependency changes can be reviewed
+and tested together.
+When updating dependencies manually, update the affected packages in both
+`Cargo.lock` and `fuzz/Cargo.lock`; the bounded fuzz job validates the latter.
+
+The configuration in `.github/main-branch-protection.json` requires the six
+CI checks on an up-to-date `main` branch, including for administrators. It
+excludes the optional Windows VHDX lab job. This file documents the intended
+settings; GitHub does not apply it automatically. A repository administrator
+with a credential that has repository administration write permission can apply
+it from the repository root:
+
+```sh
+gh api --method PUT repos/ebrig/ewf-image/branches/main/protection \
+  --input .github/main-branch-protection.json
+```
+
 ## AFF4 interoperability
 
 ```sh

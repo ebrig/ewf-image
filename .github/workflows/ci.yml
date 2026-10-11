@@ -42,30 +42,30 @@ jobs:
         run: cargo fmt --check
 
       - name: No-default-features test
-        run: cargo test --no-default-features
+        run: cargo test --no-default-features --locked
 
       - name: All-features test
-        run: cargo test --all-features
+        run: cargo test --all-features --locked
 
       - name: Default-feature verification
-        run: cargo test
+        run: cargo test --locked
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
       - name: Examples
-        run: cargo check --examples --all-features
+        run: cargo check --examples --all-features --locked
 
       - name: AFF4 sibling crate
         run: |
           cargo fmt --all --check
-          cargo test -p aff4-image
+          cargo test -p aff4-image --locked
           cargo test -p aff4-image --no-default-features --locked
           cargo clippy -p aff4-image --no-default-features --all-targets --locked -- -D warnings
-          cargo clippy -p aff4-image --all-targets -- -D warnings
+          cargo clippy -p aff4-image --all-targets --locked -- -D warnings
 
       - name: Doctests
-        run: cargo test --doc --all-features
+        run: cargo test --doc --all-features --locked
 
       - name: Unified CLI
         run: cargo test -p ewf-cli --locked
@@ -76,7 +76,7 @@ jobs:
       - name: Docs
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --all-features --no-deps
+        run: cargo doc --workspace --all-features --no-deps --locked
 
       - name: Package contents
         run: |
@@ -170,4 +170,4 @@ jobs:
           rustup default 1.96.0
 
       - name: Check MSRV
-        run: cargo check --workspace --all-features
+        run: cargo check --workspace --all-features --locked

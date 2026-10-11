@@ -119,8 +119,8 @@ acquisition options.
 
 ## Rust library
 
-The examples below target `ewf-image` 0.6.0. See the
-[changelog](CHANGELOG.md#060---2026-09-29) for its changes. The
+The examples below target `ewf-image` 0.6.1. See the
+[changelog](CHANGELOG.md#061---2026-10-11) for its changes. The
 [0.5 migration guide](docs/migrating-to-0.5.md) remains available for upgrades
 from 0.4. For AFF4,
 see the [`aff4-image` crate](https://github.com/ebrig/ewf-image/tree/main/crates/aff4-image).
@@ -128,7 +128,7 @@ see the [`aff4-image` crate](https://github.com/ebrig/ewf-image/tree/main/crates
 
 ```toml
 [dependencies]
-ewf-image = "0.6"
+ewf-image = "0.6.1"
 ```
 
 The crate requires Rust 1.96 or later. Its runtime features are:
