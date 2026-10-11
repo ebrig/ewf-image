@@ -149,7 +149,7 @@ fn missing_terminal_descriptor_is_recoverable() {
     let mut output = Vec::new();
     let report = recovery.recover_to_writer(&mut output).unwrap();
     assert_eq!(output, data);
-    assert!(!report.notices.is_empty());
+    assert_ne!(report.notices, []);
 }
 
 #[test]
@@ -384,6 +384,6 @@ fn external_acquisition_and_truncated_recovery_match_ewfexport() {
             .unwrap();
         assert_eq!(recovered, exported.stdout);
         assert_eq!(report.chunks_zero_filled, 0);
-        assert!(!report.notices.is_empty());
+        assert_ne!(report.notices, []);
     }
 }
