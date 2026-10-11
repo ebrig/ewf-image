@@ -1,10 +1,17 @@
 version: 2
 updates:
   - package-ecosystem: cargo
-    directory: /
+    # Include the isolated fuzz workspace in the same update group.
+    directories:
+      - /
+      - /fuzz
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      rust-dependencies:
+        patterns:
+          - "*"
   - package-ecosystem: github-actions
     directory: /
     schedule:

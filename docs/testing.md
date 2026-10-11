@@ -204,6 +204,12 @@ Rust CI runs on Windows, Linux, and macOS, with an additional Linux MSRV job. To
 make GitHub block merges or releases without successful checks, repository
 administrators must mark the CI jobs as required in branch or release protection.
 
+Dependabot checks both the main Cargo workspace and the isolated `fuzz`
+workspace weekly. Its `rust-dependencies` group combines Cargo updates in one
+pull request so shared dependency changes can be reviewed and tested together.
+When updating dependencies manually, update the affected packages in both
+`Cargo.lock` and `fuzz/Cargo.lock`; the bounded fuzz job validates the latter.
+
 ## AFF4 interoperability
 
 ```sh
