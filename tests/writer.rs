@@ -2766,7 +2766,7 @@ fn writer_emits_ewf2_pattern_fill_chunks_for_repeated_data() {
         u32::from_le_bytes(table[44..48].try_into().unwrap()),
         0x0000_0005
     );
-    assert!(ewf2_section_data(&bytes, 0x03).is_empty());
+    assert_eq!(ewf2_section_data(&bytes, 0x03), []);
 }
 
 #[test]
@@ -4539,8 +4539,8 @@ fn writer_rejects_session_and_track_values_above_signed_64_bit_range() {
         writer.append_track(0, too_large).unwrap_err(),
         ewf_image::EwfError::Unsupported(message) if message.contains("track sector count exceeds signed 64-bit range")
     ));
-    assert!(writer.sessions().is_empty());
-    assert!(writer.tracks().is_empty());
+    assert_eq!(writer.sessions(), []);
+    assert_eq!(writer.tracks(), []);
 }
 
 #[test]
@@ -4594,7 +4594,7 @@ fn writer_appends_checksum_errors_without_authored_acquisition_errors() {
 
     let image = ewf_image::Image::open(&path).unwrap();
 
-    assert!(image.info().acquisition_errors.is_empty());
+    assert_eq!(image.info().acquisition_errors, []);
     assert_eq!(image.number_of_checksum_errors().unwrap(), 0);
 }
 
@@ -4627,12 +4627,12 @@ fn writer_creates_ewf2_with_sessions() {
     let bytes = fs::read(&path).unwrap();
 
     assert_eq!(image.info().sessions, sessions);
-    assert!(image.info().tracks.is_empty());
+    assert_eq!(image.info().tracks, []);
     assert_eq!(image.sessions(), sessions.as_slice());
     assert_eq!(image.number_of_sessions(), 2);
     assert_eq!(image.session(1), Some(&sessions[1]));
     assert_eq!(image.session(2), None);
-    assert!(image.tracks().is_empty());
+    assert_eq!(image.tracks(), []);
     assert_eq!(image.number_of_tracks(), 0);
     assert_eq!(image.track(0), None);
     assert_eq!(ewf2_section_data(&bytes, 0x06).len(), 32 + 2 * 32 + 16);
@@ -4665,7 +4665,7 @@ fn writer_creates_e01_with_sessions() {
     let image = ewf_image::Image::open(&path).unwrap();
 
     assert_eq!(image.info().sessions, sessions);
-    assert!(image.info().tracks.is_empty());
+    assert_eq!(image.info().tracks, []);
 }
 
 #[test]
@@ -5026,8 +5026,8 @@ fn writer_finishes_split_e01_to_supplied_segment_writers() {
     assert_eq!(result.segment_paths, vec![first.clone(), second.clone()]);
     assert_eq!(result.logical_size, data.len() as u64);
     assert_eq!(result.chunk_count, 2);
-    assert!(!first_output.is_empty());
-    assert!(!second_output.is_empty());
+    assert_ne!(first_output, []);
+    assert_ne!(second_output, []);
     let expected_segment_set_size = u64::try_from(first_output.len() + second_output.len())
         .expect("segment output sizes fit u64");
 

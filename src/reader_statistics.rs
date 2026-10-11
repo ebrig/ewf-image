@@ -334,7 +334,7 @@ impl ReaderStatisticsCollector {
         if !self.enabled || value == 0 {
             return;
         }
-        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             Some(current.saturating_add(value))
         });
     }
@@ -346,4 +346,42 @@ fn duration_nanos(duration: Duration) -> u64 {
 
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counter_addition_saturates() {
+        let statistics = ReaderStatisticsCollector::new(true);
+        let counter = AtomicU64::new(u64::MAX - 1);
+        statistics.add(&counter, 2);
+        statistics.add(&counter, 1);
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn disabled_and_zero_additions_preserve_counter() {
+        let counter = AtomicU64::new(42);
+        ReaderStatisticsCollector::new(false).add(&counter, 5);
+        ReaderStatisticsCollector::new(true).add(&counter, 0);
+        assert_eq!(counter.load(Ordering::Relaxed), 42);
+    }
+
+    #[test]
+    fn concurrent_additions_are_not_lost() {
+        let statistics = ReaderStatisticsCollector::new(true);
+        let counter = AtomicU64::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..1_000 {
+                        statistics.add(&counter, 1);
+                    }
+                });
+            }
+        });
+        assert_eq!(counter.load(Ordering::Relaxed), 8_000);
+    }
 }
