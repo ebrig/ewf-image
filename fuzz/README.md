@@ -30,6 +30,12 @@ process memory and time, and applies small AFF4 work budgets. The EWF parser
 limits also apply. The script does not use network targets or scan evidence
 directories.
 
+The 512 MiB process limit includes AddressSanitizer overhead. The smoke runner
+uses a 32 MiB quarantine, a 128 KiB thread-local quarantine, and a 500 ms
+allocator release interval to bound retained memory. AddressSanitizer remains
+enabled. Settings supplied through `ASAN_OPTIONS` override these defaults;
+account for their memory cost when running longer campaigns.
+
 ## Results and failures
 
 Corpora and artifacts are ignored by Git. Keep a failing input and its invocation
