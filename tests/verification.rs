@@ -272,7 +272,7 @@ fn verification_rejects_cached_recovery_zeros_and_analysis_continues() {
     assert_eq!(report.media_status, MediaScanStatus::Incomplete);
     assert_eq!(report.bytes_verified, 32768);
     assert!(report.hashes.is_none());
-    assert!(report.comparisons.is_empty());
+    assert_eq!(report.comparisons, []);
     assert_eq!(report.error_count, 2);
     assert_eq!(report.findings.len(), 1);
     assert_eq!(report.suppressed_findings, 1);
