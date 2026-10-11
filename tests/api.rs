@@ -791,7 +791,7 @@ fn image_info_groups_public_metadata_and_media_info() {
             tableau: false,
         }
     );
-    assert!(info.acquisition_errors.is_empty());
+    assert_eq!(info.acquisition_errors, []);
     assert_eq!(
         info.memory_extents,
         [MemoryExtent {
@@ -806,5 +806,5 @@ fn image_info_groups_public_metadata_and_media_info() {
             sector_count: 128,
         }]
     );
-    assert!(info.tracks.is_empty());
+    assert_eq!(info.tracks, []);
 }
