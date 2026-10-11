@@ -10,8 +10,7 @@ updates:
     open-pull-requests-limit: 5
     groups:
       rust-dependencies:
-        patterns:
-          - "*"
+        group-by: dependency-name
   - package-ecosystem: github-actions
     directory: /
     schedule:
