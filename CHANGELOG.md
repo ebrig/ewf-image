@@ -6,6 +6,8 @@ code written for 0.4.0. See
 
 ## Unreleased
 
+## 0.6.1 - 2026-10-11
+
 - Keep reader statistics compatible with current Rust warnings while preserving
   the Rust 1.96 minimum and saturating atomic counter updates.
 
