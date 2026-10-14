@@ -38,6 +38,10 @@ jobs:
           rustup default stable
           rustup component add rustfmt clippy
 
+      - name: Release automation syntax
+        if: runner.os == 'Linux'
+        run: bash -n scripts/verify-release-candidate.sh
+
       - name: Format
         run: cargo fmt --check
 
