@@ -474,7 +474,7 @@ impl Container {
         let stored_source = File::open(path.as_ref())?;
         let mut names = BTreeSet::new();
         for name in archive.file_names() {
-            if !names.insert(name.to_owned()) {
+            if !names.insert(name?.into_owned()) {
                 return Err(malformed("duplicate ZIP member name"));
             }
         }
@@ -1493,12 +1493,13 @@ fn storage_name(
     // Legacy AFF4-L producers also use the physical ARN escaping for chunked
     // storage. Resolve only an existing prefix; draft 2.1 uses unescaped ARNs.
     let legacy = format!("aff4%3A%2F%2F{}", escape(rest));
-    if version == (1, 1)
-        && archive
-            .file_names()
-            .any(|n| n.starts_with(&format!("{legacy}/")))
-    {
-        return Ok(legacy);
+    if version == (1, 1) {
+        let prefix = format!("{legacy}/");
+        for name in archive.file_names() {
+            if name?.starts_with(&prefix) {
+                return Ok(legacy);
+            }
+        }
     }
     Ok(if version == (1, 0) {
         format!("aff4%3A%2F%2F{}", escape(rest))

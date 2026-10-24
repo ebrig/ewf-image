@@ -357,6 +357,7 @@ impl Container {
         let prefix = format!("{}/", self.path(id)?);
         let mut names: BTreeMap<u64, String> = BTreeMap::new();
         for name in self.archive.file_names() {
+            let name = name?;
             let Some(tail) = name.strip_prefix(&prefix) else {
                 continue;
             };
@@ -369,7 +370,7 @@ impl Container {
                 let number = number
                     .parse()
                     .map_err(|_| malformed("invalid block bevy"))?;
-                if names.insert(number, name.into()).is_some() {
+                if names.insert(number, name.into_owned()).is_some() {
                     return Err(malformed("ambiguous block-hash segment aliases"));
                 }
             }

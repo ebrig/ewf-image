@@ -43,6 +43,47 @@ fn metadata() -> String {
 }
 
 #[test]
+fn zip_member_names_decode_cp437_and_reject_decoded_duplicates() {
+    let turtle = "<aff4://volume> <http://aff4.org/Schema#name> \"café\" .";
+    for duplicate in [false, true] {
+        let mut members: Vec<(&str, &[u8])> = vec![("cafe", b"")];
+        if duplicate {
+            members.push(("café", b""));
+        }
+        let file = fixture(turtle, &members);
+        // Change the ASCII filename in both ZIP headers to CP437. Its decoded
+        // spelling matches the separate UTF-8 member in the duplicate case.
+        let mut bytes = std::fs::read(file.path()).unwrap();
+        let offsets: Vec<_> = bytes
+            .windows(4)
+            .enumerate()
+            .filter_map(|(offset, name)| (name == b"cafe").then_some(offset))
+            .collect();
+        assert_eq!(offsets.len(), 2);
+        for offset in offsets {
+            bytes[offset + 3] = 0x82;
+        }
+        std::fs::write(file.path(), bytes).unwrap();
+
+        let opened = Container::open(file.path());
+        let mut values = Vec::new();
+        let scanned = Container::scan_metadata(file.path(), Limits::default(), |_, _, property| {
+            values.push(property.value.clone());
+            ControlFlow::Continue(())
+        });
+        if duplicate {
+            assert!(matches!(opened, Err(Error::Malformed(_))));
+            assert!(matches!(scanned, Err(Error::Malformed(_))));
+            assert!(values.is_empty());
+        } else {
+            opened.unwrap();
+            assert_eq!(scanned.unwrap().stores, 1);
+            assert_eq!(values, ["café"]);
+        }
+    }
+}
+
+#[test]
 fn directory_and_map_limits_apply_to_small_valid_inputs() {
     let range = [
         0u64.to_le_bytes().as_slice(),

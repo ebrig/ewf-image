@@ -26,7 +26,7 @@ impl Container {
         let (mut archive, _) = archive::open(path.as_ref(), &limits)?;
         let mut names = BTreeSet::new();
         for name in archive.file_names() {
-            if !names.insert(name.to_owned()) {
+            if !names.insert(name?.into_owned()) {
                 return Err(malformed("duplicate ZIP member name"));
             }
         }

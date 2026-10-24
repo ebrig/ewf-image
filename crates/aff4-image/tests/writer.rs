@@ -224,7 +224,7 @@ fn rewrite_first_bevy_deflated(source: &Path, destination: &Path) {
     let mut rewrote_bevy = false;
     for index in 0..input.len() {
         let mut member = input.by_index(index).unwrap();
-        let name = member.name().to_owned();
+        let name = member.name().unwrap().into_owned();
         let mut bytes = Vec::new();
         member.read_to_end(&mut bytes).unwrap();
         let is_bevy = name.ends_with("/00000000");

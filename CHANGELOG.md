@@ -6,6 +6,9 @@ code written for 0.4.0. See
 
 ## Unreleased
 
+- Update the experimental AFF4 crate to ZIP 9, propagating filename decoding
+  errors and preserving duplicate-name checks and legacy storage discovery.
+
 ## 0.6.1 - 2026-10-11
 
 - Keep reader statistics compatible with current Rust warnings while preserving
