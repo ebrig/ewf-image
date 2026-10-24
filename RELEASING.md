@@ -20,10 +20,10 @@ executable. Keep release evidence for each crate outside the public source tree.
 
 ## Publish
 
-### One-time ewf-image setup
+### One-time setup for each crate
 
-Configure a GitHub trusted publisher under the `ewf-image` crate's crates.io
-settings with these exact values:
+Configure a GitHub trusted publisher separately under the `ewf-image` and
+`aff4-image` crates' crates.io settings with these exact values:
 
 - Repository owner: `ebrig`
 - Repository name: `ewf-image`
@@ -39,16 +39,15 @@ may additionally require reviewers for a manual approval boundary.
 1. Commit the release preparation and confirm the tree is clean.
 2. Confirm the six required CI checks passed on the exact `main` commit to be
    released.
-3. Create and push an annotated `vMAJOR.MINOR.PATCH` tag for `ewf-image` at that
-   commit. The `Publish ewf-image` workflow verifies that the tag matches the
-   package version and current `main`, rechecks every required status from
+3. Create and push an annotated `vMAJOR.MINOR.PATCH` tag for `ewf-image`, or an
+   annotated `aff4-image-vMAJOR.MINOR.PATCH` tag for `aff4-image`, at that commit.
+   The `Publish crates` workflow selects the crate from this tag prefix and
+   verifies that the tag matches its package version and current `main`,
+   rechecks every required status from
    `.github/main-branch-protection.json`, runs a publish dry run, and publishes
    through crates.io trusted publishing. It fails closed on a missing, pending,
    failed, or unrecognized check provider.
-4. For `aff4-image`, create an annotated
-   `aff4-image-vMAJOR.MINOR.PATCH` tag at its validated commit, push the commit
-   and tag, and publish that crate manually with `cargo publish`.
-5. Confirm the version on crates.io and docs.rs. Create a GitHub release from
+4. Confirm the version on crates.io and docs.rs. Create a GitHub release from
    the same tag with its changelog entry and the package checksum.
-6. Confirm the automated publish workflow succeeded and the GitHub release is
+5. Confirm the automated publish workflow succeeded and the GitHub release is
    current.

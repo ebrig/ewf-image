@@ -1,19 +1,20 @@
-name: Publish ewf-image
+name: Publish crates
 
 on:
   push:
     tags:
       - "v*"
+      - "aff4-image-v*"
 
 permissions: {}
 
 concurrency:
-  group: publish-ewf-image-${{ github.ref }}
+  group: publish-crate-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   publish:
-    name: Publish ewf-image
+    name: Publish crate
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -33,12 +34,15 @@ jobs:
           rustup default stable
 
       - name: Verify tag and required checks
+        id: verify
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/verify-release-candidate.sh "$GITHUB_REF_NAME"
 
       - name: Publish dry run
-        run: cargo publish -p ewf-image --dry-run --all-features --locked
+        env:
+          CARGO_PACKAGE: ${{ steps.verify.outputs.package }}
+        run: cargo publish -p "$CARGO_PACKAGE" --dry-run --all-features --locked
 
       - name: Authenticate to crates.io
         id: auth
@@ -46,5 +50,6 @@ jobs:
 
       - name: Publish to crates.io
         env:
+          CARGO_PACKAGE: ${{ steps.verify.outputs.package }}
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish -p ewf-image --all-features --locked
+        run: cargo publish -p "$CARGO_PACKAGE" --all-features --locked
