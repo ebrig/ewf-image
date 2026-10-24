@@ -14,8 +14,8 @@ code written for 0.4.0. See
   [migration note](crates/aff4-image/README.md#migrating-from-02).
 - Update the experimental AFF4 crate to ZIP 9, propagating filename decoding
   errors and preserving duplicate-name checks and legacy storage discovery.
-- Refresh the locked dependencies used by the AFF4 crate. Rust 1.96 remains
-  the minimum supported compiler.
+- Update base64 to 0.23 and refresh the locked dependencies used by the AFF4
+  crate. Rust 1.96 remains the minimum supported compiler.
 
 ## 0.6.1 - 2026-10-11
 
