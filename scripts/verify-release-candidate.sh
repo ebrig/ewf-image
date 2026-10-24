@@ -3,8 +3,14 @@
 set -euo pipefail
 
 tag=${1:-}
-if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
-    echo "Expected an ewf-image release tag such as v0.7.0" >&2
+case "$tag" in
+    aff4-image-v*) package=aff4-image; prefix=aff4-image-v ;;
+    v*) package=ewf-image; prefix=v ;;
+    *) echo "Expected a vMAJOR.MINOR.PATCH or aff4-image-vMAJOR.MINOR.PATCH tag" >&2; exit 2 ;;
+esac
+version=${tag#"$prefix"}
+if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+    echo "Invalid release version in tag: $tag" >&2
     exit 2
 fi
 
@@ -31,12 +37,12 @@ if [[ $(git rev-parse HEAD) != "$release_commit" ]]; then
     exit 1
 fi
 
-package_version=$(cargo metadata --no-deps --format-version 1 | jq -r '
-    [.packages[] | select(.name == "ewf-image") | .version] as $versions
+package_version=$(cargo metadata --no-deps --format-version 1 --locked | jq -r --arg package "$package" '
+    [.packages[] | select(.name == $package) | .version] as $versions
     | if ($versions | length) == 1 then $versions[0] else empty end
 ')
-if [[ -z "$package_version" || "$tag" != "v$package_version" ]]; then
-    echo "Tag $tag does not match ewf-image package version ${package_version:-<missing>}" >&2
+if [[ -z "$package_version" || "$version" != "$package_version" ]]; then
+    echo "Tag $tag does not match $package package version ${package_version:-<missing>}" >&2
     exit 1
 fi
 
@@ -107,4 +113,7 @@ for required in "${required_checks[@]}"; do
     echo "Required check passed: $context"
 done
 
-echo "Release candidate verified: ewf-image $package_version at $release_commit"
+echo "Release candidate verified: $package $package_version at $release_commit"
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    printf 'package=%s\n' "$package" >> "$GITHUB_OUTPUT"
+fi

@@ -6,8 +6,16 @@ code written for 0.4.0. See
 
 ## Unreleased
 
+## aff4-image 0.3.0 - 2026-10-24
+
+- The public `Error::Zip` variant now contains ZIP 9's error type. Applications
+  that match or construct its payload using a direct `zip` dependency must
+  upgrade that dependency to version 9. See the
+  [migration note](crates/aff4-image/README.md#migrating-from-02).
 - Update the experimental AFF4 crate to ZIP 9, propagating filename decoding
   errors and preserving duplicate-name checks and legacy storage discovery.
+- Update base64 to 0.23 and refresh the locked dependencies used by the AFF4
+  crate. Rust 1.96 remains the minimum supported compiler.
 
 ## 0.6.1 - 2026-10-11
 
