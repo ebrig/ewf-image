@@ -24,7 +24,7 @@ required-features = ["write"]
 tempfile = "3"
 
 [dependencies]
-zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 oxttl = "0.2"
 oxrdf = "0.3"
 flate2 = "1"
