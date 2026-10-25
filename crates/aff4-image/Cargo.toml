@@ -30,7 +30,7 @@ oxrdf = "0.3"
 flate2 = "1"
 snap = "1"
 lz4_flex = "0.14"
-lru = "0.18"
+lru = "0.19"
 rayon = { version = "1", optional = true }
 md-5 = "0.11"
 sha1 = "0.11"
