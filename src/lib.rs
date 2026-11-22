@@ -203,7 +203,7 @@ pub fn parse_single_files_for_fuzzing(data: &[u8], ewf1: bool) -> Result<SingleF
     if ewf1 {
         single_files::parse_ewf1_single_files_data(data)
     } else {
-        single_files::parse_ewf2_single_files_data(data)
+        single_files::parse_ewf2_single_files_data(data).map(|(catalog, _)| catalog)
     }
 }
 pub use image::recovery::{

@@ -15,8 +15,8 @@ use md5::Digest as _;
 
 use crate::codepage::decode_header_bytes;
 use crate::decode::{
-    ChunkEncoding, decode_chunk_with_padding, raw_chunk_size_cap, validate_encoded_size,
-    zlib_compressed_chunk_size_cap,
+    ChunkEncoding, decode_chunk_with_padding, decode_ewf2_sector_padded_zlib_chunk,
+    raw_chunk_size_cap, validate_encoded_size, zlib_compressed_chunk_size_cap,
 };
 use crate::encryption::EncryptionContext;
 use crate::format::{ewf1, ewf2};
@@ -83,6 +83,7 @@ pub struct Image {
 #[derive(Debug)]
 struct ImageInner {
     info: ImageInfo,
+    ewf2_logical_final_padded_size: Option<usize>,
     sections: Vec<SectionInfo>,
     open_strictness: OpenStrictness,
     encryption_info: Option<EncryptionInfo>,
@@ -593,6 +594,7 @@ impl Image {
         let mut expected_ewf2_header_profile = None;
         let mut expected_ewf2_device_information = None;
         let mut expected_ewf2_case_data = None;
+        let mut ewf2_catalog_record_size = None;
         let mut encryption_info = None;
         let mut encryption_contexts = Vec::with_capacity(paths.len());
 
@@ -680,6 +682,9 @@ impl Image {
                     case_data,
                     "case data",
                 )?;
+            }
+            if let Some(record_size) = parsed.ewf2_catalog_record_size {
+                ewf2_catalog_record_size = Some(record_size);
             }
             if segment_index == 0 {
                 chunk_size = parsed.chunk_size;
@@ -776,7 +781,41 @@ impl Image {
             ));
         }
 
-        if logical_size == 0 && chunk_size > 0 {
+        let mut uses_ewf2_catalog_record_size = false;
+        if format == Format::Ewf2 && format_profile == Some(FormatProfile::Ewf2LogicalEnCase7) {
+            // The case and device sections can declare complementary geometry
+            // (and can occur in either order). Resolve using the entire set.
+            let device = expected_ewf2_device_information
+                .as_deref()
+                .map(parse_ewf2_device_info)
+                .transpose()?
+                .unwrap_or_default();
+            let case = expected_ewf2_case_data
+                .as_deref()
+                .map(parse_ewf2_device_info)
+                .transpose()?
+                .unwrap_or_default();
+            let geometry = device.with_fallback(case)?;
+            apply_ewf2_geometry(&mut media, geometry);
+            chunk_size = geometry.chunk_size.unwrap_or(32_768);
+            validate_chunk_size(chunk_size)?;
+
+            // A declared media size can include bytes outside the catalog
+            // (including writer-side sector padding used for media hashes).
+            // When it is absent, rec/tb can supply the exact media length, but
+            // the parser's fallback to catalog section length never can.
+            let has_declared_media_size =
+                geometry.bytes_per_sector.is_some() && geometry.total_sectors.is_some();
+            let catalog_size = ewf2_catalog_record_size.filter(|_| !has_declared_media_size);
+            uses_ewf2_catalog_record_size = catalog_size.is_some();
+            logical_size = catalog_size.or(geometry.logical_size).unwrap_or(0);
+            if uses_ewf2_catalog_record_size {
+                media.sector_count = media
+                    .bytes_per_sector
+                    .map(|bytes| logical_size.div_ceil(bytes));
+            }
+        }
+        if !uses_ewf2_catalog_record_size && logical_size == 0 && chunk_size > 0 {
             logical_size = chunk_size
                 .checked_mul(discovered_table_chunks)
                 .ok_or_else(|| EwfError::Malformed("logical size overflow".into()))?;
@@ -796,6 +835,27 @@ impl Image {
             }
             logical_size = committed_size;
         }
+
+        let ewf2_logical_final_padded_size = if uses_ewf2_catalog_record_size
+            && acquisition_complete
+            && let Some(sector_size) = media.bytes_per_sector
+            && chunk_size.is_multiple_of(sector_size)
+        {
+            let final_size = logical_size % chunk_size;
+            let padding = (sector_size - final_size % sector_size) % sector_size;
+            if padding == 0 {
+                None
+            } else {
+                // A whole number of sectors fits in a chunk, so rounding up
+                // the final partial chunk never exceeds the chunk size.
+                let padded_size = usize::try_from(final_size + padding).map_err(|_| {
+                    EwfError::Malformed("padded chunk size does not fit usize".into())
+                })?;
+                Some(padded_size)
+            }
+        } else {
+            None
+        };
 
         let info = ImageInfo {
             format,
@@ -837,6 +897,7 @@ impl Image {
         let image = Self {
             inner: Arc::new(ImageInner {
                 info,
+                ewf2_logical_final_padded_size,
                 sections: section_summaries,
                 open_strictness: options.strictness(),
                 encryption_info,
@@ -2202,12 +2263,19 @@ impl Image {
         } else {
             chunk.logical_size
         };
-        let decoded = decode_chunk_with_padding(
-            &encoded,
-            chunk.encoding,
-            chunk.logical_size,
-            maximum_decoded_size,
-        )?;
+        let decoded = if let Some(padded_size) = self.inner.ewf2_logical_final_padded_size
+            && matches!(chunk.encoding, ChunkEncoding::Zlib)
+            && chunk_id == (self.inner.info.logical_size - 1) / self.inner.info.chunk_size
+        {
+            decode_ewf2_sector_padded_zlib_chunk(&encoded, chunk.logical_size, padded_size)?
+        } else {
+            decode_chunk_with_padding(
+                &encoded,
+                chunk.encoding,
+                chunk.logical_size,
+                maximum_decoded_size,
+            )?
+        };
         if let Some(started) = decompression_started {
             self.inner
                 .statistics
@@ -2818,6 +2886,7 @@ struct ParsedSegment {
     tracks: Vec<SectorRange>,
     ewf2_device_information: Option<Vec<u8>>,
     ewf2_case_data: Option<Vec<u8>>,
+    ewf2_catalog_record_size: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -3117,6 +3186,7 @@ fn parse_ewf1_segment(
         tracks,
         ewf2_device_information: None,
         ewf2_case_data: None,
+        ewf2_catalog_record_size: None,
     })
 }
 
@@ -3285,6 +3355,7 @@ fn parse_ewf2_segment(
     };
     let mut device_information = None;
     let mut case_data = None;
+    let mut ewf2_catalog_record_size = None;
     for section in &sections {
         match section.desc.section_type {
             ewf2::SectionType::DeviceInformation => {
@@ -3349,10 +3420,9 @@ fn parse_ewf2_segment(
             }
             ewf2::SectionType::SingleFilesData => {
                 let data = read_exact_at(file, section.data_offset, section.data_size)?;
-                merge_single_files(
-                    &mut single_files,
-                    Some(parse_ewf2_single_files_data(&data)?),
-                )?;
+                let (catalog, record_size) = parse_ewf2_single_files_data(&data)?;
+                merge_single_files(&mut single_files, Some(catalog))?;
+                ewf2_catalog_record_size = record_size;
             }
             ewf2::SectionType::SingleFilesTable => {
                 let data = read_exact_at(file, section.data_offset, section.data_size)?;
@@ -3510,6 +3580,7 @@ fn parse_ewf2_segment(
         tracks,
         ewf2_device_information: device_information,
         ewf2_case_data: case_data,
+        ewf2_catalog_record_size,
     })
 }
 

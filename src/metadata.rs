@@ -10,6 +10,7 @@ pub(crate) struct Ewf2Geometry {
     pub(crate) sectors_per_chunk: Option<u64>,
     pub(crate) bytes_per_sector: Option<u64>,
     pub(crate) sector_count: Option<u64>,
+    pub(crate) total_sectors: Option<u64>,
     pub(crate) chunk_count: Option<u64>,
     pub(crate) error_granularity: Option<u64>,
     pub(crate) chunk_size: Option<u64>,
@@ -590,46 +591,64 @@ pub(crate) fn parse_ewf2_device_info(raw: &[u8]) -> Result<Ewf2Geometry> {
         }
     });
 
-    let chunk_size = match (bytes_per_sector, sectors_per_chunk) {
-        (Some(bytes), Some(sectors)) if bytes > 0 && sectors > 0 => {
-            Some(checked_ewf2_geometry_mul(bytes, sectors, "chunk size")?)
-        }
-        _ => None,
-    };
-    let sector_count = if let Some(sectors) = total_sectors.filter(|sectors| *sectors > 0) {
-        Some(sectors)
-    } else if let (Some(sectors), Some(chunks)) = (sectors_per_chunk, chunk_count) {
-        if sectors > 0 && chunks > 0 {
-            Some(checked_ewf2_geometry_mul(sectors, chunks, "sector count")?)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let logical_size = if let (Some(bytes), Some(sectors)) = (bytes_per_sector, sector_count) {
-        if bytes > 0 && sectors > 0 {
-            Some(checked_ewf2_geometry_mul(bytes, sectors, "logical size")?)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    Ok(Ewf2Geometry {
-        sectors_per_chunk: sectors_per_chunk.filter(|value| *value > 0),
-        bytes_per_sector: bytes_per_sector.filter(|value| *value > 0),
-        sector_count,
-        chunk_count: chunk_count.filter(|value| *value > 0),
-        error_granularity: error_granularity.filter(|value| *value > 0),
-        chunk_size,
-        logical_size,
+    Ewf2Geometry {
+        sectors_per_chunk: sectors_per_chunk.filter(|&value| value > 0),
+        bytes_per_sector: bytes_per_sector.filter(|&value| value > 0),
+        total_sectors: total_sectors.filter(|&value| value > 0),
+        chunk_count: chunk_count.filter(|&value| value > 0),
+        error_granularity: error_granularity.filter(|&value| value > 0),
         media_type,
         physical,
         fastbloc,
         tableau,
-    })
+        ..Ewf2Geometry::default()
+    }
+    .resolve_sizes()
+}
+
+impl Ewf2Geometry {
+    /// Device information takes precedence; case data supplies missing fields.
+    pub(crate) fn with_fallback(self, fallback: Self) -> Result<Self> {
+        Self {
+            sectors_per_chunk: self.sectors_per_chunk.or(fallback.sectors_per_chunk),
+            bytes_per_sector: self.bytes_per_sector.or(fallback.bytes_per_sector),
+            total_sectors: self.total_sectors.or(fallback.total_sectors),
+            chunk_count: self.chunk_count.or(fallback.chunk_count),
+            error_granularity: self.error_granularity.or(fallback.error_granularity),
+            media_type: self.media_type.or(fallback.media_type),
+            physical: self.physical.or(fallback.physical),
+            fastbloc: self.fastbloc || fallback.fastbloc,
+            tableau: self.tableau || fallback.tableau,
+            ..Self::default()
+        }
+        .resolve_sizes()
+    }
+
+    fn resolve_sizes(mut self) -> Result<Self> {
+        self.chunk_size = match (self.bytes_per_sector, self.sectors_per_chunk) {
+            (Some(bytes), Some(sectors)) => {
+                Some(checked_ewf2_geometry_mul(bytes, sectors, "chunk size")?)
+            }
+            _ => None,
+        };
+        self.sector_count = if self.total_sectors.is_some() {
+            self.total_sectors
+        } else {
+            match (self.sectors_per_chunk, self.chunk_count) {
+                (Some(sectors), Some(chunks)) => {
+                    Some(checked_ewf2_geometry_mul(sectors, chunks, "sector count")?)
+                }
+                _ => None,
+            }
+        };
+        self.logical_size = match (self.bytes_per_sector, self.sector_count) {
+            (Some(bytes), Some(sectors)) => {
+                Some(checked_ewf2_geometry_mul(bytes, sectors, "logical size")?)
+            }
+            _ => None,
+        };
+        Ok(self)
+    }
 }
 
 fn checked_ewf2_geometry_mul(left: u64, right: u64, field: &str) -> Result<u64> {

@@ -6,6 +6,10 @@ code written for 0.4.0. See
 
 ## Unreleased
 
+- Read EnCase 7 Lx01 images with geometry split across case and device metadata.
+  Use exact catalog media length when no sector count is declared and validate
+  final zlib sector padding before trimming it.
+
 ## aff4-image 0.3.0 - 2026-11-22
 
 - The public `Error::Zip` variant now contains ZIP 9's error type. Applications

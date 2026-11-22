@@ -3676,14 +3676,28 @@ fn synthetic_lx01_leading_single_files_data_with_stream(
     data: &[u8],
     single_files_data: &[u8],
 ) -> NamedTempFile {
-    let chunk_size = 32_768_usize;
-    let compressed = compressed_chunk(data, chunk_size);
     let device_info = utf16le("2\nmain\nb\tsc\tts\tdt\n512\t64\t64\tl\n\n");
+    synthetic_lx01_with_metadata(data, 32_768, single_files_data, &[(0x01, &device_info)])
+}
+
+fn synthetic_lx01_with_metadata(
+    data: &[u8],
+    decoded_size: usize,
+    single_files_data: &[u8],
+    metadata: &[(u32, &[u8])],
+) -> NamedTempFile {
+    let compressed = compressed_chunk(data, decoded_size);
     let table_data_size = 20 + 16;
 
-    let device_desc_offset = 32_usize;
-    let device_data_offset = device_desc_offset + 64;
-    let single_files_desc_offset = device_data_offset + device_info.len();
+    let mut previous = 0_u64;
+    let mut metadata_bytes = Vec::new();
+    for &(kind, payload) in metadata {
+        let offset = 32 + metadata_bytes.len() as u64;
+        metadata_bytes.extend_from_slice(&ewf2_desc(kind, payload.len() as u64, previous));
+        metadata_bytes.extend_from_slice(payload);
+        previous = offset;
+    }
+    let single_files_desc_offset = 32 + metadata_bytes.len();
     let single_files_data_offset = single_files_desc_offset + 64;
     let table_desc_offset = single_files_data_offset + single_files_data.len();
     let table_data_offset = table_desc_offset + 64;
@@ -3699,13 +3713,8 @@ fn synthetic_lx01_leading_single_files_data_with_stream(
     bytes.extend_from_slice(&1_u32.to_le_bytes());
     bytes.extend_from_slice(&[0xab; 16]);
 
-    bytes.extend_from_slice(&ewf2_desc(0x01, device_info.len() as u64, 0));
-    bytes.extend_from_slice(&device_info);
-    bytes.extend_from_slice(&ewf2_desc(
-        0x20,
-        single_files_data.len() as u64,
-        device_desc_offset as u64,
-    ));
+    bytes.extend_from_slice(&metadata_bytes);
+    bytes.extend_from_slice(&ewf2_desc(0x20, single_files_data.len() as u64, previous));
     bytes.extend_from_slice(single_files_data);
     bytes.extend_from_slice(&ewf2_desc(
         0x04,
@@ -7054,6 +7063,90 @@ fn image_rejects_ewf1_ltree_without_recorded_media_size() {
             .to_string()
             .contains("ltree record has no total data size")
     );
+}
+
+fn lx01_catalog_with_media_size(size: u64) -> Vec<u8> {
+    let mut catalog = single_files_stream_with_single_extent(0, size);
+    let prefix = utf16le("5\nrec\ntb\n4096\n");
+    assert!(catalog.starts_with(&prefix));
+    catalog.splice(..prefix.len(), utf16le(&format!("5\nrec\ntb\n{size}\n")));
+    catalog
+}
+
+#[test]
+fn lx01_combines_case_and_device_geometry_and_uses_exact_catalog_size() {
+    let payload = vec![0x39; 4_029];
+    let catalog = lx01_catalog_with_media_size(payload.len() as u64);
+    let device = utf16le("1\nmain\nbp\tdt\n4096\tl\n\n");
+    let case = utf16le("1\nmain\nsb\n2\n\n");
+    let case_with_conflicting_bp = utf16le("1\nmain\nsb\tbp\n2\t512\n\n");
+    for case in [&case, &case_with_conflicting_bp] {
+        for case_first in [true, false] {
+            let mut sections = [(0x01, device.as_slice()), (0x02, case.as_slice())];
+            if case_first {
+                sections.reverse();
+            }
+            let file = synthetic_lx01_with_metadata(&payload, 4096, &catalog, &sections);
+            let image = ewf_image::Image::open(file.path()).unwrap();
+            assert_eq!(image.info().chunk_size, 8192);
+            assert_eq!(image.info().media.bytes_per_sector, Some(4096));
+            assert_eq!(image.info().media.sectors_per_chunk, Some(2));
+            assert_eq!(image.info().media.sector_count, Some(1));
+            assert_eq!(image.info().logical_size, payload.len() as u64);
+            assert_eq!(image.read_at(&mut [0], payload.len() as u64).unwrap(), 0);
+            let mut decoded = Vec::new();
+            image.cursor().read_to_end(&mut decoded).unwrap();
+            assert_eq!(decoded, payload);
+        }
+    }
+}
+
+#[test]
+fn lx01_missing_catalog_size_uses_table_coverage_not_catalog_section_length() {
+    let payload = vec![0x39; 4_029];
+    let mut catalog = lx01_catalog_with_media_size(payload.len() as u64);
+    let field = utf16le("tb");
+    let offset = catalog
+        .windows(field.len())
+        .position(|window| window == field)
+        .unwrap();
+    catalog[offset..offset + field.len()].copy_from_slice(&utf16le("xx"));
+    let device = utf16le("1\nmain\nbp\tdt\n4096\tl\n\n");
+    let case = utf16le("1\nmain\nsb\n2\n\n");
+    let file =
+        synthetic_lx01_with_metadata(&payload, 8192, &catalog, &[(0x02, &case), (0x01, &device)]);
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    assert_eq!(image.info().chunk_size, 8192);
+    assert_eq!(image.info().logical_size, 8192);
+    assert_eq!(
+        image.info().single_files.as_ref().unwrap().data_size,
+        catalog.len() as u64
+    );
+    let mut decoded = Vec::new();
+    image.cursor().read_to_end(&mut decoded).unwrap();
+    assert_eq!(&decoded[..payload.len()], payload);
+    assert!(decoded[payload.len()..].iter().all(|&byte| byte == 0));
+}
+
+#[test]
+fn lx01_preserves_declared_media_size_when_catalog_describes_a_shorter_file_span() {
+    let payload = vec![0x39; 4_029];
+    let catalog = lx01_catalog_with_media_size(payload.len() as u64);
+    let device = utf16le("1\nmain\nbp\tts\tdt\n4096\t2\tl\n\n");
+    let case = utf16le("1\nmain\nsb\n2\n\n");
+    let file =
+        synthetic_lx01_with_metadata(&payload, 8192, &catalog, &[(0x02, &case), (0x01, &device)]);
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    assert_eq!(image.info().logical_size, 8192);
+    assert_eq!(image.info().media.sector_count, Some(2));
+    assert_eq!(
+        image.info().single_files.as_ref().unwrap().data_size,
+        payload.len() as u64
+    );
+    let mut decoded = Vec::new();
+    image.cursor().read_to_end(&mut decoded).unwrap();
+    assert_eq!(&decoded[..payload.len()], payload);
+    assert!(decoded[payload.len()..].iter().all(|&byte| byte == 0));
 }
 
 #[test]

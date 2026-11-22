@@ -453,15 +453,18 @@ impl SingleFileAttribute {
     }
 }
 
-pub(crate) fn parse_ewf2_single_files_data(data: &[u8]) -> Result<SingleFilesInfo> {
+pub(crate) fn parse_ewf2_single_files_data(data: &[u8]) -> Result<(SingleFilesInfo, Option<u64>)> {
     parse_single_files_data(data, false)
 }
 
 pub(crate) fn parse_ewf1_single_files_data(data: &[u8]) -> Result<SingleFilesInfo> {
-    parse_single_files_data(data, true)
+    parse_single_files_data(data, true).map(|(catalog, _)| catalog)
 }
 
-fn parse_single_files_data(data: &[u8], require_record_size: bool) -> Result<SingleFilesInfo> {
+fn parse_single_files_data(
+    data: &[u8],
+    require_record_size: bool,
+) -> Result<(SingleFilesInfo, Option<u64>)> {
     let DecodedUtf16Lines {
         lines,
         mut invalid_utf16_lines,
@@ -474,7 +477,7 @@ fn parse_single_files_data(data: &[u8], require_record_size: bool) -> Result<Sin
 
     let mut category_index = 1;
 
-    let (data_size, next_category_index) = parse_record_category(&lines, category_index)?;
+    let (record_size, next_category_index) = parse_record_category(&lines, category_index)?;
     category_index = next_category_index;
     let (permission_groups, next_category_index) =
         parse_permission_groups_category(&lines, category_index)?;
@@ -502,7 +505,7 @@ fn parse_single_files_data(data: &[u8], require_record_size: bool) -> Result<Sin
         "EWF2 single files entry category types",
     )?;
 
-    let data_size = match data_size {
+    let data_size = match record_size {
         Some(size) => size,
         None if require_record_size => {
             return Err(EwfError::Malformed(
@@ -523,13 +526,16 @@ fn parse_single_files_data(data: &[u8], require_record_size: bool) -> Result<Sin
             "single files data has invalid UTF-16 outside an entry name".into(),
         ));
     }
-    Ok(SingleFilesInfo {
-        data_size,
-        root,
-        sources,
-        subjects,
-        permission_groups,
-    })
+    Ok((
+        SingleFilesInfo {
+            data_size,
+            root,
+            sources,
+            subjects,
+            permission_groups,
+        },
+        record_size,
+    ))
 }
 
 fn entry_by_path<'a>(
