@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# No external corpus is needed: these tests generate fixtures with pinned libewf
-# and independently inspect/export the Rust writer's output.
+# Compare generated fixtures and Rust writer output with pinned libewf.
+# Include the EnCase comparison when EWF_ENCASE7_LX01_FIXTURE is set.
 set -euo pipefail
 
 prefix=${1:?usage: test-interoperability.sh ABSOLUTE_LIBEWF_PREFIX}
@@ -29,6 +29,9 @@ run_case() {
   cargo test --locked --all-features -p "$package" --test "$suite" "$name" -- --exact --ignored --nocapture
 }
 
+if [[ -n ${EWF_ENCASE7_LX01_FIXTURE:-} ]]; then
+  run_case corpus external_encase7_lx01_issue_31_matches_libewf
+fi
 run_case corpus ewf_tool_generated_fixture_matrix_matches_oracles
 run_case corpus external_writer_outputs_match_ewfexport_stdout
 run_case corpus external_sequential_ewf1_split_matches_libewf
