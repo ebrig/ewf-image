@@ -52,7 +52,9 @@ a recognized checksum trailer continue to be readable.
 
 Complete split EWF1 output uses `next` on intermediate segments and `done` on
 the final segment. Incomplete output keeps `next` on its last segment and
-omits final digests.
+omits final digests. Standard EWF1 volume metadata describes the configured
+compression level; each table entry still records whether its chunk was
+actually compressed.
 
 ## Independent-tool coverage
 

@@ -13,6 +13,8 @@ code written for 0.4.0. See
   preserve completion markers and digests for the actual final segment.
 - Recognize smaller zlib windows in EWF2 metadata while keeping decompression
   bounded.
+- Report the configured zlib compression level in standard EWF1 volume
+  metadata without changing the reserved SMART volume field.
 - Update the experimental AFF4 crate to ZIP 9, propagating filename decoding
   errors and preserving duplicate-name checks and legacy storage discovery.
 
