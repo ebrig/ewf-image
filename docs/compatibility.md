@@ -45,6 +45,17 @@ listed in the separate
 | Encrypted writing | No | Not implemented for X-Ways EWF1 or EWF2 output. |
 | Base-plus-overlay delta/shadow writing | No | Not implemented. A verified reference format or API is required first. |
 
+A checksummed EWF1 raw final chunk can store a full chunk of bytes even if the
+media ends partway through it. The reader validates the stored payload
+including padding, then returns only the media bytes. EWF1 raw layouts without
+a recognized checksum trailer continue to be readable.
+
+Complete split EWF1 output uses `next` on intermediate segments and `done` on
+the final segment. Incomplete output keeps `next` on its last segment and
+omits final digests. Standard EWF1 volume metadata describes the configured
+compression level; each table entry still records whether its chunk was
+actually compressed.
+
 ## Independent-tool coverage
 
 An opt-in regression test over a synthetic corpus covers native WinAcq 20.3 E01

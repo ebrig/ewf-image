@@ -1324,7 +1324,8 @@ impl EwfWriter {
         Ok(next)
     }
 
-    /// Finalizes a complete image and writes a terminal `done` marker.
+    /// Finalizes a complete image with `next` markers on intermediate segments
+    /// and a `done` marker on the last segment.
     ///
     /// # Errors
     ///
@@ -1334,7 +1335,8 @@ impl EwfWriter {
         self.finish_with_terminal_section(TerminalSection::Done)
     }
 
-    /// Finalizes an incomplete image with a continuation marker.
+    /// Finalizes an incomplete image with a continuation (`next`) marker,
+    /// including on the last segment.
     ///
     /// # Errors
     ///
@@ -1443,7 +1445,7 @@ impl EwfWriter {
                         terminal_section: if is_last {
                             terminal
                         } else {
-                            TerminalSection::Done
+                            TerminalSection::Next
                         },
                     },
                 )?;
@@ -1498,7 +1500,8 @@ impl EwfWriter {
     /// Finalizes the image to explicitly supplied segment writers.
     ///
     /// The number of supplied writers must match the number of output segments
-    /// implied by the current writer configuration.
+    /// implied by the current writer configuration. Intermediate segments are
+    /// marked `next` and the last segment is marked `done`.
     ///
     /// # Errors
     ///
@@ -1591,8 +1594,8 @@ impl EwfWriter {
                 let segment_number = u16::try_from(index + 1).map_err(|_| {
                     EwfError::Unsupported("EWF1 writer segment count exceeds u16".into())
                 })?;
-                let sections =
-                    Ewf1SegmentSections::for_segment(index == 0, index + 1 == group_count);
+                let is_last = index + 1 == group_count;
+                let sections = Ewf1SegmentSections::for_segment(index == 0, is_last);
                 write_ewf1_segment(
                     &mut writer,
                     &mut spool,
@@ -1603,7 +1606,11 @@ impl EwfWriter {
                         chunk_count: chunk_count_u32,
                         sector_count,
                         sections,
-                        terminal_section: TerminalSection::Done,
+                        terminal_section: if is_last {
+                            TerminalSection::Done
+                        } else {
+                            TerminalSection::Next
+                        },
                     },
                 )?;
                 writer.flush()?;
@@ -2078,6 +2085,7 @@ fn validate_write_data_chunk(chunk: &DataChunk) -> Result<()> {
 
 fn decode_write_encoded_data_chunk(chunk: &EncodedDataChunk) -> Result<Vec<u8>> {
     validate_write_encoded_data_chunk(chunk)?;
+    chunk.validate_raw_checksum()?;
     decode_chunk(
         &chunk.data,
         encoded_data_chunk_encoding(chunk.encoding),
@@ -2140,7 +2148,9 @@ fn remembered_encoded_data_chunk(
 
     let encoded = match chunk.encoding {
         DataChunkEncoding::Raw => {
-            if chunk.has_checksum && !raw_encoded_data_chunk_checksum_is_valid(chunk) {
+            // The incoming trailer has already been checked. Re-encode a
+            // padded raw chunk for the target rather than copying its padding.
+            if chunk.has_checksum && chunk.data.len().checked_sub(4) != Some(chunk.logical_size) {
                 return None;
             }
             EncodedChunk {
@@ -2185,17 +2195,6 @@ fn encoded_data_chunk_encoding_compatible(
         }
         DataChunkEncoding::PatternFill(_) => is_ewf2_format(options.format),
     }
-}
-
-fn raw_encoded_data_chunk_checksum_is_valid(chunk: &EncodedDataChunk) -> bool {
-    let Some(checksum_offset) = chunk.logical_size.checked_add(4) else {
-        return false;
-    };
-    if chunk.data.len() != checksum_offset {
-        return false;
-    }
-    let expected = adler32(&chunk.data[..chunk.logical_size]).to_le_bytes();
-    chunk.data[chunk.logical_size..] == expected
 }
 
 fn validate_session_ranges(
@@ -5131,7 +5130,6 @@ fn volume_data(options: &WriteOptions, chunk_count: u32, sector_count: u64) -> R
     volume[4..8].copy_from_slice(&chunk_count.to_le_bytes());
     volume[8..12].copy_from_slice(&options.sectors_per_chunk.to_le_bytes());
     volume[12..16].copy_from_slice(&options.bytes_per_sector.to_le_bytes());
-    volume[52] = ewf1_compression_level_value(options.compression_values.level);
     if options.format == WriteFormat::Ewf1Smart {
         let sector_count = u32::try_from(sector_count)
             .map_err(|_| EwfError::Unsupported("EWF-S01 writer sector count exceeds u32".into()))?;
@@ -5139,6 +5137,9 @@ fn volume_data(options: &WriteOptions, chunk_count: u32, sector_count: u64) -> R
         volume[85..90].copy_from_slice(b"SMART");
     } else {
         volume[16..24].copy_from_slice(&sector_count.to_le_bytes());
+        // SMART uses this byte as padding, not a compression level.
+        volume[52] =
+            ewf1_compression_level_value(options.compression, options.compression_values.level);
     }
     if let Some(identifier) = options
         .set_identifier
@@ -5162,10 +5163,14 @@ fn volume_data(options: &WriteOptions, chunk_count: u32, sector_count: u64) -> R
     Ok(volume)
 }
 
-fn ewf1_compression_level_value(level: WriteCompressionLevel) -> u8 {
+fn ewf1_compression_level_value(compression: WriteCompression, level: WriteCompressionLevel) -> u8 {
+    if compression != WriteCompression::Zlib {
+        return 0;
+    }
     match level {
-        WriteCompressionLevel::Default | WriteCompressionLevel::None => 0,
-        WriteCompressionLevel::Fast => 1,
+        WriteCompressionLevel::None => 0,
+        // EWF1 has no separate label for the zlib default.
+        WriteCompressionLevel::Default | WriteCompressionLevel::Fast => 1,
         WriteCompressionLevel::Best => 2,
     }
 }

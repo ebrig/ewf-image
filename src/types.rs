@@ -850,7 +850,8 @@ pub struct EncodedDataChunk {
     pub encoded_size: u64,
     /// Encoding used by the chunk payload.
     pub encoding: DataChunkEncoding,
-    /// Whether raw chunk data includes a checksum trailer.
+    /// Whether raw chunk data ends with a checksum over the stored payload,
+    /// including any padding before the trailer.
     pub has_checksum: bool,
     /// Encoded chunk bytes.
     pub data: Vec<u8>,
@@ -863,9 +864,7 @@ impl EncodedDataChunk {
     ///
     /// Returns an error if checksum validation or decompression fails.
     pub fn read_buffer(&self, buffer: &mut [u8]) -> Result<usize> {
-        if self.has_checksum && self.encoding == DataChunkEncoding::Raw {
-            validate_raw_data_chunk_checksum(&self.data, self.logical_size)?;
-        }
+        self.validate_raw_checksum()?;
 
         let decoded = decode_chunk(
             &self.data,
@@ -873,6 +872,13 @@ impl EncodedDataChunk {
             self.logical_size,
         )?;
         Ok(copy_to_buffer(&decoded, buffer))
+    }
+
+    pub(crate) fn validate_raw_checksum(&self) -> Result<()> {
+        if self.has_checksum && self.encoding == DataChunkEncoding::Raw {
+            validate_raw_data_chunk_checksum(&self.data, self.logical_size)?;
+        }
+        Ok(())
     }
 }
 
@@ -893,21 +899,18 @@ fn data_chunk_encoding(encoding: DataChunkEncoding) -> ChunkEncoding {
 }
 
 fn validate_raw_data_chunk_checksum(encoded: &[u8], logical_size: usize) -> Result<()> {
-    let checksum_end = logical_size
-        .checked_add(4)
-        .ok_or_else(|| EwfError::Malformed("raw chunk checksum offset overflow".into()))?;
-    if encoded.len() < checksum_end {
-        return Err(EwfError::Malformed(
-            "raw chunk checksum trailer is missing".into(),
-        ));
-    }
-
+    let checksum_offset = encoded
+        .len()
+        .checked_sub(4)
+        .filter(|&offset| offset >= logical_size)
+        .ok_or_else(|| EwfError::Malformed("raw chunk checksum trailer is missing".into()))?;
+    let (payload, trailer) = encoded.split_at(checksum_offset);
     let stored = u32::from_le_bytes(
-        encoded[logical_size..checksum_end]
+        trailer
             .try_into()
             .expect("raw chunk checksum slice has fixed size"),
     );
-    let calculated = adler32(&encoded[..logical_size]);
+    let calculated = adler32(payload);
     if stored != calculated {
         return Err(EwfError::Malformed("raw chunk checksum mismatch".into()));
     }
