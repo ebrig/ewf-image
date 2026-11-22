@@ -6,17 +6,22 @@ code written for 0.4.0. See
 
 ## Unreleased
 
+- Update the experimental AFF4 crate to ZIP 9, propagating filename decoding
+  errors and preserving duplicate-name checks and legacy storage discovery.
+
+## 0.6.2 - 2026-11-22
+
 - Verify EWF1 raw chunk checksums over the complete stored payload when a
   partial final chunk is padded to full chunk size, before returning its
   logical bytes.
 - Write continuation markers on intermediate EWF1 output segments and
   preserve completion markers and digests for the actual final segment.
+  This applies to newly written output; existing split E01 images are not
+  rewritten.
 - Recognize smaller zlib windows in EWF2 metadata while keeping decompression
   bounded.
 - Report the configured zlib compression level in standard EWF1 volume
   metadata without changing the reserved SMART volume field.
-- Update the experimental AFF4 crate to ZIP 9, propagating filename decoding
-  errors and preserving duplicate-name checks and legacy storage discovery.
 
 ## 0.6.1 - 2026-10-11
 
