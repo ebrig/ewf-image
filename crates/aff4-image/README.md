@@ -5,7 +5,16 @@ evidence containers. The crate is versioned separately from `ewf-image` and adds
 no AFF4 dependencies or APIs to it. The supported profiles are listed below;
 public APIs and JSON output may change in future `0.x` releases.
 
-The workspace source version is 0.2.0.
+The workspace source version is 0.3.0.
+
+## Migrating from 0.2
+
+The ZIP dependency is now version 9. The public `aff4_image::Error::Zip`
+variant contains a ZIP 9 `zip::result::ZipError`. Applications that construct
+this variant or match its payload using their own direct `zip` dependency must
+update that dependency to version 9. Applications that only propagate
+`aff4_image::Error` need no error-handling changes. The minimum Rust version
+remains 1.96.
 
 ## Build and use
 
@@ -61,11 +70,11 @@ The default `write` feature adds writers. Disable default features for a
 reader-only dependency. The command-line program is the separate `ewf-cli`
 workspace package.
 
-For a published 0.2.x release, a reader-only application can use:
+For a published 0.3.x release, a reader-only application can use:
 
 ```toml
 [dependencies]
-aff4-image = { version = "0.2", default-features = false }
+aff4-image = { version = "0.3", default-features = false }
 ```
 
 The crate exposes a library API; installing this dependency does not add a
