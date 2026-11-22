@@ -118,21 +118,16 @@ fn source_metadata(
 }
 
 fn same_source(before: &fs::Metadata, after: &fs::Metadata) -> bool {
-    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
-        return false;
-    }
+    let same = before.len() == after.len() && before.modified().ok() == after.modified().ok();
     #[cfg(unix)]
-    {
+    let same = {
         use std::os::unix::fs::MetadataExt;
-        if before.ino() != after.ino()
-            || before.dev() != after.dev()
-            || before.ctime() != after.ctime()
-            || before.ctime_nsec() != after.ctime_nsec()
-        {
-            return false;
-        }
-    }
-    true
+        same && before.ino() == after.ino()
+            && before.dev() == after.dev()
+            && before.ctime() == after.ctime()
+            && before.ctime_nsec() == after.ctime_nsec()
+    };
+    same
 }
 
 fn open_regular(path: &Path) -> Result<File> {
