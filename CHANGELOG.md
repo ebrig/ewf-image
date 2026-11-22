@@ -6,6 +6,13 @@ code written for 0.4.0. See
 
 ## Unreleased
 
+- Verify EWF1 raw chunk checksums over the complete stored payload when a
+  partial final chunk is padded to full chunk size, before returning its
+  logical bytes.
+- Write continuation markers on intermediate EWF1 output segments and
+  preserve completion markers and digests for the actual final segment.
+- Recognize smaller zlib windows in EWF2 metadata while keeping decompression
+  bounded.
 - Update the experimental AFF4 crate to ZIP 9, propagating filename decoding
   errors and preserving duplicate-name checks and legacy storage discovery.
 

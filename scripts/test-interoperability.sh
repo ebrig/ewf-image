@@ -31,6 +31,7 @@ run_case() {
 
 run_case corpus ewf_tool_generated_fixture_matrix_matches_oracles
 run_case corpus external_writer_outputs_match_ewfexport_stdout
+run_case corpus external_sequential_ewf1_split_matches_libewf
 run_case corpus external_writer_metadata_matches_ewfinfo
 run_case corpus external_writer_range_sections_match_ewfinfo
 run_case corpus external_writer_resumed_output_matches_ewf_tools

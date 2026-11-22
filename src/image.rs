@@ -237,7 +237,7 @@ struct Chunk {
     encoded_size: u64,
     logical_size: usize,
     encoding: ChunkEncoding,
-    validate_checksum: bool,
+    checksum_offset: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -1745,7 +1745,7 @@ impl Image {
             logical_size: chunk.logical_size,
             encoded_size: chunk.encoded_size,
             encoding: data_chunk_encoding(chunk.encoding),
-            has_checksum: chunk.validate_checksum,
+            has_checksum: chunk.checksum_offset.is_some(),
             data,
         })
     }
@@ -1916,11 +1916,11 @@ impl Image {
             encoded_size,
             logical_size,
             encoding,
-            validate_checksum: encoding == ChunkEncoding::Raw
-                && u64::try_from(logical_size)
-                    .ok()
-                    .and_then(|size| size.checked_add(4))
-                    == Some(encoded_size),
+            checksum_offset: if encoding == ChunkEncoding::Raw {
+                ewf1_raw_checksum_offset(encoded_size, logical_size, self.inner.info.chunk_size)
+            } else {
+                None
+            },
         })
     }
 
@@ -1954,8 +1954,9 @@ impl Image {
             }
             ewf2::ChunkKind::PatternFill => ChunkEncoding::PatternFill(entry.chunk_data_offset),
         };
-        let validate_checksum = matches!(encoding, ChunkEncoding::Raw)
-            && entry.flags & ewf2::CHUNK_FLAG_HAS_CHECKSUM != 0;
+        let checksum_offset = (matches!(encoding, ChunkEncoding::Raw)
+            && entry.flags & ewf2::CHUNK_FLAG_HAS_CHECKSUM != 0)
+            .then_some(logical_size);
         validate_encoded_size(
             u64::from(entry.chunk_data_size),
             self.inner.info.chunk_size,
@@ -1967,7 +1968,7 @@ impl Image {
             encoded_size: u64::from(entry.chunk_data_size),
             logical_size,
             encoding,
-            validate_checksum,
+            checksum_offset,
         })
     }
 
@@ -2180,8 +2181,8 @@ impl Image {
 
     fn decode_chunk(&self, chunk_id: u64, chunk: Chunk) -> Result<Vec<u8>> {
         let encoded = self.read_encoded_chunk_bytes(chunk_id, chunk)?;
-        if chunk.validate_checksum {
-            validate_raw_chunk_checksum(&encoded, chunk.logical_size)?;
+        if let Some(offset) = chunk.checksum_offset {
+            validate_raw_chunk_checksum(&encoded, offset)?;
         }
         let decompression_started = (self.inner.statistics.enabled()
             && matches!(
@@ -4876,14 +4877,28 @@ fn validate_adler32_checksum_value(stored: u32, checksum_data: &[u8], label: &st
     Ok(())
 }
 
-fn validate_raw_chunk_checksum(encoded: &[u8], logical_size: usize) -> Result<()> {
-    let checksum_offset = logical_size;
-    if encoded.len() < checksum_offset + 4 {
+fn ewf1_raw_checksum_offset(
+    encoded_size: u64,
+    logical_size: usize,
+    chunk_size: u64,
+) -> Option<usize> {
+    let stored_payload = encoded_size.checked_sub(4)?;
+    // EWF1 has no per-entry checksum flag. Recognize the normal trailer
+    // and the trailer after a full-size stored chunk on a shorter media tail.
+    // A raw span without either trailer keeps its legacy interpretation.
+    if u64::try_from(logical_size).ok() != Some(stored_payload) && stored_payload != chunk_size {
+        return None;
+    }
+    usize::try_from(stored_payload).ok()
+}
+
+fn validate_raw_chunk_checksum(encoded: &[u8], checksum_offset: usize) -> Result<()> {
+    if encoded.len().saturating_sub(checksum_offset) < 4 {
         return Err(EwfError::Malformed(
             "raw chunk checksum trailer is missing".into(),
         ));
     }
-    validate_adler32_checksum(encoded, checksum_offset, logical_size, "raw chunk")
+    validate_adler32_checksum(encoded, checksum_offset, checksum_offset, "raw chunk")
 }
 
 fn adler32(data: &[u8]) -> u32 {
@@ -5003,7 +5018,18 @@ fn ewf2_metadata_payload(
     data: &[u8],
     _compression_method: ewf2::CompressionMethod,
 ) -> Result<Vec<u8>> {
-    if data.first() == Some(&0x78) {
+    // Uncompressed UTF-16LE metadata is also legal, so check the full RFC 1950 header:
+    // DEFLATE, a window no larger than 32 KiB, and the header's modulo-31 check.
+    if let [method, flags, ..] = *data
+        && method & 0x0f == 8
+        && method >> 4 <= 7
+        && u16::from_be_bytes([method, flags]).is_multiple_of(31)
+    {
+        if flags & 0x20 != 0 {
+            return Err(EwfError::Malformed(
+                "EWF2 metadata zlib stream requires an unsupported preset dictionary".into(),
+            ));
+        }
         return decompress_metadata(flate2::read::ZlibDecoder::new(data), "EWF2");
     }
     if data.starts_with(b"BZh") {
@@ -5219,6 +5245,45 @@ mod tests {
         assert_eq!(
             ewf2_metadata_payload(&compressed, ewf2::CompressionMethod::Zlib).unwrap(),
             b"metadata"
+        );
+    }
+
+    #[test]
+    fn ewf2_metadata_decodes_zlib_with_a_small_window() {
+        // UTF-16LE BOM and "metadata", compressed with a 4 KiB zlib window.
+        let compressed = [
+            0x48, 0x89, 0xfb, 0xff, 0x2f, 0x97, 0x21, 0x95, 0xa1, 0x84, 0x21, 0x91, 0x21, 0x05,
+            0x88, 0x41, 0x34, 0x00, 0x40, 0x66, 0x05, 0x3f,
+        ];
+        assert_eq!(
+            decode_ewf2_string_section(&compressed, ewf2::CompressionMethod::Zlib, "case data")
+                .unwrap(),
+            "metadata"
+        );
+
+        let mut damaged = compressed;
+        *damaged.last_mut().unwrap() ^= 1;
+        assert!(matches!(
+            ewf2_metadata_payload(&damaged, ewf2::CompressionMethod::Zlib),
+            Err(EwfError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn ewf2_metadata_keeps_plain_utf16_with_an_invalid_zlib_header_check() {
+        assert_eq!(
+            decode_ewf2_string_section(b"H\0i\0", ewf2::CompressionMethod::Zlib, "case data")
+                .unwrap(),
+            "Hi"
+        );
+    }
+
+    #[test]
+    fn ewf2_metadata_rejects_zlib_with_a_preset_dictionary() {
+        let error =
+            ewf2_metadata_payload(&[0x48, 0x2c], ewf2::CompressionMethod::Zlib).unwrap_err();
+        assert!(
+            matches!(error, EwfError::Malformed(message) if message.contains("preset dictionary"))
         );
     }
 }

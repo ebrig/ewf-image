@@ -31,6 +31,7 @@ include = [
     "/tests/acquisition.rs",
     "/tests/corpus.rs",
     "/tests/encryption.rs",
+    "/tests/ewf1_segment_markers.rs",
     "/tests/data/xways-encrypted/**",
     "/tests/reader.rs",
     "/tests/reader_performance.rs",

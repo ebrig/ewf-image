@@ -286,7 +286,11 @@ impl SequentialWriter {
                     chunk_count: self.total_chunks,
                     sector_count,
                     sections: Ewf1SegmentSections::for_segment(number == 1, last),
-                    terminal_section: super::TerminalSection::Done,
+                    terminal_section: if last {
+                        super::TerminalSection::Done
+                    } else {
+                        super::TerminalSection::Next
+                    },
                 },
             )?;
             if let Some(limit) = normalize_maximum_segment_size(self.options.maximum_segment_size)
@@ -321,6 +325,7 @@ impl SequentialWriter {
     }
 
     /// Checks the source length, pads the last sector, and publishes all segments.
+    /// Intermediate segments are marked `next` and the last is marked `done`.
     pub fn finish(mut self) -> Result<WriteResult> {
         self.healthy()?;
         let is_v2 = is_ewf2_format(self.options.format);

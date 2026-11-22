@@ -565,12 +565,18 @@ fn synthetic_e01_raw(data: &[u8]) -> NamedTempFile {
 }
 
 fn synthetic_e01_final_partial_raw_chunk_with_checksum(data: &[u8]) -> NamedTempFile {
+    let mut encoded = data.to_vec();
+    encoded.extend_from_slice(&adler32(data).to_le_bytes());
+    synthetic_e01_final_partial_raw_chunk(&encoded)
+}
+
+fn synthetic_e01_final_partial_raw_chunk(encoded: &[u8]) -> NamedTempFile {
     let table_desc_offset = 13_u64 + 76 + 94;
     let table_data_offset = table_desc_offset + 76;
     let table_entries_offset = table_data_offset + 24;
     let sectors_desc_offset = table_entries_offset + 4;
     let sectors_data_offset = sectors_desc_offset + 76;
-    let raw_size = data.len() as u64 + 4;
+    let raw_size = encoded.len() as u64;
     let done_desc_offset = sectors_data_offset + raw_size;
 
     let mut bytes = Vec::new();
@@ -595,8 +601,7 @@ fn synthetic_e01_final_partial_raw_chunk_with_checksum(data: &[u8]) -> NamedTemp
     bytes.extend_from_slice(&0_u32.to_le_bytes());
 
     bytes.extend_from_slice(&section_desc(b"sectors", done_desc_offset, 76 + raw_size));
-    bytes.extend_from_slice(data);
-    bytes.extend_from_slice(&adler32(data).to_le_bytes());
+    bytes.extend_from_slice(encoded);
     bytes.extend_from_slice(&section_desc(b"done", 0, 76));
 
     write_temp_with_suffix(".E01", &bytes)
@@ -4736,6 +4741,57 @@ fn image_open_reads_ewf1_final_partial_raw_chunk_with_checksum() {
     assert_eq!(chunk.logical_size, expected.len());
     assert_eq!(chunk.data, expected);
     assert!(!chunk.corrupted);
+}
+
+#[test]
+fn ewf1_padded_raw_tail_validates_the_whole_stored_payload() {
+    let expected = vec![0x5a; 512];
+    let mut stored = expected.clone();
+    stored.resize(32_768, 0x19);
+    let legacy = synthetic_e01_final_partial_raw_chunk(&stored);
+    let legacy = ewf_image::Image::open(legacy.path()).unwrap();
+    assert!(!legacy.read_encoded_data_chunk(0).unwrap().has_checksum);
+    assert_eq!(legacy.read_data_chunk(0).unwrap().data, expected);
+
+    let checksum = adler32(&stored);
+    stored.extend_from_slice(&checksum.to_le_bytes());
+    let good = synthetic_e01_final_partial_raw_chunk(&stored);
+    let image = ewf_image::Image::open(good.path()).unwrap();
+    let mut output = [0; 513];
+    assert_eq!(image.read_at(&mut output, 0).unwrap(), 512);
+    assert_eq!(&output[..512], &expected);
+    assert_eq!(image.read_at(&mut output, 512).unwrap(), 0);
+    let encoded = image.read_encoded_data_chunk(0).unwrap();
+    assert!(encoded.has_checksum);
+    assert_eq!(encoded.data, stored);
+    assert_eq!(encoded.read_buffer(&mut output).unwrap(), 512);
+    assert_eq!(&output[..512], &expected);
+
+    for bad_index in [0, 512, 32_768] {
+        let mut damaged = stored.clone();
+        damaged[bad_index] ^= 1;
+        let source = synthetic_e01_final_partial_raw_chunk(&damaged);
+        let image = ewf_image::Image::open(source.path()).unwrap();
+        let read_error = image.read_at(&mut output, 0).unwrap_err();
+        let encoded = image.read_encoded_data_chunk(0).unwrap();
+        let encoded_error = encoded.read_buffer(&mut output).unwrap_err();
+        for error in [read_error, encoded_error] {
+            assert!(matches!(
+                error,
+                ewf_image::EwfError::Malformed(message) if message == "raw chunk checksum mismatch"
+            ));
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let mut writer = ewf_image::EwfWriter::create(
+            temp.path().join("reencoded.E01"),
+            ewf_image::WriteOptions::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            writer.write_encoded_data_chunk(&encoded),
+            Err(ewf_image::EwfError::Malformed(message)) if message == "raw chunk checksum mismatch"
+        ));
+    }
 }
 
 #[test]
