@@ -6,6 +6,8 @@ code written for 0.4.0. See
 
 ## Unreleased
 
+## 0.6.3 - 2026-11-22
+
 - Read EnCase 7 Lx01 images with geometry split across case and device metadata.
   Use exact catalog media length when no sector count is declared and validate
   final zlib sector padding before trimming it.
