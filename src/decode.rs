@@ -115,7 +115,43 @@ fn decode_xways_zstd(
     decode_compressed(decoder, logical_size, maximum_decoded_size)
 }
 
+/// Decodes the final zlib chunk of a catalog-sized logical EWF2 image.
+pub(crate) fn decode_ewf2_sector_padded_zlib_chunk(
+    encoded: &[u8],
+    logical_size: usize,
+    padded_size: usize,
+) -> Result<Vec<u8>> {
+    let mut decoded =
+        read_bounded_compressed(ZlibDecoder::new(encoded), logical_size, padded_size)?;
+    if decoded.len() == logical_size {
+        return Ok(decoded);
+    }
+    if decoded.len() != padded_size {
+        return Err(EwfError::Malformed(format!(
+            "decoded EWF2 final chunk has {} bytes, expected {logical_size} or {padded_size}",
+            decoded.len()
+        )));
+    }
+    if decoded[logical_size..].iter().any(|&byte| byte != 0) {
+        return Err(EwfError::Malformed(
+            "decoded EWF2 final chunk has nonzero sector padding".into(),
+        ));
+    }
+    decoded.truncate(logical_size);
+    Ok(decoded)
+}
+
 fn decode_compressed(
+    reader: impl Read,
+    logical_size: usize,
+    maximum_decoded_size: usize,
+) -> Result<Vec<u8>> {
+    let mut decoded = read_bounded_compressed(reader, logical_size, maximum_decoded_size)?;
+    decoded.truncate(logical_size);
+    Ok(decoded)
+}
+
+fn read_bounded_compressed(
     mut reader: impl Read,
     logical_size: usize,
     maximum_decoded_size: usize,
@@ -141,7 +177,6 @@ fn decode_compressed(
             decoded.len()
         )));
     }
-    decoded.truncate(logical_size);
     Ok(decoded)
 }
 
@@ -245,6 +280,25 @@ mod tests {
         assert!(decode_chunk_with_padding(&encoded, ChunkEncoding::Zlib, 7, 18).is_err());
         assert!(decode_chunk_with_padding(&encoded, ChunkEncoding::Zlib, 30, 32).is_err());
         assert!(decode_chunk(&encoded, ChunkEncoding::Zlib, 7).is_err());
+    }
+
+    #[test]
+    fn ewf2_sector_padding_accepts_exact_or_zero_padded_output() {
+        for bytes in [b"content".as_slice(), b"content\0"] {
+            let encoded = zlib(bytes);
+            assert_eq!(
+                decode_ewf2_sector_padded_zlib_chunk(&encoded, 7, 8).unwrap(),
+                b"content"
+            );
+        }
+    }
+
+    #[test]
+    fn ewf2_sector_padding_preserves_nonpadding_data_and_bounds() {
+        assert!(decode_ewf2_sector_padded_zlib_chunk(&zlib(b"contents"), 7, 8).is_err());
+        assert!(decode_ewf2_sector_padded_zlib_chunk(&zlib(b"content\0\0"), 7, 8).is_err());
+        assert!(decode_ewf2_sector_padded_zlib_chunk(&zlib(b"item\0"), 4, 8).is_err());
+        assert!(decode_chunk(&zlib(b"content\0"), ChunkEncoding::Zlib, 7).is_err());
     }
 
     #[test]

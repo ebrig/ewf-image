@@ -174,6 +174,23 @@ and environment configuration. Corpus tests requested with `--ignored` fail if
 the configured corpus is missing or empty. The strict closeout tests also require
 every documented fixture family.
 
+### EnCase 7 Lx01 regression
+
+For [issue #31](https://github.com/ebrig/ewf-image/issues/31), place the
+[Keramics sample](https://github.com/keramics/keramics/blob/a3623ffbfa02a39d1104c6e83e6d9277bf020d36/test_data/ewf/ntfs.Lx01)
+outside the repository. The test checks the sample's SHA-256 before opening it.
+Point `EWFEXPORT` at libewf 20261110 built from
+[the comparison revision](https://github.com/libyal/libewf/tree/b6f8123f6b4262ff5a224df4705cb28af16f7679):
+
+```bash
+EWF_ENCASE7_LX01_FIXTURE=/absolute/path/ntfs.Lx01 EWFEXPORT=/absolute/path/ewfexport \
+  cargo test --locked -p ewf-image --features external-fixtures --test corpus \
+  external_encase7_lx01_issue_31_matches_libewf -- --ignored --exact
+```
+
+This checks the merged chunk geometry, exact 14,432,450-byte length and EOF,
+decoded media digests, and byte-for-byte agreement with libewf's raw export.
+
 ## Interoperability CI
 
 The interoperability CI job builds libewf **20260924** from its release archive,

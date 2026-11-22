@@ -132,6 +132,49 @@ fn external_corpus_matches_ewfexport_stdout() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+#[cfg(feature = "verify")]
+#[ignore = "requires the pinned EnCase 7 Lx01 fixture and libewf ewfexport"]
+fn external_encase7_lx01_issue_31_matches_libewf() -> Result<(), Box<dyn Error>> {
+    const MEDIA_SIZE: u64 = 14_432_450;
+    let path = PathBuf::from(
+        env::var_os("EWF_ENCASE7_LX01_FIXTURE").ok_or("set EWF_ENCASE7_LX01_FIXTURE")?,
+    );
+    let ewfexport = env::var_os("EWFEXPORT").ok_or("set EWFEXPORT to pinned libewf ewfexport")?;
+    assert_eq!(fs::metadata(&path)?.len(), 384_192);
+    assert_eq!(
+        sha256_hex(&fs::read(&path)?),
+        "72971f4d9ddc2e925f3e99b30c0aa70d1ee49b54e68b7d15aa3fcf318435e552"
+    );
+
+    let image = ewf_image::Image::open(&path)?;
+    let info = image.info();
+    assert_eq!(
+        info.format_profile,
+        ewf_image::FormatProfile::Ewf2LogicalEnCase7
+    );
+    assert_eq!(info.media.bytes_per_sector, Some(4096));
+    assert_eq!(info.media.sectors_per_chunk, Some(64));
+    assert_eq!(info.media.sector_count, Some(3524));
+    assert_eq!(info.media.chunk_count, Some(56));
+    assert_eq!(info.chunk_size, 262_144);
+    assert_eq!(info.logical_size, MEDIA_SIZE);
+    assert_eq!(image.read_at(&mut [0], MEDIA_SIZE - 1)?, 1);
+    assert_eq!(image.read_at(&mut [0], MEDIA_SIZE)?, 0);
+
+    let report = image.verify_with_options(&ewf_image::VerifyOptions::default())?;
+    assert_eq!(report.bytes_verified, MEDIA_SIZE);
+    assert_eq!(
+        hex_lower(&report.hashes.md5),
+        "e4c6af5d4272ef1535713222044188dd"
+    );
+    assert_eq!(
+        hex_lower(&report.hashes.sha256),
+        "0d18915d2aed385ff078408f5c8bbb61528ec6008b33a845ea4c5662d1f81685"
+    );
+    compare_with_ewfexport(&ewfexport, &path)
+}
+
+#[test]
 #[ignore = "requires local external corpus and ewfinfo"]
 fn external_corpus_matches_ewfinfo_metadata() -> Result<(), Box<dyn Error>> {
     let ewfinfo = env::var_os("EWFINFO").unwrap_or_else(|| OsString::from("ewfinfo"));
