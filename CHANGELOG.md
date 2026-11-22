@@ -6,7 +6,7 @@ code written for 0.4.0. See
 
 ## Unreleased
 
-## aff4-image 0.3.0 - 2026-10-24
+## aff4-image 0.3.0 - 2026-11-22
 
 - The public `Error::Zip` variant now contains ZIP 9's error type. Applications
   that match or construct its payload using a direct `zip` dependency must
