@@ -6,6 +6,9 @@ code written for 0.4.0. See
 
 ## Unreleased
 
+- Read final uncompressed EnCase Lx01 chunks with zero sector padding,
+  verifying the checksum over the full stored payload before trimming it.
+
 - Report missing reference digests and digest mismatches separately in
   whole-image EWF CLI verification. Both outcomes still exit with code 3.
 

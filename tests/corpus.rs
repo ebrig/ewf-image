@@ -175,6 +175,43 @@ fn external_encase7_lx01_issue_31_matches_libewf() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
+#[cfg(feature = "verify")]
+#[ignore = "requires the pinned stored EnCase Imager 7.10 Lx01 fixture and libewf ewfexport"]
+fn external_encase_imager_710_stored_lx01_matches_libewf() -> Result<(), Box<dyn Error>> {
+    const MEDIA_SIZE: u64 = 69_103;
+    let path = PathBuf::from(
+        env::var_os("EWF_ENCASE_IMAGER_710_STORED_LX01_FIXTURE")
+            .ok_or("set EWF_ENCASE_IMAGER_710_STORED_LX01_FIXTURE")?,
+    );
+    let ewfexport = env::var_os("EWFEXPORT").ok_or("set EWFEXPORT to libewf ewfexport")?;
+    assert_eq!(fs::metadata(&path)?.len(), 89_888);
+    assert_eq!(
+        sha256_hex(&fs::read(&path)?),
+        "82e532f574d51c799d79eec35b69e4a170b58cf90827512a50188490bedb27c0"
+    );
+
+    let image = ewf_image::Image::open(&path)?;
+    let info = image.info();
+    assert_eq!(
+        info.format_profile,
+        ewf_image::FormatProfile::Ewf2LogicalEnCase7
+    );
+    assert_eq!(info.media.bytes_per_sector, Some(4096));
+    assert_eq!(info.chunk_size, 262_144);
+    assert_eq!(info.logical_size, MEDIA_SIZE);
+    assert_eq!(image.read_at(&mut [0], MEDIA_SIZE - 1)?, 1);
+    assert_eq!(image.read_at(&mut [0], MEDIA_SIZE)?, 0);
+
+    let report = image.verify_with_options(&ewf_image::VerifyOptions::default())?;
+    assert_eq!(report.bytes_verified, MEDIA_SIZE);
+    assert_eq!(
+        hex_lower(&report.hashes.sha256),
+        "bb025c2ffa6b779165bb6faee56d71aa6a1e75033dce3171e159656b241f4c5c"
+    );
+    compare_with_ewfexport(&ewfexport, &path)
+}
+
+#[test]
 #[ignore = "requires local external corpus and ewfinfo"]
 fn external_corpus_matches_ewfinfo_metadata() -> Result<(), Box<dyn Error>> {
     let ewfinfo = env::var_os("EWFINFO").unwrap_or_else(|| OsString::from("ewfinfo"));
