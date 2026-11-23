@@ -110,10 +110,14 @@ jobs:
       - name: Compare fixtures and writer output
         env:
           EWF_ENCASE7_LX01_FIXTURE: ${{ runner.temp }}/encase7-ntfs.Lx01
+          EWF_ENCASE_IMAGER_710_STORED_LX01_FIXTURE: ${{ runner.temp }}/encase-imager-710-nocomp.Lx01
         run: |
           curl --fail --location --retry 3 --max-time 60 \
             --output "$EWF_ENCASE7_LX01_FIXTURE" \
             https://raw.githubusercontent.com/keramics/keramics/a3623ffbfa02a39d1104c6e83e6d9277bf020d36/test_data/ewf/ntfs.Lx01
+          curl --fail --location --retry 3 --max-time 60 \
+            --output "$EWF_ENCASE_IMAGER_710_STORED_LX01_FIXTURE" \
+            https://raw.githubusercontent.com/abrignoni/ewfprobe/7aaeb95f1f49c56a6365beb745e8ba43f687448b/tests/fixtures/lx01-encase-imager-710-nocomp.Lx01
           bash scripts/test-interoperability.sh "$RUNNER_TEMP/libewf"
 
       - name: Canonical AFF4 reference

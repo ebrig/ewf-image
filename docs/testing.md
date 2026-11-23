@@ -207,11 +207,12 @@ EWF_ENCASE7_LX01_FIXTURE=/absolute/path/ntfs.Lx01 \
 
 ### EnCase Imager 7.10 stored Lx01 regression
 
-The opt-in raw-media comparison uses the pinned
+The interoperability CI job downloads the pinned
 [uncompressed EnCase Imager 7.10 sample](https://github.com/abrignoni/ewfprobe/blob/7aaeb95f1f49c56a6365beb745e8ba43f687448b/tests/fixtures/lx01-encase-imager-710-nocomp.Lx01).
-The sample was made from synthetic files. The test verifies the download
-hash, checks the exact 69,103-byte length and EOF, and compares the decoded
-stream with libewf's raw export. It does not assert catalog file extraction.
+The sample was made from synthetic files. The raw-media test verifies the
+download hash, checks the exact 69,103-byte length and EOF, and compares the
+decoded stream with libewf's raw export. Use the pinned libewf build to run
+the test locally.
 
 ```bash
 EWF_ENCASE_IMAGER_710_STORED_LX01_FIXTURE=/absolute/path/lx01-encase-imager-710-nocomp.Lx01 \
