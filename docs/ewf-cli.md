@@ -151,6 +151,9 @@ in an AFF4 container. Select an AFF4 resource explicitly when the container hold
 more than one. The report states the scope of a selected-resource check
 separately from whole-container verification.
 
+For EWF images, see [whole-image verification](cli.md#whole-image-verification)
+for the diagnostics and JSON fields for missing and mismatching digests.
+
 Whole-image EWF verification automatically uses the host's available
 parallelism, capped at 64 workers, with bounded batches. Compressed EWF2 images
 may benefit, but storage and codec determine throughput. Selected-file, AFF4,
@@ -191,7 +194,7 @@ acquisition and recovery options, use `ewf-cli ewf <command>`. The
 | 0 | Requested operation completed with its stated verification scope |
 | 1 | Operational failure |
 | 2 | Invalid command syntax |
-| 3 | Verification mismatch or EWF analysis errors |
+| 3 | Verification mismatch, missing whole-image EWF reference, or EWF analysis errors |
 | 4 | Incomplete references, substitutions, metadata omissions, or other findings |
 | 130 | Cancelled |
 

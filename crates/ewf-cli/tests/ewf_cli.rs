@@ -1234,9 +1234,17 @@ fn cli_export_distinguishes_absent_references_from_verified_media() {
     let dir = tempfile::tempdir().unwrap();
     let bytes = source(dir.path());
     export_fixture(dir.path(), &bytes, ewf_image::WriteOptions::default());
-    let path = dir.path().join("case.E01");
-    let image = Image::open(&path).unwrap();
-    let mut data = fs::read(&path).unwrap();
+    remove_ewf1_reference_digests(&dir.path().join("case.E01"));
+    let report = result(dir.path(), &["export", "case.E01", "disk.raw"], 0);
+    assert!(report["verification"]["references_match"].is_null());
+    assert_eq!(report["media_verified"], false);
+    assert_eq!(report["verification"]["sha256"], hash(&bytes));
+    assert_eq!(fs::read(dir.path().join("disk.raw")).unwrap(), bytes);
+}
+
+fn remove_ewf1_reference_digests(path: &Path) {
+    let image = Image::open(path).unwrap();
+    let mut data = fs::read(path).unwrap();
     for section in image.sections().iter().filter(|s| matches!(&s.kind, ewf_image::SectionKind::Ewf1(name) if name == "hash" || name == "digest" || name == "xhash")) {
         let offset = section.descriptor_offset as usize;
         data[offset..offset + 16].fill(0);
@@ -1245,11 +1253,6 @@ fn cli_export_distinguishes_absent_references_from_verified_media() {
     }
     drop(image);
     fs::write(path, data).unwrap();
-    let report = result(dir.path(), &["export", "case.E01", "disk.raw"], 0);
-    assert!(report["verification"]["references_match"].is_null());
-    assert_eq!(report["media_verified"], false);
-    assert_eq!(report["verification"]["sha256"], hash(&bytes));
-    assert_eq!(fs::read(dir.path().join("disk.raw")).unwrap(), bytes);
 }
 
 fn running_export(directory: &Path) -> std::process::Child {
@@ -1676,6 +1679,46 @@ fn cli_corrupt_output_is_verification_failure() {
     file.write_all(b"corrupt!").unwrap();
     let report = result(dir.path(), &["verify", "case.E01"], 3);
     assert_eq!(report["status"], "verification_failed");
+}
+
+#[test]
+fn cli_verify_reports_a_missing_reference_digest() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = source(dir.path());
+    export_fixture(dir.path(), &bytes, ewf_image::WriteOptions::default());
+    remove_ewf1_reference_digests(&dir.path().join("case.E01"));
+
+    let report = result(dir.path(), &["verify", "case.E01"], 3);
+    assert_eq!(report["status"], "verification_failed");
+    assert_eq!(
+        report["error"],
+        "no supported reference digest is available for comparison"
+    );
+    assert!(report["verification"]["references_match"].is_null());
+    assert_eq!(report["verification"]["bytes_verified"], bytes.len());
+    assert_eq!(report["verification"]["sha256"], hash(&bytes));
+}
+
+#[test]
+fn cli_verify_reports_a_reference_digest_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = source(dir.path());
+    let mut options = ewf_image::WriteOptions::default();
+    options
+        .hashes
+        .set_hash_value("SHA256", "11".repeat(32))
+        .unwrap();
+    export_fixture(dir.path(), &bytes, options);
+
+    let report = result(dir.path(), &["verify", "case.E01"], 3);
+    assert_eq!(report["status"], "verification_failed");
+    assert_eq!(
+        report["error"],
+        "a computed media digest does not match its reference"
+    );
+    assert_eq!(report["verification"]["references_match"], false);
+    assert_eq!(report["verification"]["bytes_verified"], bytes.len());
+    assert_eq!(report["verification"]["sha256"], hash(&bytes));
 }
 
 #[test]
