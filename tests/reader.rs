@@ -2867,7 +2867,7 @@ fn single_files_stream_with_single_extent(offset: u64, size: u64) -> Vec<u8> {
     utf16le_lines(lines)
 }
 
-fn single_files_stream_with_ewf1_sparse_entry(
+fn single_files_stream_with_sparse_entry(
     size: u64,
     extent: &str,
     duplicate_offset: &str,
@@ -6891,7 +6891,7 @@ fn image_open_parses_ewf1_ltree_single_files_data() {
 fn image_reads_ewf1_sparse_entry_from_duplicate_offset_before_extent() {
     let file = synthetic_l01_with_ltree(
         b"XbadHELLOtail",
-        &single_files_stream_with_ewf1_sparse_entry(5, "1 0 1", "4"),
+        &single_files_stream_with_sparse_entry(5, "1 0 1", "4"),
     );
     let image = ewf_image::Image::open(file.path()).unwrap();
     let child = &image.info().single_files.as_ref().unwrap().root.children[0];
@@ -7002,7 +7002,7 @@ fn image_rejects_unpaired_utf16_outside_entry_name() {
 fn image_reads_ewf1_sparse_entry_as_repeated_stored_byte() {
     let file = synthetic_l01_with_ltree(
         b"Qother-data",
-        &single_files_stream_with_ewf1_sparse_entry(7, "1 0 1", ""),
+        &single_files_stream_with_sparse_entry(7, "1 0 1", ""),
     );
     let image = ewf_image::Image::open(file.path()).unwrap();
     let child = &image.info().single_files.as_ref().unwrap().root.children[0];
@@ -7016,7 +7016,7 @@ fn image_reads_ewf1_sparse_entry_as_repeated_stored_byte() {
 fn image_rejects_ewf1_sparse_entry_without_stored_data() {
     let file = synthetic_l01_with_ltree(
         b"other-data",
-        &single_files_stream_with_ewf1_sparse_entry(7, "0", ""),
+        &single_files_stream_with_sparse_entry(7, "0", ""),
     );
     let image = ewf_image::Image::open(file.path()).unwrap();
     let child = &image.info().single_files.as_ref().unwrap().root.children[0];
@@ -7123,6 +7123,50 @@ fn lx01_recognizes_an_omitted_empty_file_size_with_a_placeholder_extent() {
         );
         assert_eq!(byte, *b"A");
     }
+}
+
+#[test]
+fn lx01_reads_a_sparse_duplicate_from_its_referenced_offset() {
+    let file = synthetic_lx01_leading_single_files_data_with_stream(
+        b"XbadHELLOtail",
+        &single_files_stream_with_sparse_entry(5, "1 0 1", "4"),
+    );
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    let catalog = image.info().single_files.as_ref().unwrap();
+    let entry = catalog.entry_by_path("sparse.bin").unwrap().unwrap();
+    let mut full = [0; 5];
+    let mut middle = [0; 3];
+    assert_eq!(image.read_single_file_at(entry, &mut full, 0).unwrap(), 5);
+    assert_eq!(&full, b"HELLO");
+    assert_eq!(
+        image
+            .read_single_file_at_strict(entry, &mut middle, 1)
+            .unwrap(),
+        3
+    );
+    assert_eq!(&middle, b"ELL");
+    assert_eq!(
+        image
+            .read_single_file_at_strict(entry, &mut middle, 5)
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn lx01_rejects_a_truncated_sparse_duplicate() {
+    let file = synthetic_lx01_leading_single_files_data_with_stream(
+        b"XbadHELLOtail",
+        &single_files_stream_with_sparse_entry(5, "1 0 1", "32766"),
+    );
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    let catalog = image.info().single_files.as_ref().unwrap();
+    let entry = catalog.entry_by_path("sparse.bin").unwrap().unwrap();
+    assert!(matches!(
+        image.read_single_file_at_strict(entry, &mut [0; 5], 0),
+        Err(ewf_image::EwfError::Malformed(message))
+            if message == "single file duplicate data read was truncated"
+    ));
 }
 
 #[test]

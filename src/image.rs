@@ -49,7 +49,7 @@ const MAX_CHUNK_SIZE: u64 = 128 * 1024 * 1024;
 const EWF1_HASH_SECTION_SIZE: u64 = 36;
 const EWF1_DIGEST_SECTION_SIZE: u64 = 80;
 const EWF1_LTREE_HEADER_SIZE: usize = 48;
-const EWF1_LOGICAL_SPARSE_FLAG: u32 = 0x0400_0000;
+const EWF_LOGICAL_SPARSE_FLAG: u32 = 0x0400_0000;
 const EWF2_HASH_SECTION_SIZE: u64 = 32;
 const EWF2_TABLE_HEADER_V2_SIZE: u64 = 32;
 const EWF2_TABLE_FOOTER_SIZE: u64 = 16;
@@ -1381,8 +1381,9 @@ impl Image {
 
     /// Reads bytes from a logical single-file catalog entry.
     ///
-    /// Sparse extents read as zeroes. EWF1 logical sparse entries repeat a
-    /// stored byte or read from their duplicate offset.
+    /// Sparse extents read as zeroes. Logical sparse entries with duplicate
+    /// offsets read the referenced data. EWF1 logical sparse entries without
+    /// a duplicate offset repeat their stored byte.
     ///
     /// # Errors
     ///
@@ -1432,18 +1433,17 @@ impl Image {
         let to_read = requested.min(file_size - offset);
         let mut copied = 0_usize;
         let mut file_position = 0_u64;
-        let ewf1_logical_sparse = self.inner.info.format == Format::Ewf1
-            && matches!(
-                self.inner.info.format_profile,
-                FormatProfile::LogicalEnCase5
-                    | FormatProfile::LogicalEnCase6
-                    | FormatProfile::LogicalEnCase7
-            )
-            && entry
-                .flags
-                .is_some_and(|flags| flags & EWF1_LOGICAL_SPARSE_FLAG != 0);
+        let logical_sparse = matches!(
+            self.inner.info.format_profile,
+            FormatProfile::LogicalEnCase5
+                | FormatProfile::LogicalEnCase6
+                | FormatProfile::LogicalEnCase7
+                | FormatProfile::Ewf2LogicalEnCase7
+        ) && entry
+            .flags
+            .is_some_and(|flags| flags & EWF_LOGICAL_SPARSE_FLAG != 0);
 
-        if (entry.extents.is_empty() || ewf1_logical_sparse)
+        if (entry.extents.is_empty() || logical_sparse)
             && let Some(duplicate_data_offset) = entry.duplicate_data_offset
             && duplicate_data_offset >= 0
         {
@@ -1466,7 +1466,7 @@ impl Image {
             return Ok(read);
         }
 
-        if ewf1_logical_sparse {
+        if self.inner.info.format == Format::Ewf1 && logical_sparse {
             let extent = entry
                 .extents
                 .first()
