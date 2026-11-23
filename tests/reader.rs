@@ -7083,6 +7083,49 @@ fn lx01_catalog_with_media_size(size: u64) -> Vec<u8> {
 }
 
 #[test]
+fn lx01_recognizes_an_omitted_empty_file_size_with_a_placeholder_extent() {
+    let mut lines = default_single_files_prefix();
+    lines.extend([
+        "entry".into(),
+        "0\t1".into(),
+        "id\tp\tn\tls\tbe\tha\tsha".into(),
+        "26\t3".into(),
+        "1\td\troot\t0\t\t\t".into(),
+        "26\t0".into(),
+        "2\tf\tempty.bin\t\t1 0 1\td41d8cd98f00b204e9800998ecf8427e\tda39a3ee5e6b4b0d3255bfef95601890afd80709".into(),
+        "26\t0".into(),
+        "3\tf\tinferred.bin\t\t1 1 1\t7fc56270e7a70fa81a5935b72eacbe29\t".into(),
+        "26\t0".into(),
+        "4\tf\tdeclared.bin\t1\t1 1 1\td41d8cd98f00b204e9800998ecf8427e\tda39a3ee5e6b4b0d3255bfef95601890afd80709".into(),
+        String::new(),
+    ]);
+    let file = synthetic_lx01_leading_single_files_data_with_stream(b"\0A", &utf16le_lines(lines));
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    let catalog = image.info().single_files.as_ref().unwrap();
+    let empty = catalog.entry_by_path("empty.bin").unwrap().unwrap();
+    let mut byte = [0xff];
+    assert_eq!(empty.size, Some(0));
+    assert_eq!(
+        image
+            .read_single_file_at_strict(empty, &mut byte, 0)
+            .unwrap(),
+        0
+    );
+    assert_eq!(byte, [0xff]);
+
+    for name in ["inferred.bin", "declared.bin"] {
+        let entry = catalog.entry_by_path(name).unwrap().unwrap();
+        assert_eq!(
+            image
+                .read_single_file_at_strict(entry, &mut byte, 0)
+                .unwrap(),
+            1
+        );
+        assert_eq!(byte, *b"A");
+    }
+}
+
+#[test]
 fn lx01_combines_case_and_device_geometry_and_uses_exact_catalog_size() {
     let payload = vec![0x39; 4_029];
     let catalog = lx01_catalog_with_media_size(payload.len() as u64);

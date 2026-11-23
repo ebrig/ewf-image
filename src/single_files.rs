@@ -1,5 +1,5 @@
 use crate::types::{
-    SingleFileAttribute, SingleFileEntry, SingleFileEntryType, SingleFileExtent,
+    Format, SingleFileAttribute, SingleFileEntry, SingleFileEntryType, SingleFileExtent,
     SingleFilePermission, SingleFilePermissionGroup, SingleFileSource, SingleFileSubject,
     SingleFilesInfo,
 };
@@ -454,17 +454,14 @@ impl SingleFileAttribute {
 }
 
 pub(crate) fn parse_ewf2_single_files_data(data: &[u8]) -> Result<(SingleFilesInfo, Option<u64>)> {
-    parse_single_files_data(data, false)
+    parse_single_files_data(data, Format::Ewf2)
 }
 
 pub(crate) fn parse_ewf1_single_files_data(data: &[u8]) -> Result<SingleFilesInfo> {
-    parse_single_files_data(data, true).map(|(catalog, _)| catalog)
+    parse_single_files_data(data, Format::Ewf1).map(|(catalog, _)| catalog)
 }
 
-fn parse_single_files_data(
-    data: &[u8],
-    require_record_size: bool,
-) -> Result<(SingleFilesInfo, Option<u64>)> {
+fn parse_single_files_data(data: &[u8], format: Format) -> Result<(SingleFilesInfo, Option<u64>)> {
     let DecodedUtf16Lines {
         lines,
         mut invalid_utf16_lines,
@@ -507,7 +504,7 @@ fn parse_single_files_data(
 
     let data_size = match record_size {
         Some(size) => size,
-        None if require_record_size => {
+        None if format == Format::Ewf1 => {
             return Err(EwfError::Malformed(
                 "EWF1 ltree record has no total data size".into(),
             ));
@@ -515,7 +512,13 @@ fn parse_single_files_data(
         None => u64::try_from(data.len())
             .map_err(|_| EwfError::Malformed("single files data size overflow".into()))?,
     };
-    let root = parse_entry(&lines, &types, &mut cursor, &mut invalid_utf16_lines)?;
+    let root = parse_entry(
+        &lines,
+        &types,
+        &mut cursor,
+        &mut invalid_utf16_lines,
+        format,
+    )?;
     require_empty_category_terminator(
         &lines,
         cursor,
@@ -1043,6 +1046,7 @@ fn parse_entry(
     types: &[&str],
     cursor: &mut usize,
     invalid_utf16_lines: &mut BTreeMap<usize, Vec<u16>>,
+    format: Format,
 ) -> Result<SingleFileEntry> {
     let count_line = lines
         .get(*cursor)
@@ -1066,6 +1070,26 @@ fn parse_entry(
     for (value_type, value) in types.iter().zip(values.iter()) {
         apply_entry_value(&mut entry, value_type, value)?;
     }
+    // EnCase Imager can omit the length of an empty Lx01 file and store a
+    // one-byte extent. Both empty-content digests identify the placeholder
+    // without changing size inference for ordinary entries.
+    if format == Format::Ewf2
+        && entry.file_entry_type == Some(SingleFileEntryType::File)
+        && entry.size.is_none()
+        && entry.duplicate_data_offset.is_none()
+        && matches!(
+            entry.extents.as_slice(),
+            [SingleFileExtent {
+                data_size: 1,
+                sparse: false,
+                ..
+            }]
+        )
+        && entry.md5.as_deref() == Some("d41d8cd98f00b204e9800998ecf8427e")
+        && entry.sha1.as_deref() == Some("da39a3ee5e6b4b0d3255bfef95601890afd80709")
+    {
+        entry.size = Some(0);
+    }
     if let Some(raw) = invalid_utf16_lines.remove(&value_line_index) {
         for (index, field) in raw.split(|unit| *unit == u16::from(b'\t')).enumerate() {
             if String::from_utf16(field).is_err() {
@@ -1085,7 +1109,7 @@ fn parse_entry(
     }
 
     for _ in 0..child_count {
-        let child = parse_entry(lines, types, cursor, invalid_utf16_lines)?;
+        let child = parse_entry(lines, types, cursor, invalid_utf16_lines, format)?;
         entry.children.push(child);
     }
     Ok(entry)

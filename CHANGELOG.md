@@ -6,6 +6,8 @@ code written for 0.4.0. See
 
 ## Unreleased
 
+- Recognize empty EnCase Imager Lx01 files stored with a one-byte placeholder.
+
 - Read final uncompressed EnCase Lx01 chunks with zero sector padding,
   verifying the checksum over the full stored payload before trimming it.
 
