@@ -221,6 +221,16 @@ EWF_ENCASE_IMAGER_710_STORED_LX01_FIXTURE=/absolute/path/lx01-encase-imager-710-
   external_encase_imager_710_stored_lx01_matches_libewf -- --ignored --exact
 ```
 
+The CLI test extracts the empty file and both copies from the uncompressed
+fixture. It checks the extracted sizes and source digests and compares the two
+copies byte for byte. Set the fixture path to run it locally.
+
+```bash
+EWF_ENCASE_IMAGER_710_STORED_LX01_FIXTURE=/absolute/path/lx01-encase-imager-710-nocomp.Lx01 \
+  cargo test --locked -p ewf-cli --test ewf_cli \
+  external_cli_encase_imager_710_extracts_empty_and_duplicate_files -- --ignored --exact
+```
+
 ### EnCase Imager 7.10 Lx01 catalog regression
 
 Place the compressed and uncompressed Lx01 files and

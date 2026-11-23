@@ -80,6 +80,11 @@ still completes but reports `extracted_without_reference` and exits with code 4.
 The report includes computed digests for independent comparison. Extraction with
 matching references exits with code 0.
 
+For EnCase Imager Lx01 files with an omitted size, the empty-file marker and
+both empty-content digests identify the one-byte storage placeholder.
+Deduplicated files read the referenced data and are checked against the selected
+file's stored hashes.
+
 The caller chooses OUTPUT, and catalog names are never used as destination
 paths. Extraction copies content and can restore recorded access and modification
 times with `--restore-times`. The `restored_times` result lists applied fields.
