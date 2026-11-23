@@ -6,6 +6,9 @@ code written for 0.4.0. See
 
 ## Unreleased
 
+- Report missing reference digests and digest mismatches separately in
+  whole-image EWF CLI verification. Both outcomes still exit with code 3.
+
 ## 0.6.3 - 2026-11-22
 
 - Read EnCase 7 Lx01 images with geometry split across case and device metadata.

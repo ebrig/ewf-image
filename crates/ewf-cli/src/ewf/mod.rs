@@ -662,17 +662,26 @@ fn verify(
     let verified = image.verify_with_progress(&options, |p| {
         progress.event("verification", p.bytes_verified, p.bytes_total)
     })?;
+    let references_match = verified.references_match();
     report["verification"] = json!({"bytes_verified": verified.bytes_verified,
         "md5": hex(&verified.hashes.md5), "sha1": hex(&verified.hashes.sha1),
-        "sha256": hex(&verified.hashes.sha256), "references_match": verified.references_match(),
+        "sha256": hex(&verified.hashes.sha256), "references_match": references_match,
         "comparisons": verified.comparisons});
     report["acquisition_errors"] = error_ranges(image.acquisition_errors());
     let substituted = substituted_sectors(image.acquisition_errors())?;
     report["substituted_sectors"] = json!(substituted);
-    if verified.references_match() != Some(true) {
-        return Err(invalid(
-            "media hashes mismatch or no supported reference digest exists",
-        ));
+    match references_match {
+        Some(true) => {}
+        Some(false) => {
+            return Err(invalid(
+                "a computed media digest does not match its reference",
+            ));
+        }
+        None => {
+            return Err(invalid(
+                "no supported reference digest is available for comparison",
+            ));
+        }
     }
     report["status"] = json!(if substituted == 0 {
         "verified"

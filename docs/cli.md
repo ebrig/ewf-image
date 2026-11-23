@@ -43,6 +43,14 @@ ewf-cli ewf report case.E01
 ewf-cli ewf report case.E01 --write
 ```
 
+## Whole-image verification
+
+`verify IMAGE` reads the decoded media and compares its computed digests with
+the available references. A mismatch and a missing supported reference digest
+produce separate diagnostics and both exit with code 3. The JSON report includes
+the computed digests and bytes checked. Its `verification.references_match`
+field is `false` for a mismatch and `null` when no reference was available.
+
 ## Logical file operations
 
 Use `verify IMAGE ENTRY` and `extract IMAGE ENTRY OUTPUT` for logical files. The
@@ -478,7 +486,7 @@ require recovery to resolve the publication state.
 | 0 | Operation succeeded; analysis/recovery reported no findings |
 | 1 | Operational failure or result-output failure |
 | 2 | Invalid command-line arguments |
-| 3 | Verification/extraction mismatch or unreadable selected file, export digest mismatch, or analysis errors |
+| 3 | Verification failure, missing whole-image reference, extraction failure, export digest mismatch, or analysis errors |
 | 4 | Substitutions, missing logical-file references, analysis warnings, or recovery findings; inspect the command result |
 | 130 | Cancelled, including a requested `--stop-after` pause |
 
