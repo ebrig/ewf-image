@@ -221,6 +221,16 @@ EWF_ENCASE_IMAGER_710_STORED_LX01_FIXTURE=/absolute/path/lx01-encase-imager-710-
   external_encase_imager_710_stored_lx01_matches_libewf -- --ignored --exact
 ```
 
+The CLI test extracts the empty file and both copies from the same fixture.
+It checks the extracted sizes and source digests and compares the two copies
+byte for byte. To run this test locally, set the fixture path.
+
+```bash
+EWF_ENCASE_IMAGER_710_STORED_LX01_FIXTURE=/absolute/path/lx01-encase-imager-710-nocomp.Lx01 \
+  cargo test --locked -p ewf-cli --test ewf_cli \
+  external_cli_encase_imager_710_extracts_empty_and_duplicate_files -- --ignored --exact
+```
+
 ## Interoperability CI
 
 The interoperability CI job builds libewf **20260924** from its release archive,

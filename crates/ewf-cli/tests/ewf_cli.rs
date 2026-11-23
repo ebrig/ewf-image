@@ -1774,6 +1774,71 @@ fn external_cli_encase7_lx01_verifies_with_external_digest() {
 }
 
 #[test]
+#[ignore = "requires the pinned uncompressed EnCase Imager 7.10 Lx01 fixture"]
+fn external_cli_encase_imager_710_extracts_empty_and_duplicate_files() {
+    let fixture = PathBuf::from(
+        std::env::var_os("EWF_ENCASE_IMAGER_710_STORED_LX01_FIXTURE")
+            .expect("set EWF_ENCASE_IMAGER_710_STORED_LX01_FIXTURE"),
+    );
+    assert_eq!(fs::metadata(&fixture).unwrap().len(), 89_888);
+    assert_eq!(
+        hash(&fs::read(&fixture).unwrap()),
+        "82e532f574d51c799d79eec35b69e4a170b58cf90827512a50188490bedb27c0"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = json_result(
+        Command::new(env!("CARGO_BIN_EXE_ewf-cli"))
+            .args(["ewf", "--json", "--quiet", "files"])
+            .arg(&fixture)
+            .output()
+            .unwrap(),
+        0,
+    );
+    let entries = catalog["entries"].as_array().unwrap();
+    // Sizes and SHA-1 digests are from the source files before acquisition.
+    for (name, size, sha1) in [
+        ("empty.bin", 0, "da39a3ee5e6b4b0d3255bfef95601890afd80709"),
+        (
+            "copy_a.bin",
+            5000,
+            "1e27804c24cc68575b3748ee800753fe0f7fbbf1",
+        ),
+        (
+            "copy_b.bin",
+            5000,
+            "1e27804c24cc68575b3748ee800753fe0f7fbbf1",
+        ),
+    ] {
+        let entry = entries
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .unwrap_or_else(|| panic!("missing catalog entry {name}"));
+        let index = entry["index"].as_u64().unwrap().to_string();
+        let output = dir.path().join(name);
+        let report = json_result(
+            Command::new(env!("CARGO_BIN_EXE_ewf-cli"))
+                .args(["ewf", "--json", "--quiet", "extract"])
+                .arg(&fixture)
+                .arg(index)
+                .arg(&output)
+                .output()
+                .unwrap(),
+            0,
+        );
+        assert_eq!(report["status"], "extracted", "{name}");
+        assert_eq!(report["verification"]["references_match"], true, "{name}");
+        assert_eq!(report["verification"]["bytes_verified"], size, "{name}");
+        assert_eq!(report["verification"]["sha1"], sha1, "{name}");
+        assert_eq!(fs::metadata(output).unwrap().len(), size, "{name}");
+    }
+    assert_eq!(
+        fs::read(dir.path().join("copy_a.bin")).unwrap(),
+        fs::read(dir.path().join("copy_b.bin")).unwrap(),
+    );
+}
+
+#[test]
 fn cli_preserves_existing_output_and_manifest() {
     let dir = tempfile::tempdir().unwrap();
     source(dir.path());

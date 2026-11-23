@@ -35,6 +35,7 @@ if [[ -n ${EWF_ENCASE7_LX01_FIXTURE:-} ]]; then
 fi
 if [[ -n ${EWF_ENCASE_IMAGER_710_STORED_LX01_FIXTURE:-} ]]; then
   run_case corpus external_encase_imager_710_stored_lx01_matches_libewf
+  run_case ewf_cli external_cli_encase_imager_710_extracts_empty_and_duplicate_files
 fi
 run_case corpus ewf_tool_generated_fixture_matrix_matches_oracles
 run_case corpus external_writer_outputs_match_ewfexport_stdout
