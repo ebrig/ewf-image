@@ -31,14 +31,16 @@ use crate::reader_cache::{TABLE_PAGE_SIZE, TablePageCache, TablePageKey};
 use crate::reader_statistics::{ReaderCacheInfo, ReaderStatistics, ReaderStatisticsCollector};
 use crate::segment::discover_segments;
 use crate::signature::{check_segment_files_corruption, check_segment_files_encryption};
-use crate::single_files::{parse_ewf1_single_files_data, parse_ewf2_single_files_data};
+use crate::single_files::{
+    LOGICAL_FILE_SPARSE_FLAG, parse_ewf1_single_files_data, parse_ewf2_single_files_data,
+};
 use crate::types::{
     AcquisitionError, ChunkCacheCapacity, CompressionLevel, CompressionMethod, CompressionValues,
     DataChunk, DataChunkEncoding, EncodedDataChunk, EwfMetadata, Format, FormatProfile,
     HeaderCodepage, HeaderDateFormat, ImageInfo, MediaFlags, MediaInfo, MediaType, MemoryExtent,
     OpenOptions, OpenStrictness, SectorRange, SegmentFileVersion, SingleFileEntry,
-    SingleFilePermission, SingleFileSource, SingleFileSubject, SingleFilesAuxTables,
-    SingleFilesInfo, StoredHashes,
+    SingleFileEntryType, SingleFileExtent, SingleFilePermission, SingleFileSource,
+    SingleFileSubject, SingleFilesAuxTables, SingleFilesInfo, StoredHashes,
 };
 use crate::{
     EncryptionInfo, EwfError, EwfPassword, Result, SectionInfo, SectionKind, SegmentSource,
@@ -49,7 +51,6 @@ const MAX_CHUNK_SIZE: u64 = 128 * 1024 * 1024;
 const EWF1_HASH_SECTION_SIZE: u64 = 36;
 const EWF1_DIGEST_SECTION_SIZE: u64 = 80;
 const EWF1_LTREE_HEADER_SIZE: usize = 48;
-const EWF1_LOGICAL_SPARSE_FLAG: u32 = 0x0400_0000;
 const EWF2_HASH_SECTION_SIZE: u64 = 32;
 const EWF2_TABLE_HEADER_V2_SIZE: u64 = 32;
 const EWF2_TABLE_FOOTER_SIZE: u64 = 16;
@@ -1382,7 +1383,9 @@ impl Image {
     /// Reads bytes from a logical single-file catalog entry.
     ///
     /// Sparse extents read as zeroes. EWF1 logical sparse entries repeat a
-    /// stored byte or read from their duplicate offset.
+    /// stored byte or read from their duplicate offset. Logical EWF2 sparse
+    /// duplicate entries with a one-byte placeholder read from their duplicate
+    /// offset instead of the placeholder.
     ///
     /// # Errors
     ///
@@ -1432,24 +1435,48 @@ impl Image {
         let to_read = requested.min(file_size - offset);
         let mut copied = 0_usize;
         let mut file_position = 0_u64;
-        let ewf1_logical_sparse = self.inner.info.format == Format::Ewf1
+        let sparse = entry
+            .flags
+            .is_some_and(|flags| flags & LOGICAL_FILE_SPARSE_FLAG != 0);
+        let ewf1_logical_sparse = sparse
+            && self.inner.info.format == Format::Ewf1
             && matches!(
                 self.inner.info.format_profile,
                 FormatProfile::LogicalEnCase5
                     | FormatProfile::LogicalEnCase6
                     | FormatProfile::LogicalEnCase7
-            )
-            && entry
-                .flags
-                .is_some_and(|flags| flags & EWF1_LOGICAL_SPARSE_FLAG != 0);
+            );
+        // EnCase Imager can give a sparse duplicate one placeholder byte,
+        // while its actual bytes come from the duplicate media offset.
+        let lx01_sparse_duplicate = sparse
+            && self.inner.info.format_profile == FormatProfile::Ewf2LogicalEnCase7
+            && entry.entry_type() == Some(SingleFileEntryType::File)
+            && entry.size.is_some_and(|size| size > 1)
+            && matches!(
+                entry.extents.as_slice(),
+                [SingleFileExtent {
+                    data_size: 1,
+                    sparse: false,
+                    ..
+                }]
+            );
 
-        if (entry.extents.is_empty() || ewf1_logical_sparse)
+        if (entry.extents.is_empty() || ewf1_logical_sparse || lx01_sparse_duplicate)
             && let Some(duplicate_data_offset) = entry.duplicate_data_offset
             && duplicate_data_offset >= 0
         {
             let duplicate_data_offset = u64::try_from(duplicate_data_offset).map_err(|_| {
                 EwfError::Malformed("single file duplicate data offset does not fit u64".into())
             })?;
+            if lx01_sparse_duplicate
+                && duplicate_data_offset
+                    .checked_add(file_size)
+                    .is_none_or(|end| end > self.media_size())
+            {
+                return Err(EwfError::Malformed(
+                    "single file duplicate data range exceeds logical media size".into(),
+                ));
+            }
             let image_offset = duplicate_data_offset.checked_add(offset).ok_or_else(|| {
                 EwfError::Malformed("single file duplicate data offset overflow".into())
             })?;
@@ -3426,7 +3453,7 @@ fn parse_ewf2_segment(
             }
             ewf2::SectionType::SingleFilesData => {
                 let data = read_exact_at(file, section.data_offset, section.data_size)?;
-                let (catalog, record_size) = parse_ewf2_single_files_data(&data)?;
+                let (catalog, record_size) = parse_ewf2_single_files_data(&data, header.logical)?;
                 merge_single_files(&mut single_files, Some(catalog))?;
                 ewf2_catalog_record_size = record_size;
             }

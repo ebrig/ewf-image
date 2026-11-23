@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 /// Paths are represented with tab-separated entry names. A leading separator
 /// refers to the root entry.
 pub const SINGLE_FILE_PATH_SEPARATOR: char = '\t';
+pub(crate) const LOGICAL_FILE_SPARSE_FLAG: u32 = 0x0400_0000;
 const EXTENDED_ATTRIBUTES_HEADER: &[u8; 37] = &[
     0x00, 0x00, 0x00, 0x00, 0x01, 0x0b, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x41, 0x00, 0x74,
     0x00, 0x74, 0x00, 0x72, 0x00, 0x69, 0x00, 0x62, 0x00, 0x75, 0x00, 0x74, 0x00, 0x65, 0x00, 0x73,
@@ -453,17 +454,32 @@ impl SingleFileAttribute {
     }
 }
 
-pub(crate) fn parse_ewf2_single_files_data(data: &[u8]) -> Result<(SingleFilesInfo, Option<u64>)> {
-    parse_single_files_data(data, false)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CatalogFormat {
+    Ewf1,
+    Ewf2,
+    Lx01,
+}
+
+pub(crate) fn parse_ewf2_single_files_data(
+    data: &[u8],
+    logical: bool,
+) -> Result<(SingleFilesInfo, Option<u64>)> {
+    let format = if logical {
+        CatalogFormat::Lx01
+    } else {
+        CatalogFormat::Ewf2
+    };
+    parse_single_files_data(data, format)
 }
 
 pub(crate) fn parse_ewf1_single_files_data(data: &[u8]) -> Result<SingleFilesInfo> {
-    parse_single_files_data(data, true).map(|(catalog, _)| catalog)
+    parse_single_files_data(data, CatalogFormat::Ewf1).map(|(catalog, _)| catalog)
 }
 
 fn parse_single_files_data(
     data: &[u8],
-    require_record_size: bool,
+    format: CatalogFormat,
 ) -> Result<(SingleFilesInfo, Option<u64>)> {
     let DecodedUtf16Lines {
         lines,
@@ -507,7 +523,7 @@ fn parse_single_files_data(
 
     let data_size = match record_size {
         Some(size) => size,
-        None if require_record_size => {
+        None if format == CatalogFormat::Ewf1 => {
             return Err(EwfError::Malformed(
                 "EWF1 ltree record has no total data size".into(),
             ));
@@ -515,7 +531,13 @@ fn parse_single_files_data(
         None => u64::try_from(data.len())
             .map_err(|_| EwfError::Malformed("single files data size overflow".into()))?,
     };
-    let root = parse_entry(&lines, &types, &mut cursor, &mut invalid_utf16_lines)?;
+    let root = parse_entry(
+        &lines,
+        &types,
+        &mut cursor,
+        &mut invalid_utf16_lines,
+        format,
+    )?;
     require_empty_category_terminator(
         &lines,
         cursor,
@@ -1043,6 +1065,7 @@ fn parse_entry(
     types: &[&str],
     cursor: &mut usize,
     invalid_utf16_lines: &mut BTreeMap<usize, Vec<u16>>,
+    format: CatalogFormat,
 ) -> Result<SingleFileEntry> {
     let count_line = lines
         .get(*cursor)
@@ -1084,11 +1107,46 @@ fn parse_entry(
         }
     }
 
+    if format == CatalogFormat::Lx01
+        && child_count == 0
+        && is_lx01_empty_placeholder(&entry, types, &values)
+    {
+        entry.size = Some(0);
+    }
+
     for _ in 0..child_count {
-        let child = parse_entry(lines, types, cursor, invalid_utf16_lines)?;
+        let child = parse_entry(lines, types, cursor, invalid_utf16_lines, format)?;
         entry.children.push(child);
     }
     Ok(entry)
+}
+
+// EnCase Imager can record an empty file with a blank size and a one-byte
+// placeholder extent. Use both recorded empty digests and the storage marker
+// to distinguish it from a real one-byte file whose size is inferred.
+fn is_lx01_empty_placeholder(entry: &SingleFileEntry, types: &[&str], values: &[&str]) -> bool {
+    let value = |name| {
+        let index = types.iter().position(|&field| field == name)?;
+        values.get(index).copied()
+    };
+    entry.entry_type() == Some(SingleFileEntryType::File)
+        && entry.size.is_none()
+        && value("ls") == Some("")
+        && value("ent") == Some("E")
+        && entry.duplicate_data_offset.is_none()
+        && entry
+            .flags
+            .is_none_or(|flags| flags & LOGICAL_FILE_SPARSE_FLAG == 0)
+        && matches!(
+            entry.extents.as_slice(),
+            [SingleFileExtent {
+                data_size: 1,
+                sparse: false,
+                ..
+            }]
+        )
+        && entry.md5.as_deref() == Some("d41d8cd98f00b204e9800998ecf8427e")
+        && entry.sha1.as_deref() == Some("da39a3ee5e6b4b0d3255bfef95601890afd80709")
 }
 
 fn apply_entry_value(entry: &mut SingleFileEntry, value_type: &str, value: &str) -> Result<()> {
@@ -1422,6 +1480,29 @@ fn parse_non_negative_i32(value: &str, label: &str) -> Result<i32> {
 #[cfg(test)]
 mod entry_type_tests {
     use super::*;
+
+    #[test]
+    fn lx01_empty_placeholder_requires_the_marker_and_both_matching_digests() {
+        let mut entry = SingleFileEntry {
+            file_entry_type: Some(SingleFileEntryType::File),
+            md5: Some("d41d8cd98f00b204e9800998ecf8427e".to_owned()),
+            sha1: Some("da39a3ee5e6b4b0d3255bfef95601890afd80709".to_owned()),
+            extents: vec![SingleFileExtent {
+                data_offset: 0,
+                data_size: 1,
+                sparse: false,
+            }],
+            ..SingleFileEntry::default()
+        };
+        let types = ["ls", "ent"];
+        assert!(is_lx01_empty_placeholder(&entry, &types, &["", "E"]));
+        assert!(!is_lx01_empty_placeholder(&entry, &types, &["", "B"]));
+        assert!(!is_lx01_empty_placeholder(&entry, &["ent"], &["E"]));
+        entry.sha1 = Some("6dcd4ce23d88e2ee9568ba546c007c63d9131c1b".to_owned());
+        assert!(!is_lx01_empty_placeholder(&entry, &types, &["", "E"]));
+        entry.sha1 = None;
+        assert!(!is_lx01_empty_placeholder(&entry, &types, &["", "E"]));
+    }
 
     #[test]
     fn standard_and_legacy_entry_types() {
