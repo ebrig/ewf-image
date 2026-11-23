@@ -8117,6 +8117,104 @@ fn image_reads_ewf2_single_file_entry_duplicate_data() {
 }
 
 #[test]
+fn lx01_reads_sparse_duplicate_with_one_byte_placeholder() {
+    let file = synthetic_lx01_leading_single_files_data_with_stream(
+        b"original\0",
+        &single_files_stream_with_ewf1_sparse_entry(8, "1 8 1", "0"),
+    );
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    let entry = image.file_entry_by_path("sparse.bin").unwrap().unwrap();
+    let mut bytes = [0; 8];
+
+    assert_eq!(
+        image
+            .read_single_file_at_strict(entry, &mut bytes, 0)
+            .unwrap(),
+        8
+    );
+    assert_eq!(&bytes, b"original");
+    assert_eq!(
+        image
+            .read_single_file_at_strict(entry, &mut bytes, 3)
+            .unwrap(),
+        5
+    );
+    assert_eq!(&bytes[..5], b"ginal");
+    assert_eq!(
+        image
+            .read_single_file_at_strict(entry, &mut bytes, 8)
+            .unwrap(),
+        0
+    );
+
+    let mut out_of_range = entry.clone();
+    out_of_range.duplicate_data_offset = Some(i64::try_from(image.media_size() - 1).unwrap());
+    assert!(matches!(
+        image.read_single_file_at_strict(&out_of_range, &mut bytes[..1], 0),
+        Err(ewf_image::EwfError::Malformed(msg)) if msg == "single file duplicate data range exceeds logical media size"
+    ));
+}
+
+#[test]
+fn lx01_distinguishes_empty_placeholder_from_extent_sized_regular_file() {
+    let mut catalog = default_single_files_prefix();
+    catalog.extend(
+        [
+            "entry",
+            "0\t1",
+            "id\tp\tn\tls\tbe\tent\tha\tsha",
+            "26\t2",
+            "1\td\troot\t0\t\t\t\t",
+            "26\t0",
+            "2\tf\tempty.bin\t\t1 0 1\tE\td41d8cd98f00b204e9800998ecf8427e\tda39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "26\t0",
+            "3\tf\tone.bin\t\t1 1 1\tB\t7fc56270e7a70fa81a5935b72eacbe29\t6dcd4ce23d88e2ee9568ba546c007c63d9131c1b",
+            "",
+        ]
+        .map(str::to_owned),
+    );
+    let file =
+        synthetic_lx01_leading_single_files_data_with_stream(b"\0A", &utf16le_lines(catalog));
+    let image = ewf_image::Image::open(file.path()).unwrap();
+    let empty = image.file_entry_by_path("empty.bin").unwrap().unwrap();
+    let one = image.file_entry_by_path("one.bin").unwrap().unwrap();
+    let mut bytes = [0xff; 2];
+    assert_eq!(empty.size(), Some(0));
+    assert_eq!(
+        image
+            .read_single_file_at_strict(empty, &mut bytes, 0)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        image
+            .single_file_cursor(empty)
+            .seek(SeekFrom::End(0))
+            .unwrap(),
+        0
+    );
+
+    assert_eq!(one.size(), None);
+    assert_eq!(
+        image
+            .read_single_file_at_strict(one, &mut bytes, 0)
+            .unwrap(),
+        1
+    );
+    assert_eq!(bytes[0], b'A');
+    #[cfg(feature = "verify")]
+    {
+        let empty_report = image.verify_single_file(empty).unwrap();
+        assert_eq!(empty_report.bytes_verified, 0);
+        assert_eq!(empty_report.references_match(), Some(true));
+        assert_eq!(
+            image.verify_single_file(one).unwrap().references_match(),
+            Some(true)
+        );
+    }
+}
+
+#[test]
 fn image_reads_ewf2_sparse_single_file_entry_extent_as_zeroes() {
     let file = synthetic_lx01_sparse_single_file_extent_read(b"prefix-data-tail", 7, 4, 3);
     let image = ewf_image::Image::open(file.path()).unwrap();

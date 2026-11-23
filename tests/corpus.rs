@@ -212,6 +212,82 @@ fn external_encase_imager_710_stored_lx01_matches_libewf() -> Result<(), Box<dyn
 }
 
 #[test]
+#[cfg(feature = "verify")]
+#[ignore = "requires the pinned EnCase Imager 7.10 Lx01 pair and known-answer manifest"]
+fn external_encase_imager_710_lx01_catalog_matches_manifest() -> Result<(), Box<dyn Error>> {
+    use ewf_image::SingleFileEntryType::{Directory, File};
+
+    let root = PathBuf::from(
+        env::var_os("EWF_ENCASE_IMAGER_710_CATALOG_FIXTURE_DIR")
+            .ok_or("set EWF_ENCASE_IMAGER_710_CATALOG_FIXTURE_DIR")?,
+    );
+    let manifest = fs::read(root.join("lx01-encase-imager-710.json"))?;
+    assert_eq!(
+        sha256_hex(&manifest),
+        "54531c7d846b16d6a3adc08b62877a72407aa88096236c3f38c078dcb78f530c"
+    );
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest)?;
+    let known_entries = manifest["entries"].as_array().ok_or("missing entries")?;
+    assert_eq!(known_entries.len(), 11);
+
+    for (fixture, sha256) in [
+        (
+            "lx01-encase-imager-710.Lx01",
+            "9ccfb0b6eb9b218458a3035fa743af094db07f386411017cbc6c7d9f1ebed03e",
+        ),
+        (
+            "lx01-encase-imager-710-nocomp.Lx01",
+            "82e532f574d51c799d79eec35b69e4a170b58cf90827512a50188490bedb27c0",
+        ),
+    ] {
+        let path = root.join(fixture);
+        assert_eq!(sha256_hex(&fs::read(&path)?), sha256, "{fixture}");
+        let image = ewf_image::Image::open(&path)?;
+        let tree = image.root_file_entry().ok_or("missing catalog root")?;
+        let mut stack = vec![(tree, String::new())];
+        let mut actual = BTreeMap::new();
+        while let Some((parent, prefix)) = stack.pop() {
+            for child in &parent.children {
+                let path = format!("{prefix}{}", child.name().ok_or("unnamed catalog entry")?);
+                assert!(
+                    actual.insert(path.clone(), child).is_none(),
+                    "{fixture}: {path}"
+                );
+                stack.push((child, format!("{path}/")));
+            }
+        }
+        assert_eq!(actual.len(), known_entries.len(), "{fixture}");
+        for known in known_entries {
+            let path = known["path"].as_str().ok_or("missing entry path")?;
+            let entry = actual
+                .remove(path)
+                .ok_or_else(|| format!("{fixture}: missing {path}"))?;
+            if known["is_dir"].as_bool().ok_or("missing entry type")? {
+                assert_eq!(entry.entry_type(), Some(Directory), "{fixture}: {path}");
+                continue;
+            }
+            assert_eq!(entry.entry_type(), Some(File), "{fixture}: {path}");
+            let size = known["size"].as_u64().ok_or("missing file size")?;
+            assert_eq!(entry.size(), Some(size), "{fixture}: {path}");
+            let report = image.verify_single_file(entry)?;
+            assert_eq!(report.bytes_verified, size, "{fixture}: {path}");
+            assert_eq!(report.references_match(), Some(true), "{fixture}: {path}");
+            assert_eq!(
+                hex_lower(&report.hashes.md5),
+                known["md5"].as_str().ok_or("missing MD5")?,
+                "{fixture}: {path}"
+            );
+            assert_eq!(
+                hex_lower(&report.hashes.sha1),
+                known["sha1"].as_str().ok_or("missing SHA1")?,
+                "{fixture}: {path}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires local external corpus and ewfinfo"]
 fn external_corpus_matches_ewfinfo_metadata() -> Result<(), Box<dyn Error>> {
     let ewfinfo = env::var_os("EWFINFO").unwrap_or_else(|| OsString::from("ewfinfo"));

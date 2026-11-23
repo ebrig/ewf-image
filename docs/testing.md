@@ -220,6 +220,21 @@ EWF_ENCASE_IMAGER_710_STORED_LX01_FIXTURE=/absolute/path/lx01-encase-imager-710-
   external_encase_imager_710_stored_lx01_matches_libewf -- --ignored --exact
 ```
 
+### EnCase Imager 7.10 Lx01 catalog regression
+
+Place the compressed and uncompressed Lx01 files and
+`lx01-encase-imager-710.json` from the pinned
+[ewfprobe fixture directory](https://github.com/abrignoni/ewfprobe/tree/7aaeb95f1f49c56a6365beb745e8ba43f687448b/tests/fixtures)
+in a local directory outside the repository. The test pins all three input
+hashes and checks the catalog paths, directory types, and sizes and digests
+of all eight files per capture, including an empty file and a sparse duplicate.
+
+```bash
+EWF_ENCASE_IMAGER_710_CATALOG_FIXTURE_DIR=/absolute/path/to/fixtures \
+  cargo test --locked -p ewf-image --features external-fixtures --test corpus \
+  external_encase_imager_710_lx01_catalog_matches_manifest -- --ignored --exact
+```
+
 ## Interoperability CI
 
 The interoperability CI job builds libewf **20260924** from its release archive,

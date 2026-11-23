@@ -6,6 +6,9 @@ code written for 0.4.0. See
 
 ## Unreleased
 
+- Read EnCase Imager Lx01 empty-file placeholders and sparse duplicate file
+  entries. File extraction still checks stored digests.
+
 - Read final uncompressed EnCase Lx01 chunks with zero sector padding,
   verifying the checksum over the full stored payload before trimming it.
 
