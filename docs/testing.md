@@ -193,6 +193,18 @@ EWF_ENCASE7_LX01_FIXTURE=/absolute/path/ntfs.Lx01 EWFEXPORT=/absolute/path/ewfex
 This checks the merged chunk geometry, exact 14,432,450-byte length and EOF,
 decoded media digests, and byte-for-byte agreement with libewf's raw export.
 
+The same CI job runs CLI verification on the sample. It checks the
+missing-reference diagnostic and exit code 3 for `ewf verify`, then confirms
+that `verify --sha256` succeeds with the reference digest from libewf. Both
+invocations report the full byte count and the expected SHA-256. Set
+`EWF_ENCASE7_LX01_FIXTURE` to the pinned fixture to run the CLI test locally.
+
+```bash
+EWF_ENCASE7_LX01_FIXTURE=/absolute/path/ntfs.Lx01 \
+  cargo test --locked -p ewf-cli --test ewf_cli \
+  external_cli_encase7_lx01_verifies_with_external_digest -- --ignored --exact
+```
+
 ## Interoperability CI
 
 The interoperability CI job builds libewf **20260924** from its release archive,
@@ -209,7 +221,7 @@ and the zlib, BZip2, and OpenSSL development packages. The test script rejects
 other tool versions and missing test names. The script checks raw exports,
 metadata, range sections, logical catalogs, resumed output, and recovery of
 truncated images. Set `EWF_ENCASE7_LX01_FIXTURE` to the pinned sample's path
-when running the script locally to include the EnCase comparison.
+when running the script locally to include the EnCase library and CLI checks.
 
 The streaming-acquisition check exports and verifies resumed raw and zlib E01
 sets, including sets with an early checkpoint and a short final chunk. Another

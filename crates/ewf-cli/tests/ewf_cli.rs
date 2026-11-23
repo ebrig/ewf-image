@@ -2,7 +2,7 @@
 
 use std::fs::{self, File, FileTimes};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -385,7 +385,10 @@ fn cli(directory: &Path, args: &[&str]) -> Output {
 }
 
 fn result(directory: &Path, args: &[&str], code: i32) -> Value {
-    let output = cli(directory, args);
+    json_result(cli(directory, args), code)
+}
+
+fn json_result(output: Output, code: i32) -> Value {
     assert_eq!(
         output.status.code(),
         Some(code),
@@ -1719,6 +1722,55 @@ fn cli_verify_reports_a_reference_digest_mismatch() {
     assert_eq!(report["verification"]["references_match"], false);
     assert_eq!(report["verification"]["bytes_verified"], bytes.len());
     assert_eq!(report["verification"]["sha256"], hash(&bytes));
+}
+
+#[test]
+#[ignore = "requires the pinned EnCase 7 Lx01 fixture"]
+fn external_cli_encase7_lx01_verifies_with_external_digest() {
+    const MEDIA_BYTES: u64 = 14_432_450;
+    // Independently computed from libewf's raw export of this fixture.
+    const MEDIA_SHA256: &str = "0d18915d2aed385ff078408f5c8bbb61528ec6008b33a845ea4c5662d1f81685";
+    let fixture = PathBuf::from(
+        std::env::var_os("EWF_ENCASE7_LX01_FIXTURE").expect("set EWF_ENCASE7_LX01_FIXTURE"),
+    );
+    assert_eq!(fs::metadata(&fixture).unwrap().len(), 384_192);
+    assert_eq!(
+        hash(&fs::read(&fixture).unwrap()),
+        "72971f4d9ddc2e925f3e99b30c0aa70d1ee49b54e68b7d15aa3fcf318435e552"
+    );
+
+    let missing = json_result(
+        Command::new(env!("CARGO_BIN_EXE_ewf-cli"))
+            .args(["ewf", "--json", "--quiet", "verify"])
+            .arg(&fixture)
+            .output()
+            .unwrap(),
+        3,
+    );
+    assert_eq!(missing["status"], "verification_failed");
+    assert_eq!(
+        missing["error"],
+        "no supported reference digest is available for comparison"
+    );
+    assert!(missing["verification"]["references_match"].is_null());
+
+    let matched = json_result(
+        Command::new(env!("CARGO_BIN_EXE_ewf-cli"))
+            .args(["--json", "--quiet", "verify"])
+            .arg(&fixture)
+            .args(["--sha256", MEDIA_SHA256])
+            .output()
+            .unwrap(),
+        0,
+    );
+    assert_eq!(matched["status"], "verified");
+    assert_eq!(matched["verification"]["scope"], "decoded media");
+    assert_eq!(matched["verification"]["references_match"], true);
+
+    for report in [missing, matched] {
+        assert_eq!(report["verification"]["bytes_verified"], MEDIA_BYTES);
+        assert_eq!(report["verification"]["sha256"], MEDIA_SHA256);
+    }
 }
 
 #[test]
