@@ -3687,6 +3687,15 @@ fn synthetic_lx01_with_metadata(
     metadata: &[(u32, &[u8])],
 ) -> NamedTempFile {
     let compressed = compressed_chunk(data, decoded_size);
+    synthetic_lx01_with_encoded_chunk(&compressed, 1, single_files_data, metadata)
+}
+
+fn synthetic_lx01_with_encoded_chunk(
+    encoded: &[u8],
+    chunk_flags: u32,
+    single_files_data: &[u8],
+    metadata: &[(u32, &[u8])],
+) -> NamedTempFile {
     let table_data_size = 20 + 16;
 
     let mut previous = 0_u64;
@@ -3703,7 +3712,7 @@ fn synthetic_lx01_with_metadata(
     let table_data_offset = table_desc_offset + 64;
     let sectors_desc_offset = table_data_offset + table_data_size;
     let sectors_data_offset = sectors_desc_offset + 64;
-    let done_desc_offset = sectors_data_offset + compressed.len();
+    let done_desc_offset = sectors_data_offset + encoded.len();
 
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&LEF2_SIGNATURE);
@@ -3727,15 +3736,15 @@ fn synthetic_lx01_with_metadata(
     bytes.extend_from_slice(&table_header);
     let mut entry = [0; 16];
     entry[0..8].copy_from_slice(&(sectors_data_offset as u64).to_le_bytes());
-    entry[8..12].copy_from_slice(&(compressed.len() as u32).to_le_bytes());
-    entry[12..16].copy_from_slice(&1_u32.to_le_bytes());
+    entry[8..12].copy_from_slice(&(encoded.len() as u32).to_le_bytes());
+    entry[12..16].copy_from_slice(&chunk_flags.to_le_bytes());
     bytes.extend_from_slice(&entry);
     bytes.extend_from_slice(&ewf2_desc(
         0x03,
-        compressed.len() as u64,
+        encoded.len() as u64,
         table_desc_offset as u64,
     ));
-    bytes.extend_from_slice(&compressed);
+    bytes.extend_from_slice(encoded);
     bytes.extend_from_slice(&ewf2_desc(0x0f, 0, sectors_desc_offset as u64));
 
     assert_eq!(bytes.len(), done_desc_offset + 64);
@@ -7098,6 +7107,37 @@ fn lx01_combines_case_and_device_geometry_and_uses_exact_catalog_size() {
             image.cursor().read_to_end(&mut decoded).unwrap();
             assert_eq!(decoded, payload);
         }
+    }
+}
+
+#[test]
+fn lx01_reads_exact_and_sector_padded_final_checksummed_raw_chunks() {
+    let payload = vec![0x39; 4_029];
+    let catalog = lx01_catalog_with_media_size(payload.len() as u64);
+    let case = utf16le("1\nmain\nsb\n2\n\n");
+    let device = utf16le("1\nmain\nbp\tdt\n4096\tl\n\n");
+    for stored_size in [payload.len(), 4096] {
+        let mut encoded = payload.clone();
+        encoded.resize(stored_size, 0);
+        encoded.extend_from_slice(&adler32(&encoded).to_le_bytes());
+        let file = synthetic_lx01_with_encoded_chunk(
+            &encoded,
+            2, // Stored with an Adler-32 trailer.
+            &catalog,
+            &[(0x02, &case), (0x01, &device)],
+        );
+        let image = ewf_image::Image::open(file.path()).unwrap();
+        assert_eq!(image.info().logical_size, payload.len() as u64);
+        let mut last = [0];
+        assert_eq!(
+            image.read_at(&mut last, payload.len() as u64 - 1).unwrap(),
+            1
+        );
+        assert_eq!(last[0], payload[payload.len() - 1]);
+        assert_eq!(image.read_at(&mut last, payload.len() as u64).unwrap(), 0);
+        let mut decoded = Vec::new();
+        image.cursor().read_to_end(&mut decoded).unwrap();
+        assert_eq!(decoded, payload);
     }
 }
 

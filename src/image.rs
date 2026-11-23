@@ -2242,8 +2242,15 @@ impl Image {
 
     fn decode_chunk(&self, chunk_id: u64, chunk: Chunk) -> Result<Vec<u8>> {
         let encoded = self.read_encoded_chunk_bytes(chunk_id, chunk)?;
+        let final_padded_size = self.inner.ewf2_logical_final_padded_size.filter(|_| {
+            chunk_id == (self.inner.info.logical_size - 1) / self.inner.info.chunk_size
+        });
         if let Some(offset) = chunk.checksum_offset {
-            validate_raw_chunk_checksum(&encoded, offset)?;
+            if let Some(padded_size) = final_padded_size {
+                validate_ewf2_logical_final_raw_checksum(&encoded, offset, padded_size)?;
+            } else {
+                validate_raw_chunk_checksum(&encoded, offset)?;
+            }
         }
         let decompression_started = (self.inner.statistics.enabled()
             && matches!(
@@ -2263,9 +2270,8 @@ impl Image {
         } else {
             chunk.logical_size
         };
-        let decoded = if let Some(padded_size) = self.inner.ewf2_logical_final_padded_size
+        let decoded = if let Some(padded_size) = final_padded_size
             && matches!(chunk.encoding, ChunkEncoding::Zlib)
-            && chunk_id == (self.inner.info.logical_size - 1) / self.inner.info.chunk_size
         {
             decode_ewf2_sector_padded_zlib_chunk(&encoded, chunk.logical_size, padded_size)?
         } else {
@@ -4972,6 +4978,28 @@ fn validate_raw_chunk_checksum(encoded: &[u8], checksum_offset: usize) -> Result
     validate_adler32_checksum(encoded, checksum_offset, checksum_offset, "raw chunk")
 }
 
+// A checksummed final raw Lx01 chunk can store either the exact catalog tail
+// or its zero-padded final sector. The checksum follows and covers the stored
+// payload, while callers still read only the catalog's logical bytes.
+fn validate_ewf2_logical_final_raw_checksum(
+    encoded: &[u8],
+    logical_size: usize,
+    padded_size: usize,
+) -> Result<()> {
+    if encoded.len().checked_sub(4) != Some(padded_size) {
+        return validate_raw_chunk_checksum(encoded, logical_size);
+    }
+    if encoded[logical_size..padded_size]
+        .iter()
+        .any(|&byte| byte != 0)
+    {
+        return Err(EwfError::Malformed(
+            "raw logical chunk has nonzero sector padding".into(),
+        ));
+    }
+    validate_raw_chunk_checksum(encoded, padded_size)
+}
+
 fn adler32(data: &[u8]) -> u32 {
     adler32_update(1, data)
 }
@@ -5159,6 +5187,32 @@ mod tests {
     use flate2::write::ZlibEncoder;
 
     use super::*;
+
+    #[test]
+    fn ewf2_logical_final_raw_padding_and_checksum_are_both_verified() {
+        let logical = b"raw";
+        let padded_size = 8;
+        let mut encoded = logical.to_vec();
+        encoded.resize(padded_size, 0);
+        encoded.extend_from_slice(&adler32(&encoded).to_le_bytes());
+        assert!(
+            validate_ewf2_logical_final_raw_checksum(&encoded, logical.len(), padded_size).is_ok()
+        );
+
+        encoded[padded_size] ^= 1;
+        assert!(matches!(
+            validate_ewf2_logical_final_raw_checksum(&encoded, logical.len(), padded_size),
+            Err(EwfError::Malformed(msg)) if msg == "raw chunk checksum mismatch"
+        ));
+
+        // A valid checksum at the logical offset cannot rescue a sector-shaped
+        // chunk containing nonzero padding.
+        encoded[logical.len()..logical.len() + 4].copy_from_slice(&adler32(logical).to_le_bytes());
+        assert!(matches!(
+            validate_ewf2_logical_final_raw_checksum(&encoded, logical.len(), padded_size),
+            Err(EwfError::Malformed(msg)) if msg == "raw logical chunk has nonzero sector padding"
+        ));
+    }
 
     struct ObservedReader {
         cursor: Cursor<Vec<u8>>,

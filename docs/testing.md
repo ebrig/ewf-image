@@ -205,6 +205,21 @@ EWF_ENCASE7_LX01_FIXTURE=/absolute/path/ntfs.Lx01 \
   external_cli_encase7_lx01_verifies_with_external_digest -- --ignored --exact
 ```
 
+### EnCase Imager 7.10 stored Lx01 regression
+
+The opt-in raw-media comparison uses the pinned
+[uncompressed EnCase Imager 7.10 sample](https://github.com/abrignoni/ewfprobe/blob/7aaeb95f1f49c56a6365beb745e8ba43f687448b/tests/fixtures/lx01-encase-imager-710-nocomp.Lx01).
+The sample was made from synthetic files. The test verifies the download
+hash, checks the exact 69,103-byte length and EOF, and compares the decoded
+stream with libewf's raw export. It does not assert catalog file extraction.
+
+```bash
+EWF_ENCASE_IMAGER_710_STORED_LX01_FIXTURE=/absolute/path/lx01-encase-imager-710-nocomp.Lx01 \
+  EWFEXPORT=/absolute/path/ewfexport \
+  cargo test --locked -p ewf-image --features external-fixtures --test corpus \
+  external_encase_imager_710_stored_lx01_matches_libewf -- --ignored --exact
+```
+
 ## Interoperability CI
 
 The interoperability CI job builds libewf **20260924** from its release archive,
