@@ -34,11 +34,24 @@ The workflow uses OpenID Connect to obtain a short-lived crates.io token; do not
 store a long-lived registry token in GitHub. The GitHub `release` environment
 may additionally require reviewers for a manual approval boundary.
 
+### GitHub deployment tag rules
+
+In **Settings → Environments → release**, set **Deployment branches and tags**
+to **Selected branches and tags**. Add both patterns as **Tag** rules. GitHub
+checks these rules before starting the publishing job.
+[Repository environments](https://github.com/ebrig/ewf-image/settings/environments)
+
+| Crate | Tag pattern |
+| --- | --- |
+| `ewf-image` | `v*` |
+| `aff4-image` | `aff4-image-v*` |
+
 ### Each release
 
 1. Commit the release preparation and confirm the tree is clean.
 2. Confirm the six required CI checks passed on the exact `main` commit to be
-   released.
+   released and the [release environment](#github-deployment-tag-rules) allows
+   the intended tag.
 3. Create and push an annotated `vMAJOR.MINOR.PATCH` tag for `ewf-image`, or an
    annotated `aff4-image-vMAJOR.MINOR.PATCH` tag for `aff4-image`, at that commit.
    The `Publish crates` workflow selects the crate from this tag prefix and
