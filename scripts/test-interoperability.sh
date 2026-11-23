@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Compare generated fixtures and Rust writer output with pinned libewf.
-# Include the EnCase checks when EWF_ENCASE7_LX01_FIXTURE is set.
+# Include native EnCase checks when their fixture paths are set.
 set -euo pipefail
 
 prefix=${1:?usage: test-interoperability.sh ABSOLUTE_LIBEWF_PREFIX}
@@ -32,6 +32,9 @@ run_case() {
 if [[ -n ${EWF_ENCASE7_LX01_FIXTURE:-} ]]; then
   run_case corpus external_encase7_lx01_issue_31_matches_libewf
   run_case ewf_cli external_cli_encase7_lx01_verifies_with_external_digest
+fi
+if [[ -n ${EWF_ENCASE_IMAGER_710_STORED_LX01_FIXTURE:-} ]]; then
+  run_case corpus external_encase_imager_710_stored_lx01_matches_libewf
 fi
 run_case corpus ewf_tool_generated_fixture_matrix_matches_oracles
 run_case corpus external_writer_outputs_match_ewfexport_stdout
